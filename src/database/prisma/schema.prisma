@@ -1,0 +1,441 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Patient {
+  id               String        @id @default(uuid())
+  uhid             String        @unique
+  abhaId           String?       @unique
+  abhaAddress      String?
+  firstName        String
+  lastName         String
+  gender           Gender
+  dob              DateTime
+  mobile           String        @unique
+  email            String?
+  address          Json
+  bloodGroup       String?
+  emergencyContact Json?
+  isActive         Boolean       @default(true)
+  
+  abhaRecord       AbhaRecord?
+  encounters       Encounter[]
+  consents         Consent[]
+  appointments     Appointment[]
+  careContexts     CareContext[]
+  
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  
+  @@index([abhaId])
+  @@index([mobile])
+  @@index([uhid])
+  @@map("patients")
+}
+
+model AbhaRecord {
+  id              String    @id @default(uuid())
+  abhaNumber      String    @unique
+  abhaAddress     String?
+  patientId       String?   @unique
+  
+  aadhaarLinked   Boolean   @default(false)
+  mobileLinked    Boolean   @default(false)
+  
+  kycStatus       KycStatus @default(PENDING)
+  profileData     Json?
+  
+  patient         Patient?  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([abhaNumber])
+  @@map("abha_records")
+}
+
+model Doctor {
+  id              String        @id @default(uuid())
+  hprId           String?       @unique
+  firstName       String
+  lastName        String
+  specialization  String
+  qualification   String
+  registrationNo  String        @unique
+  mobile          String
+  email           String
+  isActive        Boolean       @default(true)
+  
+  departmentId    String
+  department      Department    @relation(fields: [departmentId], references: [id])
+  
+  encounters      Encounter[]
+  appointments    Appointment[]
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  
+  @@index([hprId])
+  @@index([registrationNo])
+  @@map("doctors")
+}
+
+model Department {
+  id          String    @id @default(uuid())
+  name        String
+  code        String    @unique
+  description String?
+  
+  facilityId  String
+  facility    Facility  @relation(fields: [facilityId], references: [id])
+  
+  doctors     Doctor[]
+  
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@map("departments")
+}
+
+model Facility {
+  id          String         @id @default(uuid())
+  hfrId       String?        @unique
+  name        String
+  type        FacilityType
+  address     Json
+  contact     Json
+  
+  departments Department[]
+  
+  isActive    Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  
+  @@index([hfrId])
+  @@map("facilities")
+}
+
+model Encounter {
+  id              String          @id @default(uuid())
+  encounterId     String          @unique
+  type            EncounterType
+  
+  patientId       String
+  patient         Patient         @relation(fields: [patientId], references: [id])
+  
+  doctorId        String
+  doctor          Doctor          @relation(fields: [doctorId], references: [id])
+  
+  chiefComplaint  String
+  diagnosis       String?
+  prescription    Json?
+  vitalSigns      Json?
+  notes           String?
+  
+  status          EncounterStatus @default(SCHEDULED)
+  visitDate       DateTime
+  
+  careContextId   String?         @unique
+  careContext     CareContext?
+  
+  emrRecords      EmrRecord[]
+  
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([visitDate])
+  @@map("encounters")
+}
+
+model EmrRecord {
+  id              String      @id @default(uuid())
+  
+  encounterId     String
+  encounter       Encounter   @relation(fields: [encounterId], references: [id])
+  
+  resourceType    String
+  fhirData        Json
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  
+  @@index([encounterId])
+  @@map("emr_records")
+}
+
+model CareContext {
+  id              String    @id @default(uuid())
+  careContextId   String    @unique
+  
+  patientId       String
+  patient         Patient   @relation(fields: [patientId], references: [id])
+  
+  encounterId     String    @unique
+  encounter       Encounter @relation(fields: [encounterId], references: [id])
+  
+  display         String
+  referenceNumber String?
+  
+  hipId           String
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([patientId])
+  @@index([careContextId])
+  @@map("care_contexts")
+}
+
+model Consent {
+  id              String         @id @default(uuid())
+  consentId       String         @unique
+  
+  patientId       String
+  patient         Patient        @relation(fields: [patientId], references: [id])
+  
+  requesterId     String
+  requesterName   String?
+  purpose         ConsentPurpose
+  
+  hiTypes         String[]
+  dateRange       Json
+  
+  status          ConsentStatus  @default(REQUESTED)
+  grantedAt       DateTime?
+  expiresAt       DateTime?
+  revokedAt       DateTime?
+  
+  abdmRequestId   String?
+  abdmConsentId   String?
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  @@index([patientId])
+  @@index([status])
+  @@index([consentId])
+  @@map("consents")
+}
+
+model Appointment {
+  id              String            @id @default(uuid())
+  appointmentId   String            @unique
+  
+  patientId       String
+  patient         Patient           @relation(fields: [patientId], references: [id])
+  
+  doctorId        String
+  doctor          Doctor            @relation(fields: [doctorId], references: [id])
+  
+  scheduledAt     DateTime
+  duration        Int               @default(30)
+  
+  type            AppointmentType   @default(OPD)
+  status          AppointmentStatus @default(SCHEDULED)
+  
+  notes           String?
+  
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([scheduledAt])
+  @@map("appointments")
+}
+
+model AuditLog {
+  id              String    @id @default(uuid())
+  
+  action          String
+  module          String
+  
+  userId          String?
+  userType        UserType
+  
+  resourceType    String
+  resourceId      String?
+  
+  ipAddress       String?
+  userAgent       String?
+  
+  requestData     Json?
+  responseData    Json?
+  
+  status          String
+  errorMessage    String?
+  
+  timestamp       DateTime  @default(now())
+  
+  @@index([userId])
+  @@index([timestamp])
+  @@index([module])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+model AbdmTransaction {
+  id              String    @id @default(uuid())
+  
+  transactionId   String    @unique
+  requestId       String?
+  
+  apiEndpoint     String
+  method          String
+  
+  requestPayload  Json
+  responsePayload Json?
+  
+  statusCode      Int?
+  success         Boolean
+  
+  errorMessage    String?
+  duration        Int?
+  
+  timestamp       DateTime  @default(now())
+  
+  @@index([timestamp])
+  @@index([success])
+  @@map("abdm_transactions")
+}
+
+model User {
+  id            String         @id @default(uuid())
+  username      String         @unique
+  email         String         @unique
+  password      String
+  
+  firstName     String
+  lastName      String
+  
+  role          UserRole
+  
+  isActive      Boolean        @default(true)
+  lastLoginAt   DateTime?
+  
+  notifications Notification[]
+  
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  
+  @@index([email])
+  @@index([username])
+  @@map("users")
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  type      NotificationType @default(INFO)
+  title     String
+  message   String
+  category  String           @default("system")
+  
+  read      Boolean          @default(false)
+  
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  
+  @@index([userId])
+  @@index([read])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum EncounterType {
+  OPD
+  IPD
+  EMERGENCY
+  TELECONSULTATION
+}
+
+enum EncounterStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ConsentStatus {
+  REQUESTED
+  GRANTED
+  DENIED
+  EXPIRED
+  REVOKED
+}
+
+enum ConsentPurpose {
+  CARE_MANAGEMENT
+  BREAK_THE_GLASS
+  PUBLIC_HEALTH
+  DISEASE_SPECIFIC_HEALTHCARE_RESEARCH
+}
+
+enum KycStatus {
+  PENDING
+  VERIFIED
+  FAILED
+}
+
+enum UserType {
+  PATIENT
+  DOCTOR
+  ADMIN
+  SYSTEM
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  DOCTOR
+  NURSE
+  RECEPTIONIST
+  LAB_TECHNICIAN
+  PHARMACIST
+}
+
+enum FacilityType {
+  HOSPITAL
+  CLINIC
+  DIAGNOSTIC_CENTER
+  PHARMACY
+}
+
+enum AppointmentType {
+  OPD
+  TELECONSULTATION
+  FOLLOW_UP
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum NotificationType {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
