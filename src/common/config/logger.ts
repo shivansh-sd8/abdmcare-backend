@@ -24,11 +24,16 @@ const consoleFormat = winston.format.combine(
   })
 );
 
-const logger = winston.createLogger({
-  level: logLevel,
-  format: logFormat,
-  defaultMeta: { service: 'medisync-abdm' },
-  transports: [
+const transports: winston.transport[] = [];
+
+if (process.env.NODE_ENV === 'production') {
+  transports.push(
+    new winston.transports.Console({
+      format: consoleFormat,
+    })
+  );
+} else {
+  transports.push(
     new DailyRotateFile({
       filename: path.join(logDir, 'error-%DATE%.log'),
       datePattern: 'YYYY-MM-DD',
@@ -42,15 +47,17 @@ const logger = winston.createLogger({
       maxFiles: '30d',
       maxSize: '20m',
     }),
-  ],
-});
-
-if (process.env.NODE_ENV !== 'production') {
-  logger.add(
     new winston.transports.Console({
       format: consoleFormat,
     })
   );
 }
+
+const logger = winston.createLogger({
+  level: logLevel,
+  format: logFormat,
+  defaultMeta: { service: 'medisync-abdm' },
+  transports,
+});
 
 export default logger;
