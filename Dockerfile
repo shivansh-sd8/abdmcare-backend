@@ -34,4 +34,4 @@ ENV NODE_ENV=production
 EXPOSE 3000
 
 # Run migrations as root, then start app as node user
-CMD ["sh", "-c", "npx prisma migrate deploy --skip-generate && su -s /bin/sh node -c 'dumb-init node dist/server.js'"]
+CMD ["sh", "-c", "npx prisma migrate deploy && su -s /bin/sh node -c 'dumb-init node dist/server.js'"]
