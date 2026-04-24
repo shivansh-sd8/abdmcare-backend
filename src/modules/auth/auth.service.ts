@@ -9,13 +9,24 @@ interface RegisterData {
   username: string;
   firstName: string;
   lastName: string;
-  role?: 'SUPER_ADMIN' | 'ADMIN' | 'DOCTOR' | 'NURSE' | 'RECEPTIONIST';
+  role?: 'SUPER_ADMIN' | 'ADMIN' | 'DOCTOR' | 'NURSE' | 'RECEPTIONIST' | 'LAB_TECHNICIAN' | 'PHARMACIST';
+  hospitalId?: string;
 }
 
 export class AuthService {
   async login(email: string, password: string) {
     const user = await prisma.user.findUnique({
       where: { email },
+      select: {
+        id: true,
+        email: true,
+        password: true,
+        username: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        hospitalId: true,
+      },
     });
 
     if (!user) {
@@ -32,12 +43,14 @@ export class AuthService {
       id: user.id,
       email: user.email,
       role: user.role,
+      hospitalId: user.hospitalId || undefined,
     });
 
     const refreshToken = generateRefreshToken({
       id: user.id,
       email: user.email,
       role: user.role,
+      hospitalId: user.hospitalId || undefined,
     });
 
     return {
@@ -54,7 +67,7 @@ export class AuthService {
     };
   }
 
-  async register(data: RegisterData) {
+  async register(data: RegisterData, currentUser?: any) {
     const existingUser = await prisma.user.findUnique({
       where: { email: data.email },
     });
@@ -65,6 +78,12 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(data.password, 10);
 
+    // Auto-assign hospitalId for ADMIN users creating staff
+    let hospitalId = data.hospitalId;
+    if (currentUser?.role === 'ADMIN' && currentUser?.hospitalId) {
+      hospitalId = currentUser.hospitalId;
+    }
+
     const user = await prisma.user.create({
       data: {
         email: data.email,
@@ -73,6 +92,7 @@ export class AuthService {
         firstName: data.firstName,
         lastName: data.lastName,
         role: data.role || 'RECEPTIONIST',
+        hospitalId,
       },
     });
 
@@ -80,6 +100,7 @@ export class AuthService {
       id: user.id,
       email: user.email,
       role: user.role,
+      hospitalId: user.hospitalId || undefined,
     });
 
     const refreshToken = generateRefreshToken({
@@ -110,5 +131,101 @@ export class AuthService {
     });
 
     return { token };
+  }
+
+  async getAllUsers(currentUser: any) {
+    const where: any = {};
+    
+    // ADMIN can only see users from their hospital
+    if (currentUser.role === 'ADMIN' && currentUser.hospitalId) {
+      where.hospitalId = currentUser.hospitalId;
+    }
+    // SUPER_ADMIN sees all users
+
+    const users = await prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        hospitalId: true,
+        hospital: {
+          select: {
+            name: true,
+            code: true,
+          },
+        },
+        isActive: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    return { data: users };
+  }
+
+  async getUserById(id: string) {
+    const user = await prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        hospitalId: true,
+        hospital: {
+          select: {
+            name: true,
+            code: true,
+          },
+        },
+        isActive: true,
+        createdAt: true,
+      },
+    });
+
+    if (!user) {
+      throw new AppError('User not found', 404);
+    }
+
+    return user;
+  }
+
+  async updateUser(id: string, data: any) {
+    const user = await prisma.user.update({
+      where: { id },
+      data: {
+        firstName: data.firstName,
+        lastName: data.lastName,
+        email: data.email,
+        role: data.role,
+        hospitalId: data.hospitalId,
+      },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        hospitalId: true,
+        isActive: true,
+      },
+    });
+
+    return user;
+  }
+
+  async deleteUser(id: string) {
+    await prisma.user.delete({
+      where: { id },
+    });
   }
 }

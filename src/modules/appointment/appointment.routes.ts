@@ -2,7 +2,7 @@ import { Router } from 'express';
 import appointmentController from './appointment.controller';
 import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
-import { authenticate } from '../../common/middleware/auth';
+import { authenticate, authorize } from '../../common/middleware/auth';
 
 const router = Router();
 
@@ -10,6 +10,7 @@ router.use(authenticate);
 
 router.post(
   '/',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
   [
     body('patientId').notEmpty().withMessage('Patient ID is required'),
     body('doctorId').notEmpty().withMessage('Doctor ID is required'),
@@ -21,14 +22,34 @@ router.post(
   appointmentController.createAppointment
 );
 
-router.get('/stats', appointmentController.getAppointmentStats);
+router.get(
+  '/stats',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
+  appointmentController.getAppointmentStats
+);
 
-router.get('/search', appointmentController.searchAppointments);
+router.get(
+  '/search',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  appointmentController.searchAppointments
+);
 
-router.get('/:id', appointmentController.getAppointmentById);
+router.get(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  appointmentController.getAppointmentById
+);
 
-router.put('/:id', appointmentController.updateAppointment);
+router.put(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
+  appointmentController.updateAppointment
+);
 
-router.post('/:id/cancel', appointmentController.cancelAppointment);
+router.post(
+  '/:id/cancel',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
+  appointmentController.cancelAppointment
+);
 
 export default router;

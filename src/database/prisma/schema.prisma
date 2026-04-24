@@ -10,8 +10,13 @@ datasource db {
 model Patient {
   id               String        @id @default(uuid())
   uhid             String        @unique
+  
+  // ABDM Identity (Cross-Hospital)
   abhaId           String?       @unique
   abhaAddress      String?
+  abhaNumber       String?       @unique
+  
+  // Basic Info
   firstName        String
   lastName         String
   gender           Gender
@@ -21,18 +26,27 @@ model Patient {
   address          Json
   bloodGroup       String?
   emergencyContact Json?
+  
+  // Patient is NOT owned by hospital
+  // Access is controlled via Consent model
   isActive         Boolean       @default(true)
   
+  // Relations
   abhaRecord       AbhaRecord?
   encounters       Encounter[]
   consents         Consent[]
   appointments     Appointment[]
   careContexts     CareContext[]
+  prescriptions    Prescription[]
+  vitals           Vitals[]
+  investigations   Investigation[]
+  payments         Payment[]
   
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
   
   @@index([abhaId])
+  @@index([abhaNumber])
   @@index([mobile])
   @@index([uhid])
   @@map("patients")
@@ -71,17 +85,23 @@ model Doctor {
   email           String
   isActive        Boolean       @default(true)
   
+  hospitalId      String?
+  hospital        Hospital?     @relation(fields: [hospitalId], references: [id])
+  
   departmentId    String
   department      Department    @relation(fields: [departmentId], references: [id])
   
   encounters      Encounter[]
   appointments    Appointment[]
+  prescriptions   Prescription[]
+  investigations  Investigation[]
   
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   
   @@index([hprId])
   @@index([registrationNo])
+  @@index([hospitalId])
   @@map("doctors")
 }
 
@@ -90,6 +110,9 @@ model Department {
   name        String
   code        String    @unique
   description String?
+  
+  hospitalId  String?
+  hospital    Hospital? @relation(fields: [hospitalId], references: [id])
   
   facilityId  String
   facility    Facility  @relation(fields: [facilityId], references: [id])
@@ -100,6 +123,7 @@ model Department {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   
+  @@index([hospitalId])
   @@map("departments")
 }
 
@@ -235,6 +259,9 @@ model Appointment {
   doctorId        String
   doctor          Doctor            @relation(fields: [doctorId], references: [id])
   
+  hospitalId      String?
+  hospital        Hospital?         @relation(fields: [hospitalId], references: [id])
+  
   scheduledAt     DateTime
   duration        Int               @default(30)
   
@@ -242,14 +269,151 @@ model Appointment {
   status          AppointmentStatus @default(SCHEDULED)
   
   notes           String?
+  payments        Payment[]
   
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
   
   @@index([patientId])
   @@index([doctorId])
+  @@index([hospitalId])
   @@index([scheduledAt])
   @@map("appointments")
+}
+
+model Prescription {
+  id              String    @id @default(uuid())
+  
+  patientId       String
+  patient         Patient   @relation(fields: [patientId], references: [id])
+  
+  doctorId        String
+  doctor          Doctor    @relation(fields: [doctorId], references: [id])
+  
+  encounterId     String?
+  
+  medications     Json      // Array of {name, dosage, frequency, duration, instructions}
+  diagnosis       String?
+  notes           String?
+  
+  issuedAt        DateTime  @default(now())
+  validUntil      DateTime?
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([issuedAt])
+  @@map("prescriptions")
+}
+
+model Vitals {
+  id              String    @id @default(uuid())
+  
+  patientId       String
+  patient         Patient   @relation(fields: [patientId], references: [id])
+  
+  encounterId     String?
+  
+  temperature     Float?    // Celsius
+  bloodPressureSystolic   Int?
+  bloodPressureDiastolic  Int?
+  heartRate       Int?      // BPM
+  respiratoryRate Int?      // Breaths per minute
+  oxygenSaturation Float?   // SpO2 percentage
+  weight          Float?    // kg
+  height          Float?    // cm
+  bmi             Float?
+  
+  recordedBy      String?
+  notes           String?
+  
+  recordedAt      DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([patientId])
+  @@index([recordedAt])
+  @@map("vitals")
+}
+
+model Investigation {
+  id              String              @id @default(uuid())
+  
+  patientId       String
+  patient         Patient             @relation(fields: [patientId], references: [id])
+  
+  doctorId        String
+  doctor          Doctor              @relation(fields: [doctorId], references: [id])
+  
+  hospitalId      String
+  hospital        Hospital            @relation(fields: [hospitalId], references: [id])
+  
+  encounterId     String?
+  
+  testName        String
+  testType        String              // LAB, RADIOLOGY, etc.
+  instructions    String?
+  
+  status          InvestigationStatus @default(ORDERED)
+  priority        String?             // ROUTINE, URGENT, STAT
+  
+  orderedAt       DateTime            @default(now())
+  sampleCollectedAt DateTime?
+  resultEnteredAt   DateTime?
+  reportedAt        DateTime?
+  
+  results         Json?
+  reportUrl       String?
+  notes           String?
+  
+  labTechnicianId String?
+  
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([hospitalId])
+  @@index([status])
+  @@index([orderedAt])
+  @@map("investigations")
+}
+
+model Payment {
+  id              String        @id @default(uuid())
+  
+  patientId       String
+  patient         Patient       @relation(fields: [patientId], references: [id])
+  
+  hospitalId      String
+  hospital        Hospital      @relation(fields: [hospitalId], references: [id])
+  
+  appointmentId   String?
+  appointment     Appointment?  @relation(fields: [appointmentId], references: [id])
+  
+  amount          Float
+  paymentMethod   PaymentMethod
+  status          PaymentStatus @default(PENDING)
+  
+  transactionId   String?       @unique
+  receiptNumber   String?       @unique
+  
+  description     String?
+  items           Json?         // Itemized billing
+  
+  paidAt          DateTime?
+  createdBy       String?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  
+  @@index([patientId])
+  @@index([hospitalId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("payments")
 }
 
 model AuditLog {
@@ -259,6 +423,7 @@ model AuditLog {
   module          String
   
   userId          String?
+  user            User?     @relation(fields: [userId], references: [id])
   userType        UserType
   
   resourceType    String
@@ -307,6 +472,70 @@ model AbdmTransaction {
   @@map("abdm_transactions")
 }
 
+enum HospitalPlan {
+  FREE
+  BASIC
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum HospitalStatus {
+  ACTIVE
+  SUSPENDED
+  TRIAL
+  EXPIRED
+}
+
+model Hospital {
+  id          String   @id @default(uuid())
+  name        String
+  code        String   @unique
+  
+  // Contact & Location
+  address     String?
+  city        String?
+  state       String?
+  pincode     String?
+  phone       String?
+  email       String?
+  
+  // Subscription & Plan
+  plan        HospitalPlan    @default(FREE)
+  status      HospitalStatus  @default(TRIAL)
+  trialEndsAt DateTime?
+  subscriptionEndsAt DateTime?
+  
+  // ABDM Integration
+  hipId       String?  @unique
+  hiuId       String?  @unique
+  abdmEnabled Boolean  @default(false)
+  
+  // Primary Admin (Hospital Owner)
+  primaryAdminId String? @unique
+  
+  // Limits based on plan
+  maxUsers    Int      @default(5)
+  maxPatients Int      @default(100)
+  
+  isActive    Boolean  @default(true)
+  
+  // Relations
+  users       User[]
+  doctors     Doctor[]
+  appointments Appointment[]
+  departments  Department[]
+  investigations Investigation[]
+  payments     Payment[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([code])
+  @@index([status])
+  @@index([plan])
+  @@map("hospitals")
+}
+
 model User {
   id            String         @id @default(uuid())
   username      String         @unique
@@ -318,16 +547,21 @@ model User {
   
   role          UserRole
   
+  hospitalId    String?
+  hospital      Hospital?      @relation(fields: [hospitalId], references: [id])
+  
   isActive      Boolean        @default(true)
   lastLoginAt   DateTime?
   
   notifications Notification[]
+  auditLogs     AuditLog[]
   
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   
   @@index([email])
   @@index([username])
+  @@index([hospitalId])
   @@map("users")
 }
 
@@ -438,4 +672,28 @@ enum NotificationType {
   SUCCESS
   WARNING
   ERROR
+}
+
+enum InvestigationStatus {
+  ORDERED
+  SAMPLE_COLLECTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+  NET_BANKING
+  INSURANCE
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  PARTIAL
+  REFUNDED
+  CANCELLED
 }

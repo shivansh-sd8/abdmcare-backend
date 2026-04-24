@@ -2,7 +2,7 @@ import { Router } from 'express';
 import doctorController from './doctor.controller';
 import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
-import { authenticate } from '../../common/middleware/auth';
+import { authenticate, authorize } from '../../common/middleware/auth';
 
 const router = Router();
 
@@ -10,6 +10,7 @@ router.use(authenticate);
 
 router.post(
   '/',
+  authorize('SUPER_ADMIN', 'ADMIN'),
   [
     body('firstName').notEmpty().withMessage('First name is required'),
     body('lastName').notEmpty().withMessage('Last name is required'),
@@ -23,14 +24,34 @@ router.post(
   doctorController.createDoctor
 );
 
-router.get('/stats', doctorController.getDoctorStats);
+router.get(
+  '/stats',
+  authorize('SUPER_ADMIN', 'ADMIN'),
+  doctorController.getDoctorStats
+);
 
-router.get('/search', doctorController.searchDoctors);
+router.get(
+  '/search',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
+  doctorController.searchDoctors
+);
 
-router.get('/:id', doctorController.getDoctorById);
+router.get(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
+  doctorController.getDoctorById
+);
 
-router.put('/:id', doctorController.updateDoctor);
+router.put(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ADMIN'),
+  doctorController.updateDoctor
+);
 
-router.delete('/:id', doctorController.deleteDoctor);
+router.delete(
+  '/:id',
+  authorize('SUPER_ADMIN'),
+  doctorController.deleteDoctor
+);
 
 export default router;
