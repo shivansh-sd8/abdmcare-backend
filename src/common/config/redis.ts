@@ -9,8 +9,9 @@ const redisClient = createClient({
   password: process.env.REDIS_PASSWORD || undefined,
 });
 
-redisClient.on('error', (err) => {
-  logger.error('Redis Client Error', err);
+// Suppress error logs since Redis is optional
+redisClient.on('error', () => {
+  // Silently ignore Redis connection errors
 });
 
 redisClient.on('connect', () => {
