@@ -82,6 +82,9 @@
     "ts-jest": "^29.1.1",
     "supertest": "^6.3.4"
   },
+  "prisma": {
+    "schema": "src/database/prisma/schema.prisma"
+  },
   "engines": {
     "node": ">=20.0.0",
     "npm": ">=10.0.0"

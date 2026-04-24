@@ -13,11 +13,13 @@ const app: Application = express();
 
 app.use(helmet());
 
+const corsOrigin = config.app.env === 'development' 
+  ? (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:5173').split(',')
+  : config.cors.origin;
+
 app.use(
   cors({
-    origin: config.app.env === 'development' 
-      ? ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5173']
-      : config.cors.origin,
+    origin: corsOrigin,
     credentials: true,
   })
 );
