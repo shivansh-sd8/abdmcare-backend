@@ -13,9 +13,15 @@ const app: Application = express();
 
 app.use(helmet());
 
-const corsOrigin = config.app.env === 'development' 
-  ? (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:5173').split(',')
-  : config.cors.origin;
+let corsOrigin: string | string[] | boolean = '*';
+
+if (config.app.env === 'development') {
+  corsOrigin = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:5173').split(',');
+} else if (process.env.CORS_ORIGIN) {
+  corsOrigin = process.env.CORS_ORIGIN.split(',');
+} else {
+  corsOrigin = true;
+}
 
 app.use(
   cors({
