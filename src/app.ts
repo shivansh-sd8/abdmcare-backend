@@ -15,10 +15,10 @@ app.use(helmet());
 
 let corsOrigin: string | string[] | boolean = '*';
 
-if (config.app.env === 'development') {
-  corsOrigin = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:5173').split(',');
-} else if (process.env.CORS_ORIGIN) {
-  corsOrigin = process.env.CORS_ORIGIN.split(',');
+if (process.env.CORS_ORIGIN) {
+  corsOrigin = process.env.CORS_ORIGIN.split(',').map(origin => origin.trim());
+} else if (process.env.CORS_ORIGINS) {
+  corsOrigin = process.env.CORS_ORIGINS.split(',').map(origin => origin.trim());
 } else {
   corsOrigin = true;
 }
