@@ -24,33 +24,32 @@ const consoleFormat = winston.format.combine(
   })
 );
 
-const transports: winston.transport[] = [];
+const transports: winston.transport[] = [
+  new winston.transports.Console({
+    format: consoleFormat,
+  })
+];
 
-if (process.env.NODE_ENV === 'production') {
-  transports.push(
-    new winston.transports.Console({
-      format: consoleFormat,
-    })
-  );
-} else {
-  transports.push(
-    new DailyRotateFile({
-      filename: path.join(logDir, 'error-%DATE%.log'),
-      datePattern: 'YYYY-MM-DD',
-      level: 'error',
-      maxFiles: '30d',
-      maxSize: '20m',
-    }),
-    new DailyRotateFile({
-      filename: path.join(logDir, 'combined-%DATE%.log'),
-      datePattern: 'YYYY-MM-DD',
-      maxFiles: '30d',
-      maxSize: '20m',
-    }),
-    new winston.transports.Console({
-      format: consoleFormat,
-    })
-  );
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    transports.push(
+      new DailyRotateFile({
+        filename: path.join(logDir, 'error-%DATE%.log'),
+        datePattern: 'YYYY-MM-DD',
+        level: 'error',
+        maxFiles: '30d',
+        maxSize: '20m',
+      }),
+      new DailyRotateFile({
+        filename: path.join(logDir, 'combined-%DATE%.log'),
+        datePattern: 'YYYY-MM-DD',
+        maxFiles: '30d',
+        maxSize: '20m',
+      })
+    );
+  } catch (error) {
+    console.warn('Failed to initialize file logging, using console only:', error);
+  }
 }
 
 const logger = winston.createLogger({

@@ -16,14 +16,16 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache dumb-init && \
-    mkdir -p /app/logs && \
-    chmod 755 /app/logs
+RUN apk add --no-cache dumb-init
 
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/src/database/prisma ./src/database/prisma
+
+RUN mkdir -p /app/logs && \
+    chown -R node:node /app/logs && \
+    chmod 755 /app/logs
 
 ENV NODE_ENV=production
 
