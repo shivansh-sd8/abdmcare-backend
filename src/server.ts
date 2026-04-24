@@ -4,6 +4,7 @@ import logger from './common/config/logger';
 import prisma from './common/config/database';
 import { connectRedis } from './common/config/redis';
 import EncryptionService from './common/utils/encryption';
+import { initializeDatabase } from './common/config/database-init';
 
 const PORT = config.app.port;
 
@@ -11,6 +12,8 @@ const startServer = async (): Promise<void> => {
   try {
     await prisma.$connect();
     logger.info('Database connected successfully');
+
+    await initializeDatabase();
 
     EncryptionService.loadRSAKeys();
     logger.info('RSA keys loaded');
