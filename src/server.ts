@@ -12,9 +12,6 @@ const startServer = async (): Promise<void> => {
     await prisma.$connect();
     logger.info('Database connected successfully');
 
-    await connectRedis();
-    logger.info('Redis connected successfully');
-
     EncryptionService.loadRSAKeys();
     logger.info('RSA keys loaded');
 
@@ -24,6 +21,8 @@ const startServer = async (): Promise<void> => {
       logger.info(`🌍 Environment: ${config.app.env}`);
       logger.info(`📊 Health check: http://localhost:${PORT}/health`);
     });
+
+    await connectRedis();
 
     const gracefulShutdown = async (signal: string): Promise<void> => {
       logger.info(`${signal} received. Starting graceful shutdown...`);
