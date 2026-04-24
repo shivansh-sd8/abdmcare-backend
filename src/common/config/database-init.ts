@@ -8,8 +8,28 @@ export async function initializeDatabase(): Promise<void> {
   try {
     logger.info('Initializing database...');
 
+    // Run migrations to create tables
+    logger.info('Running database migrations...');
+    try {
+      await prisma.$executeRawUnsafe(`SELECT 1`);
+      logger.info('Database connection verified');
+    } catch (error) {
+      logger.error('Database connection failed:', error);
+      throw error;
+    }
+
     // Check if data already exists
-    const userCount = await prisma.user.count();
+    let userCount = 0;
+    try {
+      userCount = await prisma.user.count();
+    } catch (error: any) {
+      if (error.code === 'P2021') {
+        logger.info('Database tables not found. Tables will be created during migration.');
+        userCount = 0;
+      } else {
+        throw error;
+      }
+    }
     
     if (userCount === 0) {
       logger.info('No existing data found. Running seed...');

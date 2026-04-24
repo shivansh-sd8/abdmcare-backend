@@ -33,4 +33,5 @@ EXPOSE 3000
 
 USER node
 
-CMD ["dumb-init", "node", "dist/server.js"]
+# Run migrations and start the app
+CMD ["sh", "-c", "npx prisma migrate deploy && dumb-init node dist/server.js"]
