@@ -21,8 +21,12 @@ export const connectRedis = async (): Promise<void> => {
   try {
     await redisClient.connect();
   } catch (error) {
-    logger.error('Failed to connect to Redis', error);
-    throw error;
+    logger.warn('Failed to connect to Redis', error);
+    if (process.env.NODE_ENV === 'production') {
+      logger.warn('Redis is optional in production. App will continue without caching.');
+    } else {
+      throw error;
+    }
   }
 };
 
