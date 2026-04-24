@@ -24,7 +24,7 @@ router.post(
 
 router.get(
   '/stats',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
   appointmentController.getAppointmentStats
 );
 

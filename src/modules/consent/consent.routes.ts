@@ -2,7 +2,7 @@ import { Router } from 'express';
 import consentController from './consent.controller';
 import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
-import { authenticate } from '../../common/middleware/auth';
+import { authenticate, authorize } from '../../common/middleware/auth';
 
 const router = Router();
 
@@ -14,6 +14,7 @@ router.use(authenticate);
 
 router.post(
   '/request',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
   [
     body('patientAbhaId').notEmpty().withMessage('Patient ABHA ID is required'),
     body('purpose').notEmpty().withMessage('Purpose is required'),
@@ -27,14 +28,14 @@ router.post(
   consentController.createConsentRequest
 );
 
-router.get('/', consentController.getAllConsents);
+router.get('/', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getAllConsents);
 
-router.get('/stats', consentController.getConsentStats);
+router.get('/stats', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getConsentStats);
 
-router.get('/patient/:patientId', consentController.getPatientConsents);
+router.get('/patient/:patientId', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getPatientConsents);
 
-router.get('/:id/artefact', consentController.fetchConsentArtefact);
+router.get('/:id/artefact', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.fetchConsentArtefact);
 
-router.post('/:id/revoke', consentController.revokeConsent);
+router.post('/:id/revoke', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.revokeConsent);
 
 export default router;

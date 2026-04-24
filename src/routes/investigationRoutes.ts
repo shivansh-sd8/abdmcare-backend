@@ -22,13 +22,13 @@ router.post(
 
 router.get(
   '/stats',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'LAB_TECHNICIAN'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'LAB_TECHNICIAN'),
   investigationController.getInvestigationStats
 );
 
 router.get(
   '/',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'LAB_TECHNICIAN'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'LAB_TECHNICIAN'),
   [
     query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
     query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100'),
@@ -39,7 +39,7 @@ router.get(
 
 router.get(
   '/:id',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'LAB_TECHNICIAN'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'LAB_TECHNICIAN'),
   investigationController.getInvestigationById
 );
 

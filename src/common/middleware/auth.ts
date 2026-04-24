@@ -54,7 +54,11 @@ export const authorize = (...roles: string[]) => {
       throw new AppError('User not authenticated', 401);
     }
 
-    if (!roles.includes(req.user.role)) {
+    // Case-insensitive role comparison
+    const userRole = req.user.role.toUpperCase();
+    const allowedRoles = roles.map(r => r.toUpperCase());
+    
+    if (!allowedRoles.includes(userRole)) {
       throw new AppError('Insufficient permissions', 403);
     }
 

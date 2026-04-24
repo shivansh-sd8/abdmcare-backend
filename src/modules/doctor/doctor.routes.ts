@@ -32,13 +32,13 @@ router.get(
 
 router.get(
   '/search',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
   doctorController.searchDoctors
 );
 
 router.get(
   '/:id',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
   doctorController.getDoctorById
 );
 

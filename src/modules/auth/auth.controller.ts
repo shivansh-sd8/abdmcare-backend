@@ -22,6 +22,12 @@ export class AuthController {
     ResponseHandler.created(res, 'User registered successfully', result);
   });
 
+  superAdminSignup = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
+    const { secretKey, ...userData } = req.body;
+    const result = await this.authService.superAdminSignup(userData, secretKey);
+    ResponseHandler.created(res, 'Super Admin registered successfully', result);
+  });
+
   refreshToken = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const { refreshToken } = req.body;
     const result = await this.authService.refreshToken(refreshToken);
@@ -40,20 +46,23 @@ export class AuthController {
 
   getUserById = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const { id } = req.params;
-    const user = await this.authService.getUserById(id);
+    const currentUser = (req as any).user;
+    const user = await this.authService.getUserById(id, currentUser);
     ResponseHandler.success(res, 'User retrieved successfully', user);
   });
 
   updateUser = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const { id } = req.params;
     const userData = req.body;
-    const user = await this.authService.updateUser(id, userData);
+    const currentUser = (req as any).user;
+    const user = await this.authService.updateUser(id, userData, currentUser);
     ResponseHandler.success(res, 'User updated successfully', user);
   });
 
   deleteUser = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const { id } = req.params;
-    await this.authService.deleteUser(id);
-    ResponseHandler.success(res, 'User deleted successfully');
+    const currentUser = (req as any).user;
+    await this.authService.deleteUser(id, currentUser);
+    ResponseHandler.success(res, 'User deactivated successfully');
   });
 }
