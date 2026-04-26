@@ -1,6 +1,7 @@
 import prisma from '../../common/config/database';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
+import bcrypt from 'bcryptjs';
 
 interface CreateDoctorRequest {
   hprId?: string;
@@ -11,6 +12,7 @@ interface CreateDoctorRequest {
   registrationNo: string;
   mobile: string;
   email?: string;
+  password: string;
   consultationFee?: number;
   experience?: number;
 }
@@ -27,7 +29,7 @@ interface UpdateDoctorRequest {
 }
 
 export class DoctorService {
-  async createDoctor(data: CreateDoctorRequest) {
+  async createDoctor(data: CreateDoctorRequest, currentUser?: any) {
     try {
       const existingDoctor = await prisma.doctor.findFirst({
         where: {
@@ -38,6 +40,22 @@ export class DoctorService {
       if (existingDoctor) {
         throw new AppError('Doctor with this registration number, email, or mobile already exists', 400);
       }
+
+      // Check if user with this email already exists
+      const existingUser = await prisma.user.findFirst({
+        where: {
+          OR: [{ email: data.email }, { username: data.email }],
+        },
+      });
+
+      if (existingUser) {
+        throw new AppError('User with this email already exists', 400);
+      }
+
+      // Set hospitalId from currentUser for non-SUPER_ADMIN users
+      const hospitalId = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
+        ? currentUser.hospitalId
+        : null;
 
       let facility = await prisma.facility.findFirst();
       if (!facility) {
@@ -63,10 +81,29 @@ export class DoctorService {
             code: departmentCode,
             description: `${data.specialization} Department`,
             facilityId: facility.id,
+            hospitalId,
           },
         });
       }
 
+      // Hash the password
+      const hashedPassword = await bcrypt.hash(data.password, 10);
+
+      // Create user account for the doctor
+      const user = await prisma.user.create({
+        data: {
+          username: data.email || data.registrationNo,
+          email: data.email || `${data.registrationNo}@hospital.com`,
+          password: hashedPassword,
+          firstName: data.firstName,
+          lastName: data.lastName,
+          role: 'DOCTOR',
+          hospitalId,
+          isActive: true,
+        },
+      });
+
+      // Create doctor record
       const doctor = await prisma.doctor.create({
         data: {
           hprId: data.hprId,
@@ -78,20 +115,31 @@ export class DoctorService {
           mobile: data.mobile,
           email: data.email || '',
           departmentId: department.id,
+          hospitalId,
         },
         include: {
           department: true,
         },
       });
 
-      logger.info('Doctor created successfully', {
+      logger.info('Doctor and user account created successfully', {
         doctorId: doctor.id,
+        userId: user.id,
+        hospitalId,
       });
 
       return {
         success: true,
-        data: doctor,
-        message: 'Doctor created successfully',
+        data: {
+          doctor,
+          user: {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+          },
+        },
+        message: 'Doctor and login credentials created successfully',
       };
     } catch (error: any) {
       logger.error('Failed to create doctor', error);
@@ -102,7 +150,7 @@ export class DoctorService {
     }
   }
 
-  async getDoctorById(id: string) {
+  async getDoctorById(id: string, currentUser?: any) {
     try {
       const doctor = await prisma.doctor.findUnique({
         where: { id },
@@ -123,6 +171,13 @@ export class DoctorService {
         throw new AppError('Doctor not found', 404);
       }
 
+      // Hospital isolation: Non-SUPER_ADMIN users can only access doctors from their hospital
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (doctor.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Doctor not found', 404);
+        }
+      }
+
       return {
         success: true,
         data: doctor,
@@ -136,7 +191,7 @@ export class DoctorService {
     }
   }
 
-  async updateDoctor(id: string, data: UpdateDoctorRequest) {
+  async updateDoctor(id: string, data: UpdateDoctorRequest, currentUser?: any) {
     try {
       const doctor = await prisma.doctor.findUnique({
         where: { id },
@@ -144,6 +199,13 @@ export class DoctorService {
 
       if (!doctor) {
         throw new AppError('Doctor not found', 404);
+      }
+
+      // Hospital isolation: Non-SUPER_ADMIN users can only update doctors from their hospital
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (doctor.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Cannot update doctor from another hospital', 403);
+        }
       }
 
       const updatedDoctor = await prisma.doctor.update({
@@ -176,13 +238,18 @@ export class DoctorService {
     }
   }
 
-  async searchDoctors(query: { search?: string; specialization?: string; page?: number; limit?: number }) {
+  async searchDoctors(query: { search?: string; specialization?: string; page?: number; limit?: number }, currentUser?: any) {
     try {
       const page = query.page || 1;
       const limit = query.limit || 10;
       const skip = (page - 1) * limit;
 
       const where: any = {};
+
+      // Filter by hospital for non-super-admin users
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        where.hospitalId = currentUser.hospitalId;
+      }
 
       if (query.search) {
         where.OR = [
@@ -199,6 +266,15 @@ export class DoctorService {
       const [doctors, total] = await Promise.all([
         prisma.doctor.findMany({
           where,
+          include: {
+            department: true,
+            hospital: {
+              select: {
+                name: true,
+                code: true,
+              },
+            },
+          },
           orderBy: {
             createdAt: 'desc',
           },
@@ -258,12 +334,17 @@ export class DoctorService {
     }
   }
 
-  async getDoctorStats() {
+  async getDoctorStats(currentUser?: any) {
     try {
+      const hospitalFilter = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
+        ? { hospitalId: currentUser.hospitalId }
+        : {};
+
       const [total, hprLinked] = await Promise.all([
-        prisma.doctor.count(),
+        prisma.doctor.count({ where: hospitalFilter }),
         prisma.doctor.count({
           where: {
+            ...hospitalFilter,
             hprId: { not: null },
           },
         }),
@@ -272,6 +353,7 @@ export class DoctorService {
       const specializations = await prisma.doctor.groupBy({
         by: ['specialization'],
         _count: true,
+        where: hospitalFilter,
       });
 
       return {

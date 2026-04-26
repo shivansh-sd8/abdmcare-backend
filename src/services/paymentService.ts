@@ -127,7 +127,7 @@ class PaymentService {
     };
   }
 
-  async getPaymentById(id: string) {
+  async getPaymentById(id: string, currentUser?: any) {
     const payment = await prisma.payment.findUnique({
       where: { id },
       include: {
@@ -144,7 +144,9 @@ class PaymentService {
           select: {
             name: true,
             code: true,
-            address: true,
+            addressLine1: true,
+            city: true,
+            state: true,
             phone: true,
             email: true,
           },
@@ -169,16 +171,26 @@ class PaymentService {
       throw new AppError('Payment not found', 404);
     }
 
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && payment.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Payment belongs to different hospital', 403);
+    }
+
     return payment;
   }
 
-  async updatePayment(id: string, data: UpdatePaymentDTO) {
+  async updatePayment(id: string, data: UpdatePaymentDTO, currentUser?: any) {
     const payment = await prisma.payment.findUnique({
       where: { id },
     });
 
     if (!payment) {
       throw new AppError('Payment not found', 404);
+    }
+
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && payment.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Payment belongs to different hospital', 403);
     }
 
     const updated = await prisma.payment.update({
@@ -202,12 +214,12 @@ class PaymentService {
     return updated;
   }
 
-  async markAsPaid(id: string, transactionId?: string) {
+  async markAsPaid(id: string, transactionId?: string, currentUser?: any) {
     return this.updatePayment(id, {
       status: 'PAID',
       transactionId,
       paidAt: new Date(),
-    });
+    }, currentUser);
   }
 
   async getPaymentStats(hospitalId?: string) {

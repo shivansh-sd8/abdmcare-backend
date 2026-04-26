@@ -31,19 +31,23 @@ export async function initializeDatabase(): Promise<void> {
       }
     }
     
-    if (userCount === 0) {
-      logger.info('No existing data found. Running seed...');
-      await seedDatabase();
-    } else {
-      logger.info(`Database already contains ${userCount} users. Skipping seed.`);
-    }
+    // Auto-seed disabled - run manually with: npm run seed
+    logger.info(`Database contains ${userCount} users. Auto-seed is disabled.`);
+    logger.info('To seed database manually, run: npm run seed');
+    
+    // if (userCount === 0) {
+    //   logger.info('No existing data found. Running seed...');
+    //   await seedDatabase();
+    // } else {
+    //   logger.info(`Database already contains ${userCount} users. Skipping seed.`);
+    // }
   } catch (error) {
     logger.error('Database initialization error:', error);
     throw error;
   }
 }
 
-async function seedDatabase(): Promise<void> {
+export async function seedDatabase(): Promise<void> {
   try {
     logger.info('🌱 Seeding database...');
 
@@ -77,9 +81,12 @@ async function seedDatabase(): Promise<void> {
       create: {
         name: 'MediSync General Hospital',
         code: 'MGH001',
-        address: '123 Healthcare Street',
+        type: 'MULTI_SPECIALTY',
+        addressLine1: '123 Healthcare Street',
+        addressLine2: 'Medical District',
         city: 'Mumbai',
         state: 'Maharashtra',
+        country: 'India',
         pincode: '400001',
         phone: '+91-22-12345678',
         email: 'info@medisync-hospital.com',
@@ -89,7 +96,9 @@ async function seedDatabase(): Promise<void> {
         hipId: 'MGH001@hip',
         hiuId: 'MGH001@hiu',
         maxUsers: 50,
-        maxPatients: 1000,
+        maxDoctors: 30,
+        maxPatients: 5000,
+        maxStorage: 20480,
       },
     });
 

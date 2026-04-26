@@ -8,6 +8,13 @@ const router = Router();
 router.use(authenticate);
 router.use(auditLog('PAYMENT'));
 
+// Get payment stats - ADMIN, SUPER_ADMIN (must be before /:id)
+router.get(
+  '/stats',
+  authorize('SUPER_ADMIN', 'ADMIN'),
+  paymentController.getPaymentStats
+);
+
 // Create payment - RECEPTIONIST, ADMIN, SUPER_ADMIN
 router.post(
   '/',
@@ -20,13 +27,6 @@ router.get(
   '/',
   authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
   paymentController.getAllPayments
-);
-
-// Get payment stats - ADMIN, SUPER_ADMIN
-router.get(
-  '/stats',
-  authorize('SUPER_ADMIN', 'ADMIN'),
-  paymentController.getPaymentStats
 );
 
 // Get payment by ID

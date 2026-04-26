@@ -29,12 +29,14 @@ class EncounterController {
   });
 
   getEncounterById = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const encounter = await encounterService.getEncounterById(req.params.id);
+    const currentUser = (req as any).user;
+    const encounter = await encounterService.getEncounterById(req.params.id, currentUser);
     ResponseHandler.success(res, 'Encounter retrieved successfully', encounter);
   });
 
   updateEncounter = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const encounter = await encounterService.updateEncounter(req.params.id, req.body);
+    const currentUser = (req as any).user;
+    const encounter = await encounterService.updateEncounter(req.params.id, req.body, currentUser);
     ResponseHandler.success(res, 'Encounter updated successfully', encounter);
   });
 

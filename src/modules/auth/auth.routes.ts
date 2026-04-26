@@ -29,7 +29,16 @@ const registerValidation = [
   body('lastName').notEmpty().withMessage('Last name is required'),
   body('username').isLength({ min: 3 }).withMessage('Username must be at least 3 characters'),
   body('phone').notEmpty().withMessage('Phone number is required'),
-  body('role').notEmpty().withMessage('Role is required'),
+  body('role')
+    .notEmpty().withMessage('Role is required')
+    .custom((value) => {
+      // Only allow specific roles - SUPER_ADMIN validation will be done in controller
+      const allowedRoles = ['SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'];
+      if (!allowedRoles.includes(value)) {
+        throw new Error(`Invalid role. Allowed roles: ${allowedRoles.join(', ')}`);
+      }
+      return true;
+    }),
 ];
 
 // Super Admin Signup - Public route with secret key

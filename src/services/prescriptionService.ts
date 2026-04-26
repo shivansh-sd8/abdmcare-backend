@@ -108,7 +108,7 @@ class PrescriptionService {
     };
   }
 
-  async getPrescriptionById(id: string) {
+  async getPrescriptionById(id: string, currentUser?: any) {
     const prescription = await prisma.prescription.findUnique({
       where: { id },
       include: {
@@ -129,6 +129,11 @@ class PrescriptionService {
       throw new AppError('Prescription not found', 404);
     }
 
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && prescription.patient.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Prescription belongs to different hospital', 403);
+    }
+
     return prescription;
   }
 
@@ -137,13 +142,21 @@ class PrescriptionService {
     diagnosis?: string;
     notes?: string;
     validUntil?: Date;
-  }) {
+  }, currentUser?: any) {
     const prescription = await prisma.prescription.findUnique({
       where: { id },
+      include: {
+        patient: true,
+      },
     });
 
     if (!prescription) {
       throw new AppError('Prescription not found', 404);
+    }
+
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && prescription.patient.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Prescription belongs to different hospital', 403);
     }
 
     const updated = await prisma.prescription.update({
@@ -163,13 +176,21 @@ class PrescriptionService {
     return updated;
   }
 
-  async deletePrescription(id: string) {
+  async deletePrescription(id: string, currentUser?: any) {
     const prescription = await prisma.prescription.findUnique({
       where: { id },
+      include: {
+        patient: true,
+      },
     });
 
     if (!prescription) {
       throw new AppError('Prescription not found', 404);
+    }
+
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && prescription.patient.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Prescription belongs to different hospital', 403);
     }
 
     await prisma.prescription.delete({

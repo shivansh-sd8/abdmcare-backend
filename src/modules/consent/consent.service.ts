@@ -296,9 +296,19 @@ export class ConsentService {
   }
 
   // Get all consents
-  async getAllConsents() {
+  async getAllConsents(currentUser?: any) {
     try {
+      const where: any = {};
+      
+      // Hospital isolation: Non-SUPER_ADMIN users can only see consents for patients from their hospital
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        where.patient = {
+          hospitalId: currentUser.hospitalId,
+        };
+      }
+
       const consents = await prisma.consent.findMany({
+        where,
         include: {
           patient: {
             select: {
@@ -328,14 +338,23 @@ export class ConsentService {
   }
 
   // Get consent statistics
-  async getConsentStats() {
+  async getConsentStats(currentUser?: any) {
     try {
+      const where: any = {};
+      
+      // Hospital isolation: Non-SUPER_ADMIN users can only see stats for patients from their hospital
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        where.patient = {
+          hospitalId: currentUser.hospitalId,
+        };
+      }
+
       const [total, granted, denied, pending, revoked] = await Promise.all([
-        prisma.consent.count(),
-        prisma.consent.count({ where: { status: 'GRANTED' } }),
-        prisma.consent.count({ where: { status: 'DENIED' } }),
-        prisma.consent.count({ where: { status: 'REQUESTED' } }),
-        prisma.consent.count({ where: { status: 'REVOKED' } }),
+        prisma.consent.count({ where }),
+        prisma.consent.count({ where: { ...where, status: 'GRANTED' } }),
+        prisma.consent.count({ where: { ...where, status: 'DENIED' } }),
+        prisma.consent.count({ where: { ...where, status: 'REQUESTED' } }),
+        prisma.consent.count({ where: { ...where, status: 'REVOKED' } }),
       ]);
 
       return {

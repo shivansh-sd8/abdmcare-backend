@@ -22,17 +22,20 @@ class PrescriptionController {
   });
 
   getPrescriptionById = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const prescription = await prescriptionService.getPrescriptionById(req.params.id);
+    const currentUser = (req as any).user;
+    const prescription = await prescriptionService.getPrescriptionById(req.params.id, currentUser);
     ResponseHandler.success(res, 'Prescription retrieved successfully', prescription);
   });
 
   updatePrescription = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const prescription = await prescriptionService.updatePrescription(req.params.id, req.body);
+    const currentUser = (req as any).user;
+    const prescription = await prescriptionService.updatePrescription(req.params.id, req.body, currentUser);
     ResponseHandler.success(res, 'Prescription updated successfully', prescription);
   });
 
   deletePrescription = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const result = await prescriptionService.deletePrescription(req.params.id);
+    const currentUser = (req as any).user;
+    const result = await prescriptionService.deletePrescription(req.params.id, currentUser);
     ResponseHandler.success(res, result.message);
   });
 }

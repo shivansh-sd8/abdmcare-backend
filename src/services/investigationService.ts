@@ -103,7 +103,7 @@ class InvestigationService {
     };
   }
 
-  async getInvestigationById(id: string) {
+  async getInvestigationById(id: string, currentUser?: any) {
     const investigation = await prisma.investigation.findUnique({
       where: { id },
       include: {
@@ -125,6 +125,11 @@ class InvestigationService {
       throw new AppError('Investigation not found', 404);
     }
 
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && investigation.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Investigation belongs to different hospital', 403);
+    }
+
     return investigation;
   }
 
@@ -133,13 +138,18 @@ class InvestigationService {
     reportUrl?: string;
     notes?: string;
     labTechnicianId?: string;
-  }) {
+  }, currentUser?: any) {
     const investigation = await prisma.investigation.findUnique({
       where: { id },
     });
 
     if (!investigation) {
       throw new AppError('Investigation not found', 404);
+    }
+
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && investigation.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Investigation belongs to different hospital', 403);
     }
 
     const updateData: any = { status };

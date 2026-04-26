@@ -19,6 +19,7 @@ router.post(
     body('registrationNo').notEmpty().withMessage('Registration number is required'),
     body('mobile').isMobilePhone('en-IN').withMessage('Valid mobile number is required'),
     body('email').optional().isEmail().withMessage('Valid email is required'),
+    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   ],
   validate,
   doctorController.createDoctor

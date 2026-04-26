@@ -60,6 +60,7 @@ export class AppointmentService {
           appointmentId: `APT-${Date.now()}`,
           patientId: data.patientId,
           doctorId: data.doctorId,
+          hospitalId: patient.hospitalId,
           scheduledAt: appointmentDateTime,
           type: (data.type as AppointmentType) || AppointmentType.OPD,
           notes: data.notes,
@@ -89,7 +90,7 @@ export class AppointmentService {
     }
   }
 
-  async getAppointmentById(id: string) {
+  async getAppointmentById(id: string, currentUser?: any) {
     try {
       const appointment = await prisma.appointment.findUnique({
         where: { id },
@@ -107,6 +108,13 @@ export class AppointmentService {
         throw new AppError('Appointment not found', 404);
       }
 
+      // Hospital isolation: Non-SUPER_ADMIN users can only access appointments from their hospital
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (appointment.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Appointment not found', 404);
+        }
+      }
+
       return {
         success: true,
         data: appointment,
@@ -120,7 +128,7 @@ export class AppointmentService {
     }
   }
 
-  async updateAppointment(id: string, data: UpdateAppointmentRequest) {
+  async updateAppointment(id: string, data: UpdateAppointmentRequest, currentUser?: any) {
     try {
       const appointment = await prisma.appointment.findUnique({
         where: { id },
@@ -128,6 +136,13 @@ export class AppointmentService {
 
       if (!appointment) {
         throw new AppError('Appointment not found', 404);
+      }
+
+      // Hospital isolation: Non-SUPER_ADMIN users can only update appointments from their hospital
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (appointment.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Cannot update appointment from another hospital', 403);
+        }
       }
 
       const updateData: any = {
@@ -176,13 +191,18 @@ export class AppointmentService {
     date?: string;
     page?: number;
     limit?: number;
-  }) {
+  }, currentUser?: any) {
     try {
       const page = query.page || 1;
       const limit = query.limit || 10;
       const skip = (page - 1) * limit;
 
       const where: any = {};
+
+      // Filter by hospital for non-super-admin users
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        where.hospitalId = currentUser.hospitalId;
+      }
 
       if (query.patientId) {
         where.patientId = query.patientId;
@@ -282,17 +302,153 @@ export class AppointmentService {
     }
   }
 
-  async getAppointmentStats() {
+  async checkInAppointment(id: string, _currentUser?: any) {
+    try {
+      const appointment = await prisma.appointment.findUnique({
+        where: { id },
+        include: {
+          patient: {
+            include: {
+              abhaRecord: true,
+            },
+          },
+          doctor: true,
+        },
+      });
+
+      if (!appointment) {
+        throw new AppError('Appointment not found', 404);
+      }
+
+      if (appointment.checkedInAt) {
+        throw new AppError('Appointment already checked in', 400);
+      }
+
+      // Generate OPD card number
+      const opdCardNumber = `OPD-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+
+      // Create Encounter
+      const encounterId = `ENC-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const encounter = await prisma.encounter.create({
+        data: {
+          encounterId,
+          patientId: appointment.patientId,
+          doctorId: appointment.doctorId,
+          type: appointment.type === 'OPD' ? 'OPD' : appointment.type === 'IPD' ? 'IPD' : 'EMERGENCY',
+          chiefComplaint: appointment.notes || 'OPD Visit',
+          visitDate: new Date(),
+          status: 'IN_PROGRESS',
+        },
+      });
+
+      // Create EMR Record (FHIR-compliant)
+      await prisma.emrRecord.create({
+        data: {
+          encounterId: encounter.id,
+          resourceType: 'Encounter',
+          fhirData: {
+            resourceType: 'Encounter',
+            id: encounter.encounterId,
+            status: 'in-progress',
+            class: {
+              system: 'http://terminology.hl7.org/CodeSystem/v3-ActCode',
+              code: encounter.type,
+              display: encounter.type,
+            },
+            subject: {
+              reference: `Patient/${appointment.patient.uhid}`,
+              display: `${appointment.patient.firstName} ${appointment.patient.lastName}`,
+            },
+            participant: [
+              {
+                individual: {
+                  reference: `Practitioner/${appointment.doctor.registrationNo}`,
+                  display: `Dr. ${appointment.doctor.firstName} ${appointment.doctor.lastName}`,
+                },
+              },
+            ],
+            period: {
+              start: encounter.visitDate.toISOString(),
+            },
+            reasonCode: [
+              {
+                text: encounter.chiefComplaint,
+              },
+            ],
+          },
+        },
+      });
+
+      // Create Care Context for ABHA (if patient has ABHA)
+      if (appointment.patient.abhaRecord) {
+        await prisma.careContext.create({
+          data: {
+            careContextId: `CC-${Date.now()}`,
+            patientId: appointment.patientId,
+            encounterId: encounter.id,
+            display: `OPD Visit - ${encounter.type}`,
+            referenceNumber: encounter.encounterId,
+            hipId: process.env.ABDM_HIP_ID || 'default-hip-id',
+          },
+        });
+      }
+
+      // Update appointment with check-in details
+      const updatedAppointment = await prisma.appointment.update({
+        where: { id },
+        data: {
+          checkedInAt: new Date(),
+          opdCardNumber,
+          encounterId: encounter.id,
+          status: 'IN_PROGRESS',
+        },
+        include: {
+          patient: true,
+          doctor: true,
+          encounter: true,
+        },
+      });
+
+      logger.info('Appointment checked in successfully', {
+        appointmentId: id,
+        encounterId: encounter.id,
+        opdCardNumber,
+      });
+
+      return {
+        success: true,
+        data: {
+          appointment: updatedAppointment,
+          encounter,
+          opdCardNumber,
+        },
+        message: 'Patient checked in successfully. OPD card generated.',
+      };
+    } catch (error: any) {
+      logger.error('Failed to check in appointment', error);
+      throw new AppError(
+        error.message || 'Failed to check in appointment',
+        error.statusCode || 500
+      );
+    }
+  }
+
+  async getAppointmentStats(currentUser?: any) {
     try {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
 
+      const hospitalFilter = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
+        ? { hospitalId: currentUser.hospitalId }
+        : {};
+
       const [total, todayCount, scheduled, completed, cancelled] = await Promise.all([
-        prisma.appointment.count(),
+        prisma.appointment.count({ where: hospitalFilter }),
         prisma.appointment.count({
           where: {
+            ...hospitalFilter,
             scheduledAt: {
               gte: today,
               lt: tomorrow,
@@ -300,13 +456,13 @@ export class AppointmentService {
           },
         }),
         prisma.appointment.count({
-          where: { status: 'SCHEDULED' },
+          where: { ...hospitalFilter, status: 'SCHEDULED' },
         }),
         prisma.appointment.count({
-          where: { status: 'COMPLETED' },
+          where: { ...hospitalFilter, status: 'COMPLETED' },
         }),
         prisma.appointment.count({
-          where: { status: 'CANCELLED' },
+          where: { ...hospitalFilter, status: 'CANCELLED' },
         }),
       ]);
 

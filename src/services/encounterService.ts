@@ -123,7 +123,7 @@ class EncounterService {
     };
   }
 
-  async getEncounterById(id: string) {
+  async getEncounterById(id: string, currentUser?: any) {
     const encounter = await prisma.encounter.findUnique({
       where: { id },
       include: {
@@ -144,16 +144,29 @@ class EncounterService {
       throw new AppError('Encounter not found', 404);
     }
 
+    // Hospital isolation check - use patient's hospitalId
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && encounter.patient.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Encounter belongs to different hospital', 403);
+    }
+
     return encounter;
   }
 
-  async updateEncounter(id: string, data: UpdateEncounterDTO) {
+  async updateEncounter(id: string, data: UpdateEncounterDTO, currentUser?: any) {
     const encounter = await prisma.encounter.findUnique({
       where: { id },
+      include: {
+        patient: true,
+      },
     });
 
     if (!encounter) {
       throw new AppError('Encounter not found', 404);
+    }
+
+    // Hospital isolation check - use patient's hospitalId
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && encounter.patient.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Encounter belongs to different hospital', 403);
     }
 
     const updated = await prisma.encounter.update({

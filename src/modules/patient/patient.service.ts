@@ -37,7 +37,7 @@ interface SearchPatientQuery {
 }
 
 export class PatientService {
-  async createPatient(data: CreatePatientRequest) {
+  async createPatient(data: CreatePatientRequest, currentUser?: any) {
     try {
       const existingPatient = await prisma.patient.findFirst({
         where: {
@@ -54,6 +54,11 @@ export class PatientService {
 
       const uhid = await this.generateUHID();
 
+      // Set hospitalId from currentUser for non-SUPER_ADMIN users
+      const hospitalId = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
+        ? currentUser.hospitalId
+        : null;
+
       const patient = await prisma.patient.create({
         data: {
           uhid,
@@ -67,6 +72,7 @@ export class PatientService {
           bloodGroup: data.bloodGroup,
           emergencyContact: data.emergencyContact || {},
           abhaId: data.abhaId,
+          hospitalId,
         },
         include: {
           abhaRecord: true,
@@ -76,6 +82,7 @@ export class PatientService {
       logger.info('Patient created successfully', {
         patientId: patient.id,
         uhid: patient.uhid,
+        hospitalId,
       });
 
       return {
@@ -92,7 +99,7 @@ export class PatientService {
     }
   }
 
-  async getPatientById(id: string) {
+  async getPatientById(id: string, currentUser?: any) {
     try {
       const patient = await prisma.patient.findUnique({
         where: { id },
@@ -120,6 +127,13 @@ export class PatientService {
         throw new AppError('Patient not found', 404);
       }
 
+      // Hospital isolation: Non-SUPER_ADMIN users can only access patients from their hospital
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (patient.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Patient not found', 404);
+        }
+      }
+
       return {
         success: true,
         data: patient,
@@ -133,7 +147,7 @@ export class PatientService {
     }
   }
 
-  async getPatientByUHID(uhid: string) {
+  async getPatientByUHID(uhid: string, currentUser?: any) {
     try {
       const patient = await prisma.patient.findUnique({
         where: { uhid },
@@ -144,6 +158,13 @@ export class PatientService {
 
       if (!patient) {
         throw new AppError('Patient not found', 404);
+      }
+
+      // Hospital isolation: Non-SUPER_ADMIN users can only access patients from their hospital
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (patient.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Patient not found', 404);
+        }
       }
 
       return {
@@ -203,13 +224,18 @@ export class PatientService {
     }
   }
 
-  async searchPatients(query: SearchPatientQuery) {
+  async searchPatients(query: SearchPatientQuery, currentUser?: any) {
     try {
       const page = query.page || 1;
       const limit = query.limit || 10;
       const skip = (page - 1) * limit;
 
       const where: Prisma.PatientWhereInput = {};
+
+      // Filter by hospital for non-super-admin users
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        where.hospitalId = currentUser.hospitalId;
+      }
 
       if (query.search) {
         where.OR = [
@@ -298,23 +324,29 @@ export class PatientService {
     }
   }
 
-  async getPatientStats() {
+  async getPatientStats(currentUser?: any) {
     try {
+      const hospitalFilter = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
+        ? { hospitalId: currentUser.hospitalId }
+        : {};
+
       const [total, abhaLinked, maleCount, femaleCount, todayCount] = await Promise.all([
-        prisma.patient.count(),
+        prisma.patient.count({ where: hospitalFilter }),
         prisma.patient.count({
           where: {
+            ...hospitalFilter,
             abhaId: { not: null },
           },
         }),
         prisma.patient.count({
-          where: { gender: Gender.MALE },
+          where: { ...hospitalFilter, gender: Gender.MALE },
         }),
         prisma.patient.count({
-          where: { gender: Gender.FEMALE },
+          where: { ...hospitalFilter, gender: Gender.FEMALE },
         }),
         prisma.patient.count({
           where: {
+            ...hospitalFilter,
             createdAt: {
               gte: new Date(new Date().setHours(0, 0, 0, 0)),
             },

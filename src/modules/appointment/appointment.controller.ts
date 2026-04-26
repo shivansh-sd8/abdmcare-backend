@@ -20,7 +20,8 @@ export class AppointmentController {
   getAppointmentById = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.appointmentService.getAppointmentById(id);
+      const currentUser = (req as any).user;
+      const result = await this.appointmentService.getAppointmentById(id, currentUser);
       ResponseHandler.success(res, 'Appointment fetched successfully', result.data);
     }
   );
@@ -28,7 +29,8 @@ export class AppointmentController {
   updateAppointment = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.appointmentService.updateAppointment(id, req.body);
+      const currentUser = (req as any).user;
+      const result = await this.appointmentService.updateAppointment(id, req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data);
     }
   );
@@ -43,8 +45,9 @@ export class AppointmentController {
         page: parseInt(req.query.page as string) || 1,
         limit: parseInt(req.query.limit as string) || 10,
       };
-      const result = await this.appointmentService.searchAppointments(query);
-      ResponseHandler.success(res, 'Appointments fetched successfully', result.data);
+      const currentUser = (req as any).user;
+      const result = await this.appointmentService.searchAppointments(query, currentUser);
+      ResponseHandler.success(res, 'Appointments fetched successfully', result);
     }
   );
 
@@ -57,9 +60,19 @@ export class AppointmentController {
     }
   );
 
+  checkInAppointment = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const currentUser = (req as any).user;
+      const result = await this.appointmentService.checkInAppointment(id, currentUser);
+      ResponseHandler.success(res, result.message, result.data);
+    }
+  );
+
   getAppointmentStats = asyncHandler(
-    async (_req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.appointmentService.getAppointmentStats();
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const currentUser = (req as any).user;
+      const result = await this.appointmentService.getAppointmentStats(currentUser);
       ResponseHandler.success(res, 'Appointment stats fetched successfully', result.data);
     }
   );

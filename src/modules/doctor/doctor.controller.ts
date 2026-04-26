@@ -12,7 +12,8 @@ export class DoctorController {
 
   createDoctor = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.doctorService.createDoctor(req.body);
+      const currentUser = (req as any).user;
+      const result = await this.doctorService.createDoctor(req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data, 201);
     }
   );
@@ -20,7 +21,8 @@ export class DoctorController {
   getDoctorById = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.doctorService.getDoctorById(id);
+      const currentUser = (req as any).user;
+      const result = await this.doctorService.getDoctorById(id, currentUser);
       ResponseHandler.success(res, 'Doctor fetched successfully', result.data);
     }
   );
@@ -28,7 +30,8 @@ export class DoctorController {
   updateDoctor = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.doctorService.updateDoctor(id, req.body);
+      const currentUser = (req as any).user;
+      const result = await this.doctorService.updateDoctor(id, req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data);
     }
   );
@@ -41,7 +44,8 @@ export class DoctorController {
         page: parseInt(req.query.page as string) || 1,
         limit: parseInt(req.query.limit as string) || 10,
       };
-      const result = await this.doctorService.searchDoctors(query);
+      const currentUser = (req as any).user;
+      const result = await this.doctorService.searchDoctors(query, currentUser);
       ResponseHandler.success(res, 'Doctors fetched successfully', result.data);
     }
   );
@@ -55,8 +59,9 @@ export class DoctorController {
   );
 
   getDoctorStats = asyncHandler(
-    async (_req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.doctorService.getDoctorStats();
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const currentUser = (req as any).user;
+      const result = await this.doctorService.getDoctorStats(currentUser);
       ResponseHandler.success(res, 'Doctor stats fetched successfully', result.data);
     }
   );

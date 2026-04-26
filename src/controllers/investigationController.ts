@@ -32,7 +32,8 @@ class InvestigationController {
   });
 
   getInvestigationById = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const investigation = await investigationService.getInvestigationById(req.params.id);
+    const currentUser = (req as any).user;
+    const investigation = await investigationService.getInvestigationById(req.params.id, currentUser);
     ResponseHandler.success(res, 'Investigation retrieved successfully', investigation);
   });
 
@@ -48,7 +49,8 @@ class InvestigationController {
         reportUrl,
         notes,
         labTechnicianId: user.role === 'LAB_TECHNICIAN' ? user.id : undefined,
-      }
+      },
+      user
     );
     ResponseHandler.success(res, 'Investigation status updated successfully', investigation);
   });

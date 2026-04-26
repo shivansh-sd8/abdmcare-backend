@@ -16,7 +16,18 @@ router.post(
     body('doctorId').notEmpty().withMessage('Doctor ID is required'),
     body('date').isISO8601().withMessage('Valid date is required'),
     body('time').matches(/^([01]\d|2[0-3]):([0-5]\d)$/).withMessage('Valid time is required (HH:MM)'),
-    body('type').isIn(['CONSULTATION', 'FOLLOWUP', 'EMERGENCY']).withMessage('Valid appointment type is required'),
+    body('type').isIn([
+      'OPD',
+      'IPD',
+      'EMERGENCY',
+      'FOLLOW_UP',
+      'TELECONSULTATION',
+      'ROUTINE_CHECKUP',
+      'VACCINATION',
+      'DIAGNOSTIC',
+      'SURGERY_CONSULTATION',
+      'SECOND_OPINION'
+    ]).withMessage('Valid appointment type is required'),
   ],
   validate,
   appointmentController.createAppointment
@@ -24,7 +35,7 @@ router.post(
 
 router.get(
   '/stats',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   appointmentController.getAppointmentStats
 );
 
@@ -50,6 +61,12 @@ router.post(
   '/:id/cancel',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
   appointmentController.cancelAppointment
+);
+
+router.post(
+  '/:id/check-in',
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
+  appointmentController.checkInAppointment
 );
 
 export default router;

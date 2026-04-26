@@ -107,7 +107,7 @@ class VitalsService {
     };
   }
 
-  async getVitalsById(id: string) {
+  async getVitalsById(id: string, currentUser?: any) {
     const vitals = await prisma.vitals.findUnique({
       where: { id },
       include: {
@@ -123,10 +123,15 @@ class VitalsService {
       throw new AppError('Vitals record not found', 404);
     }
 
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && vitals.patient.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Vitals record belongs to different hospital', 403);
+    }
+
     return vitals;
   }
 
-  async getLatestVitals(patientId: string) {
+  async getLatestVitals(patientId: string, currentUser?: any) {
     const vitals = await prisma.vitals.findFirst({
       where: { patientId },
       orderBy: { recordedAt: 'desc' },
@@ -137,21 +142,35 @@ class VitalsService {
             uhid: true,
             firstName: true,
             lastName: true,
+            hospitalId: true,
           },
         },
       },
     });
 
+    // Hospital isolation check
+    if (vitals && currentUser && currentUser.role !== 'SUPER_ADMIN' && vitals.patient.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Vitals record belongs to different hospital', 403);
+    }
+
     return vitals;
   }
 
-  async updateVitals(id: string, data: Partial<CreateVitalsDTO>) {
+  async updateVitals(id: string, data: Partial<CreateVitalsDTO>, currentUser?: any) {
     const vitals = await prisma.vitals.findUnique({
       where: { id },
+      include: {
+        patient: true,
+      },
     });
 
     if (!vitals) {
       throw new AppError('Vitals record not found', 404);
+    }
+
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && vitals.patient.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Vitals record belongs to different hospital', 403);
     }
 
     // Recalculate BMI if height or weight changed
@@ -179,13 +198,21 @@ class VitalsService {
     return updated;
   }
 
-  async deleteVitals(id: string) {
+  async deleteVitals(id: string, currentUser?: any) {
     const vitals = await prisma.vitals.findUnique({
       where: { id },
+      include: {
+        patient: true,
+      },
     });
 
     if (!vitals) {
       throw new AppError('Vitals record not found', 404);
+    }
+
+    // Hospital isolation check
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && vitals.patient.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Vitals record belongs to different hospital', 403);
     }
 
     await prisma.vitals.delete({

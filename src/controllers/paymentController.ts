@@ -26,9 +26,9 @@ class PaymentController {
       const currentUser = req.user;
       const { patientId, status, startDate, endDate, page, limit } = req.query;
 
-      // ADMIN sees only their hospital's payments
+      // ADMIN and RECEPTIONIST see only their hospital's payments
       let hospitalId = req.query.hospitalId as string;
-      if (currentUser?.role === 'ADMIN' && currentUser?.hospitalId) {
+      if ((currentUser?.role === 'ADMIN' || currentUser?.role === 'RECEPTIONIST') && currentUser?.hospitalId) {
         hospitalId = currentUser.hospitalId;
       }
 
@@ -53,7 +53,8 @@ class PaymentController {
 
   async getPaymentById(req: Request, res: Response, next: NextFunction): Promise<Response | void> {
     try {
-      const payment = await paymentService.getPaymentById(req.params.id);
+      const currentUser = (req as any).user;
+      const payment = await paymentService.getPaymentById(req.params.id, currentUser);
 
       return res.status(200).json({
         success: true,
@@ -66,7 +67,8 @@ class PaymentController {
 
   async updatePayment(req: Request, res: Response, next: NextFunction): Promise<Response | void> {
     try {
-      const payment = await paymentService.updatePayment(req.params.id, req.body);
+      const currentUser = (req as any).user;
+      const payment = await paymentService.updatePayment(req.params.id, req.body, currentUser);
 
       return res.status(200).json({
         success: true,
@@ -80,8 +82,9 @@ class PaymentController {
 
   async markAsPaid(req: Request, res: Response, next: NextFunction): Promise<Response | void> {
     try {
+      const currentUser = (req as any).user;
       const { transactionId } = req.body;
-      const payment = await paymentService.markAsPaid(req.params.id, transactionId);
+      const payment = await paymentService.markAsPaid(req.params.id, transactionId, currentUser);
 
       return res.status(200).json({
         success: true,

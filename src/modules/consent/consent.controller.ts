@@ -49,15 +49,17 @@ export class ConsentController {
   );
 
   getAllConsents = asyncHandler(
-    async (_req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.consentService.getAllConsents();
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const currentUser = (req as any).user;
+      const result = await this.consentService.getAllConsents(currentUser);
       ResponseHandler.success(res, 'Consents fetched successfully', result.data);
     }
   );
 
   getConsentStats = asyncHandler(
-    async (_req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.consentService.getConsentStats();
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const currentUser = (req as any).user;
+      const result = await this.consentService.getConsentStats(currentUser);
       ResponseHandler.success(res, 'Consent stats fetched successfully', result.data);
     }
   );

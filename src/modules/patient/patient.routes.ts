@@ -25,7 +25,7 @@ router.post(
 
 router.get(
   '/stats',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   patientController.getPatientStats
 );
 

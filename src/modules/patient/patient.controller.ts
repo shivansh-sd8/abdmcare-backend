@@ -12,7 +12,8 @@ export class PatientController {
 
   createPatient = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.patientService.createPatient(req.body);
+      const currentUser = (req as any).user;
+      const result = await this.patientService.createPatient(req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data, 201);
     }
   );
@@ -20,7 +21,8 @@ export class PatientController {
   getPatientById = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.patientService.getPatientById(id);
+      const currentUser = (req as any).user;
+      const result = await this.patientService.getPatientById(id, currentUser);
       ResponseHandler.success(res, 'Patient fetched successfully', result.data);
     }
   );
@@ -28,7 +30,8 @@ export class PatientController {
   getPatientByUHID = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { uhid } = req.params;
-      const result = await this.patientService.getPatientByUHID(uhid);
+      const currentUser = (req as any).user;
+      const result = await this.patientService.getPatientByUHID(uhid, currentUser);
       ResponseHandler.success(res, 'Patient fetched successfully', result.data);
     }
   );
@@ -50,7 +53,8 @@ export class PatientController {
         page: parseInt(req.query.page as string) || 1,
         limit: parseInt(req.query.limit as string) || 10,
       };
-      const result = await this.patientService.searchPatients(query);
+      const currentUser = (req as any).user;
+      const result = await this.patientService.searchPatients(query, currentUser);
       ResponseHandler.success(res, 'Patients fetched successfully', result.data);
     }
   );
@@ -64,8 +68,9 @@ export class PatientController {
   );
 
   getPatientStats = asyncHandler(
-    async (_req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.patientService.getPatientStats();
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const currentUser = (req as any).user;
+      const result = await this.patientService.getPatientStats(currentUser);
       ResponseHandler.success(res, 'Patient stats fetched successfully', result.data);
     }
   );

@@ -28,8 +28,11 @@ model Patient {
   bloodGroup       String?
   emergencyContact Json?
   
-  // Patient is NOT owned by hospital
-  // Access is controlled via Consent model
+  // Hospital that registered the patient
+  // Patient data can be shared across hospitals via ABDM Consent model
+  hospitalId       String?
+  hospital         Hospital?     @relation(fields: [hospitalId], references: [id])
+  
   isActive         Boolean       @default(true)
   
   // Relations
@@ -50,6 +53,7 @@ model Patient {
   @@index([abhaNumber])
   @@index([mobile])
   @@index([uhid])
+  @@index([hospitalId])
   @@map("patients")
 }
 
@@ -96,6 +100,7 @@ model Doctor {
   appointments    Appointment[]
   prescriptions   Prescription[]
   investigations  Investigation[]
+  referrals       Referral[]
   
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
@@ -157,11 +162,19 @@ model Encounter {
   doctorId        String
   doctor          Doctor          @relation(fields: [doctorId], references: [id])
   
-  chiefComplaint  String
-  diagnosis       String?
-  prescription    Json?
-  vitalSigns      Json?
-  notes           String?
+  chiefComplaint           String
+  historyOfPresentIllness  String?
+  pastMedicalHistory       String?
+  physicalExamination      String?
+  provisionalDiagnosis     String?
+  diagnosis                String?
+  finalDiagnosis           String?
+  prescription             Json?
+  vitalSigns               Json?
+  notes                    String?
+  followUpDate             DateTime?
+  admissionRequired        Boolean         @default(false)
+  referralRequired         Boolean         @default(false)
   
   status          EncounterStatus @default(SCHEDULED)
   visitDate       DateTime
@@ -169,7 +182,11 @@ model Encounter {
   careContextId   String?         @unique
   careContext     CareContext?
   
+  appointment     Appointment?
   emrRecords      EmrRecord[]
+  prescriptions   EncounterPrescription[]
+  labOrders       LabOrder[]
+  referrals       Referral[]
   
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
@@ -268,6 +285,11 @@ model Appointment {
   
   type            AppointmentType   @default(OPD)
   status          AppointmentStatus @default(SCHEDULED)
+  
+  checkedInAt     DateTime?
+  opdCardNumber   String?           @unique
+  encounterId     String?           @unique
+  encounter       Encounter?        @relation(fields: [encounterId], references: [id])
   
   notes           String?
   payments        Payment[]
@@ -473,6 +495,17 @@ model AbdmTransaction {
   @@map("abdm_transactions")
 }
 
+enum HospitalType {
+  HOSPITAL
+  CLINIC
+  NURSING_HOME
+  DIAGNOSTIC_CENTER
+  POLYCLINIC
+  SPECIALTY_CENTER
+  MULTI_SPECIALTY
+  SUPER_SPECIALTY
+}
+
 enum HospitalPlan {
   FREE
   BASIC
@@ -487,42 +520,103 @@ enum HospitalStatus {
   EXPIRED
 }
 
+enum BillingCycle {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
 model Hospital {
   id          String   @id @default(uuid())
+  
+  // Basic Information
   name        String
   code        String   @unique
+  type        HospitalType @default(HOSPITAL)
   
-  // Contact & Location
-  address     String?
-  city        String?
-  state       String?
-  pincode     String?
-  phone       String?
-  email       String?
+  // Contact Information
+  email       String   @unique
+  phone       String
+  alternatePhone String?
+  website     String?
+  
+  // Address Details
+  addressLine1 String
+  addressLine2 String?
+  city        String
+  state       String
+  country     String   @default("India")
+  pincode     String
+  landmark    String?
+  
+  // Legal & Registration
+  registrationNumber String? @unique
+  gstNumber   String?
+  panNumber   String?
+  licenseNumber String?
+  establishedYear Int?
+  
+  // Admin/Owner Details
+  primaryAdminId String? @unique
+  ownerName   String?
+  ownerEmail  String?
+  ownerPhone  String?
+  
+  // Facility Details
+  totalBeds   Int?     @default(0)
+  icuBeds     Int?     @default(0)
+  emergencyBeds Int?   @default(0)
+  operationTheaters Int? @default(0)
+  
+  // Services Offered
+  services    String[] @default([])
+  specialties String[] @default([])
   
   // Subscription & Plan
   plan        HospitalPlan    @default(FREE)
   status      HospitalStatus  @default(TRIAL)
   trialEndsAt DateTime?
+  trialStartedAt DateTime?
+  subscriptionStartedAt DateTime?
   subscriptionEndsAt DateTime?
+  
+  // Plan Limits
+  maxUsers    Int      @default(5)
+  maxDoctors  Int      @default(3)
+  maxPatients Int      @default(100)
+  maxStorage  Int      @default(1024) // in MB
+  
+  // Billing
+  billingCycle BillingCycle @default(MONTHLY)
+  nextBillingDate DateTime?
+  lastPaymentDate DateTime?
+  totalRevenue Float    @default(0)
   
   // ABDM Integration
   hipId       String?  @unique
   hiuId       String?  @unique
   abdmEnabled Boolean  @default(false)
+  abdmRegisteredAt DateTime?
   
-  // Primary Admin (Hospital Owner)
-  primaryAdminId String? @unique
+  // Settings
+  timezone    String   @default("Asia/Kolkata")
+  currency    String   @default("INR")
+  language    String   @default("en")
   
-  // Limits based on plan
-  maxUsers    Int      @default(5)
-  maxPatients Int      @default(100)
-  
+  // Status & Verification
   isActive    Boolean  @default(true)
+  isVerified  Boolean  @default(false)
+  verifiedAt  DateTime?
+  verifiedBy  String?
+  
+  // Onboarding
+  onboardingCompleted Boolean @default(false)
+  onboardingStep Int     @default(1)
   
   // Relations
   users       User[]
   doctors     Doctor[]
+  patients    Patient[]
   appointments Appointment[]
   departments  Department[]
   investigations Investigation[]
@@ -532,8 +626,10 @@ model Hospital {
   updatedAt   DateTime @updatedAt
   
   @@index([code])
+  @@index([email])
   @@index([status])
   @@index([plan])
+  @@index([isActive])
   @@map("hospitals")
 }
 
@@ -654,9 +750,16 @@ enum FacilityType {
 }
 
 enum AppointmentType {
-  OPD
-  TELECONSULTATION
-  FOLLOW_UP
+  OPD                  // Out-Patient Department - General consultation
+  IPD                  // In-Patient Department - Admission required
+  EMERGENCY            // Emergency consultation
+  FOLLOW_UP            // Follow-up visit after treatment
+  TELECONSULTATION     // Remote video/phone consultation
+  ROUTINE_CHECKUP      // Regular health checkup
+  VACCINATION          // Vaccination appointment
+  DIAGNOSTIC           // Diagnostic tests (X-ray, MRI, etc.)
+  SURGERY_CONSULTATION // Pre/Post surgery consultation
+  SECOND_OPINION       // Second opinion consultation
 }
 
 enum AppointmentStatus {
@@ -697,4 +800,100 @@ enum PaymentStatus {
   PARTIAL
   REFUNDED
   CANCELLED
+}
+
+model EncounterPrescription {
+  id            String    @id @default(uuid())
+  encounterId   String
+  encounter     Encounter @relation(fields: [encounterId], references: [id])
+  
+  medicineName  String
+  dosage        String
+  frequency     String
+  duration      String
+  instructions  String?
+  quantity      Int?
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  @@index([encounterId])
+  @@map("encounter_prescriptions")
+}
+
+model LabOrder {
+  id            String      @id @default(uuid())
+  orderId       String      @unique
+  encounterId   String
+  encounter     Encounter   @relation(fields: [encounterId], references: [id])
+  
+  testName      String
+  testType      String?
+  priority      OrderPriority @default(ROUTINE)
+  status        OrderStatus   @default(PENDING)
+  
+  results       Json?
+  resultNotes   String?
+  
+  orderedAt     DateTime    @default(now())
+  completedAt   DateTime?
+  
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  
+  @@index([encounterId])
+  @@index([status])
+  @@map("lab_orders")
+}
+
+model Referral {
+  id                String         @id @default(uuid())
+  referralId        String         @unique
+  encounterId       String
+  encounter         Encounter      @relation(fields: [encounterId], references: [id])
+  
+  referredToDoctorId String
+  referredToDoctor   Doctor        @relation(fields: [referredToDoctorId], references: [id])
+  
+  reason            String
+  notes             String?
+  urgency           ReferralUrgency @default(ROUTINE)
+  status            ReferralStatus  @default(PENDING)
+  
+  appointmentDate   DateTime?
+  
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  
+  @@index([encounterId])
+  @@index([referredToDoctorId])
+  @@index([status])
+  @@map("referrals")
+}
+
+enum OrderStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum OrderPriority {
+  ROUTINE
+  URGENT
+  STAT
+}
+
+enum ReferralStatus {
+  PENDING
+  ACCEPTED
+  COMPLETED
+  CANCELLED
+  REJECTED
+}
+
+enum ReferralUrgency {
+  ROUTINE
+  URGENT
+  EMERGENCY
 }

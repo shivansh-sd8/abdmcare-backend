@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import prisma from '../../common/config/database';
 import { generateToken, generateRefreshToken } from '../../common/middleware/auth';
 import { AppError } from '../../common/middleware/errorHandler';
+import logger from '../../common/config/logger';
 
 interface RegisterData {
   email: string;
@@ -9,8 +10,14 @@ interface RegisterData {
   username: string;
   firstName: string;
   lastName: string;
+  phone?: string;
   role?: 'SUPER_ADMIN' | 'ADMIN' | 'DOCTOR' | 'NURSE' | 'RECEPTIONIST' | 'LAB_TECHNICIAN' | 'PHARMACIST';
   hospitalId?: string;
+  // Doctor-specific fields
+  specialization?: string;
+  qualification?: string;
+  registrationNo?: string;
+  hprId?: string;
 }
 
 export class AuthService {
@@ -44,12 +51,23 @@ export class AuthService {
       throw new AppError('Invalid credentials', 401);
     }
 
+    // Get doctor ID if user is a doctor
+    let doctorId: string | undefined;
+    if (user.role === 'DOCTOR') {
+      const doctor = await prisma.doctor.findFirst({
+        where: { email: user.email },
+        select: { id: true },
+      });
+      doctorId = doctor?.id;
+    }
+
     const token = generateToken({
       id: user.id,
       email: user.email,
       role: user.role,
       hospitalId: user.hospitalId || undefined,
-    });
+      doctorId,
+    } as any);
 
     const refreshToken = generateRefreshToken({
       id: user.id,
@@ -66,6 +84,7 @@ export class AuthService {
         firstName: user.firstName,
         lastName: user.lastName,
         role: user.role,
+        hospitalId: user.hospitalId,
       },
       token,
       refreshToken,
@@ -192,6 +211,64 @@ export class AuthService {
       },
     });
 
+    // Auto-create Doctor record if user role is DOCTOR
+    if (user.role === 'DOCTOR' && hospitalId) {
+      try {
+        // Find or create a default facility
+        let facility = await prisma.facility.findFirst();
+        if (!facility) {
+          facility = await prisma.facility.create({
+            data: {
+              name: 'Default Hospital',
+              type: 'HOSPITAL',
+              address: {},
+              contact: {},
+            },
+          });
+        }
+
+        // Find or create a default department
+        let department = await prisma.department.findFirst({
+          where: { hospitalId },
+        });
+
+        if (!department) {
+          department = await prisma.department.create({
+            data: {
+              name: 'General',
+              code: 'GENERAL',
+              description: 'General Department',
+              facilityId: facility.id,
+              hospitalId,
+            },
+          });
+        }
+
+        // Create doctor record
+        await prisma.doctor.create({
+          data: {
+            firstName: user.firstName,
+            lastName: user.lastName,
+            email: user.email,
+            mobile: data.phone || '',
+            registrationNo: data.registrationNo || `REG-${Date.now()}`,
+            specialization: data.specialization || 'General Physician',
+            qualification: data.qualification || 'MBBS',
+            hprId: data.hprId || null,
+            hospitalId,
+            departmentId: department.id,
+          },
+        });
+
+        logger.info('Doctor record created automatically for user', {
+          userId: user.id,
+          email: user.email,
+        });
+      } catch (error) {
+        logger.error('Failed to create doctor record for user', error);
+      }
+    }
+
     const token = generateToken({
       id: user.id,
       email: user.email,
@@ -232,9 +309,14 @@ export class AuthService {
   async getAllUsers(currentUser: any) {
     const where: any = {};
     
-    // ADMIN can only see users from their hospital
+    // ADMIN can only see users from their hospital and cannot see SUPER_ADMIN users
     if (currentUser.role === 'ADMIN' && currentUser.hospitalId) {
       where.hospitalId = currentUser.hospitalId;
+      where.role = { not: 'SUPER_ADMIN' };
+    }
+    // Non-SUPER_ADMIN users cannot see SUPER_ADMIN users
+    else if (currentUser.role !== 'SUPER_ADMIN') {
+      where.role = { not: 'SUPER_ADMIN' };
     }
     // SUPER_ADMIN sees all users
 

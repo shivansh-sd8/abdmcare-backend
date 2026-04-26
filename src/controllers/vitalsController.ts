@@ -20,22 +20,26 @@ class VitalsController {
   });
 
   getVitalsById = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const vitals = await vitalsService.getVitalsById(req.params.id);
+    const currentUser = (req as any).user;
+    const vitals = await vitalsService.getVitalsById(req.params.id, currentUser);
     ResponseHandler.success(res, 'Vitals retrieved successfully', vitals);
   });
 
   getLatestVitals = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const vitals = await vitalsService.getLatestVitals(req.params.patientId);
+    const currentUser = (req as any).user;
+    const vitals = await vitalsService.getLatestVitals(req.params.patientId, currentUser);
     ResponseHandler.success(res, 'Latest vitals retrieved successfully', vitals);
   });
 
   updateVitals = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const vitals = await vitalsService.updateVitals(req.params.id, req.body);
+    const currentUser = (req as any).user;
+    const vitals = await vitalsService.updateVitals(req.params.id, req.body, currentUser);
     ResponseHandler.success(res, 'Vitals updated successfully', vitals);
   });
 
   deleteVitals = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const result = await vitalsService.deleteVitals(req.params.id);
+    const currentUser = (req as any).user;
+    const result = await vitalsService.deleteVitals(req.params.id, currentUser);
     ResponseHandler.success(res, result.message);
   });
 }

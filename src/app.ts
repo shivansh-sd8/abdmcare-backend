@@ -6,7 +6,7 @@ import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import { config } from './common/config/index';
 import { errorHandler, notFoundHandler } from './common/middleware/errorHandler';
-import { generalLimiter } from './common/middleware/rateLimiter';
+// import { generalLimiter } from './common/middleware/rateLimiter';
 import logger from './common/config/logger';
 
 const app: Application = express();
@@ -48,7 +48,8 @@ if (config.app.env === 'development') {
   );
 }
 
-app.use(generalLimiter);
+// Rate limiter temporarily disabled for development
+// app.use(generalLimiter);
 
 app.get('/health', (_req, res) => {
   res.json({
