@@ -13,13 +13,21 @@ const app: Application = express();
 
 app.use(helmet());
 
-let corsOrigin: string | string[] | boolean = '*';
+// CORS Configuration
+let corsOrigin: string | string[] | boolean;
 
 if (process.env.CORS_ORIGIN) {
+  // Use CORS_ORIGIN from environment (comma-separated list)
   corsOrigin = process.env.CORS_ORIGIN.split(',').map(origin => origin.trim());
 } else if (process.env.CORS_ORIGINS) {
+  // Fallback to CORS_ORIGINS for backward compatibility
   corsOrigin = process.env.CORS_ORIGINS.split(',').map(origin => origin.trim());
+} else if (config.app.env === 'production') {
+  // Production: Restrict to specific origins (should be set via env vars)
+  corsOrigin = false; // Deny all origins if not configured
+  logger.warn('⚠️  CORS_ORIGIN not set in production! All origins will be blocked.');
 } else {
+  // Development: Allow all origins
   corsOrigin = true;
 }
 
@@ -27,6 +35,10 @@ app.use(
   cors({
     origin: corsOrigin,
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Range', 'X-Content-Range'],
+    maxAge: 86400, // 24 hours
   })
 );
 

@@ -31,16 +31,13 @@ export async function initializeDatabase(): Promise<void> {
       }
     }
     
-    // Auto-seed disabled - run manually with: npm run seed
-    logger.info(`Database contains ${userCount} users. Auto-seed is disabled.`);
-    logger.info('To seed database manually, run: npm run seed');
-    
-    // if (userCount === 0) {
-    //   logger.info('No existing data found. Running seed...');
-    //   await seedDatabase();
-    // } else {
-    //   logger.info(`Database already contains ${userCount} users. Skipping seed.`);
-    // }
+    // Auto-seed enabled - will seed if database is empty
+    if (userCount === 0) {
+      logger.info('No existing data found. Running auto-seed...');
+      await seedDatabase();
+    } else {
+      logger.info(`Database already contains ${userCount} users. Skipping auto-seed.`);
+    }
   } catch (error) {
     logger.error('Database initialization error:', error);
     throw error;
