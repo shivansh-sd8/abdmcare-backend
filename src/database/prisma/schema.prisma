@@ -176,6 +176,22 @@ model Encounter {
   admissionRequired        Boolean         @default(false)
   referralRequired         Boolean         @default(false)
   
+  // OPD Token Flow Fields
+  labTestsOrdered          Json?           // Array of lab tests ordered by doctor
+  scansOrdered             Json?           // Array of scans/imaging ordered
+  labResults               Json?           // Lab test results uploaded by lab tech
+  scanResults              Json?           // Scan results
+  medicinesDispensed       Boolean         @default(false)
+  labTestsCompleted        Boolean         @default(false)
+  scansCompleted           Boolean         @default(false)
+  billGenerated            Boolean         @default(false)
+  consultationFee          Decimal?        @db.Decimal(10, 2)
+  labCharges               Decimal?        @db.Decimal(10, 2)
+  medicineCharges          Decimal?        @db.Decimal(10, 2)
+  scanCharges              Decimal?        @db.Decimal(10, 2)
+  totalAmount              Decimal?        @db.Decimal(10, 2)
+  paymentStatus            String?         // PENDING, PAID, PARTIAL
+  
   status          EncounterStatus @default(SCHEDULED)
   visitDate       DateTime
   
@@ -698,10 +714,21 @@ enum EncounterType {
 }
 
 enum EncounterStatus {
-  SCHEDULED
-  IN_PROGRESS
-  COMPLETED
-  CANCELLED
+  SCHEDULED           // Initial state
+  CHECKED_IN          // Patient checked in, waiting for doctor
+  CONSULTING          // With doctor
+  IN_PROGRESS         // Consultation in progress (legacy, same as CONSULTING)
+  LAB_PENDING         // Lab tests ordered, waiting for lab
+  LAB_IN_PROGRESS     // Lab tech working on tests
+  LAB_COMPLETED       // Lab tests done
+  SCAN_PENDING        // Scans ordered, waiting for radiology
+  SCAN_IN_PROGRESS    // Radiology working on scans
+  SCAN_COMPLETED      // Scans done
+  PHARMACY_PENDING    // Medicines prescribed, waiting for pharmacy
+  PHARMACY_COMPLETED  // Medicines dispensed
+  BILLING_PENDING     // Ready for billing
+  COMPLETED           // All done, bill paid
+  CANCELLED           // Appointment cancelled
 }
 
 enum ConsentStatus {
@@ -740,6 +767,8 @@ enum UserRole {
   RECEPTIONIST
   LAB_TECHNICIAN
   PHARMACIST
+  BILLING_STAFF
+  RADIOLOGIST
 }
 
 enum FacilityType {

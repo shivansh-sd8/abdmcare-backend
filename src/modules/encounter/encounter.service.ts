@@ -118,8 +118,21 @@ class EncounterService {
       const encounters = await prisma.encounter.findMany({
         where,
         include: {
-          patient: true,
-          appointment: true,
+          patient: {
+            include: {
+              abhaRecord: true,
+            },
+          },
+          doctor: true,
+          appointment: {
+            include: {
+              patient: {
+                include: {
+                  abhaRecord: true,
+                },
+              },
+            },
+          },
         },
         orderBy: {
           visitDate: 'desc',
@@ -245,7 +258,19 @@ class EncounterService {
     }
   }
 
-  async completeConsultation(id: string, data?: { diagnosis?: string; notes?: string }, _currentUser?: any) {
+  async completeConsultation(
+    id: string, 
+    data?: { 
+      diagnosis?: string; 
+      notes?: string; 
+      prescription?: any; 
+      labTestsOrdered?: any; 
+      scansOrdered?: any; 
+      followUpDate?: Date;
+      consultationFee?: number;
+    }, 
+    _currentUser?: any
+  ) {
     try {
       const encounter = await prisma.encounter.findUnique({
         where: { id },
@@ -259,22 +284,43 @@ class EncounterService {
         throw new AppError('Encounter not found', 404);
       }
 
-      // Update encounter with diagnosis and mark as completed
+      // Determine next status based on what was ordered
+      let nextStatus: any = 'COMPLETED';
+      const hasLabTests = data?.labTestsOrdered && data.labTestsOrdered.length > 0;
+      const hasScans = data?.scansOrdered && data.scansOrdered.length > 0;
+      const hasPrescription = data?.prescription && data.prescription.length > 0;
+
+      if (hasLabTests) {
+        nextStatus = 'LAB_PENDING';
+      } else if (hasScans) {
+        nextStatus = 'SCAN_PENDING';
+      } else if (hasPrescription) {
+        nextStatus = 'PHARMACY_PENDING';
+      } else {
+        nextStatus = 'BILLING_PENDING';
+      }
+
+      // Update encounter with all consultation data
       const updatedEncounter = await prisma.encounter.update({
         where: { id },
         data: {
           diagnosis: data?.diagnosis || encounter.diagnosis,
           notes: data?.notes || encounter.notes,
-          status: 'COMPLETED',
+          prescription: data?.prescription || encounter.prescription,
+          labTestsOrdered: data?.labTestsOrdered || encounter.labTestsOrdered,
+          scansOrdered: data?.scansOrdered || encounter.scansOrdered,
+          followUpDate: data?.followUpDate || encounter.followUpDate,
+          consultationFee: data?.consultationFee || 500, // Default consultation fee
+          status: nextStatus,
         },
       });
 
-      // Also update appointment status to COMPLETED
+      // Update appointment status based on next step
       if (encounter.appointment) {
         await prisma.appointment.update({
           where: { id: encounter.appointment.id },
           data: {
-            status: 'COMPLETED',
+            status: nextStatus === 'COMPLETED' || nextStatus === 'BILLING_PENDING' ? 'COMPLETED' : 'IN_PROGRESS',
           },
         });
       }
