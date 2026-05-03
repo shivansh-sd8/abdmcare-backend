@@ -2,6 +2,7 @@ import prisma from '../../common/config/database';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import { AppointmentType, AppointmentStatus } from '@prisma/client';
+import smsService from '../../common/utils/smsService';
 
 interface CreateAppointmentRequest {
   patientId: string;
@@ -75,6 +76,20 @@ export class AppointmentService {
       logger.info('Appointment created successfully', {
         appointmentId: appointment.id,
       });
+
+      // Fire-and-forget SMS confirmation
+      if (appointment.patient.mobile) {
+        const apptDate = appointmentDateTime.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+        const apptTime = appointmentDateTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+        smsService.sendAppointmentConfirmation({
+          mobile:       appointment.patient.mobile,
+          patientName:  `${appointment.patient.firstName} ${appointment.patient.lastName}`,
+          doctorName:   `Dr. ${appointment.doctor.firstName} ${appointment.doctor.lastName}`,
+          date:         apptDate,
+          time:         apptTime,
+          hospitalName: 'MediSync Hospital',
+        }).catch((e: any) => logger.warn('SMS send failed', { error: e.message }));
+      }
 
       return {
         success: true,
@@ -414,6 +429,17 @@ export class AppointmentService {
         encounterId: encounter.id,
         opdCardNumber,
       });
+
+      // Fire-and-forget check-in SMS
+      if (appointment.patient.mobile) {
+        smsService.sendCheckInNotification({
+          mobile:       appointment.patient.mobile,
+          patientName:  `${appointment.patient.firstName} ${appointment.patient.lastName}`,
+          doctorName:   `Dr. ${appointment.doctor.firstName} ${appointment.doctor.lastName}`,
+          tokenNumber:  opdCardNumber,
+          hospitalName: 'MediSync Hospital',
+        }).catch((e: any) => logger.warn('SMS send failed', { error: e.message }));
+      }
 
       return {
         success: true,

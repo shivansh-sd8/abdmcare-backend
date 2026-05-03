@@ -213,6 +213,34 @@ class EncounterService {
     return updated;
   }
 
+  async collectPayment(id: string, data: {
+    paymentMethod: string;
+    paymentCollected: number;
+    transactionRef?: string;
+  }, currentUser?: any) {
+    const encounter = await prisma.encounter.findUnique({
+      where: { id },
+      include: { patient: true },
+    });
+    if (!encounter) throw new AppError('Encounter not found', 404);
+    if (currentUser?.role !== 'SUPER_ADMIN' && encounter.patient.hospitalId !== currentUser?.hospitalId) {
+      throw new AppError('Access denied', 403);
+    }
+
+    const updated = await prisma.encounter.update({
+      where: { id },
+      data: {
+        paymentStatus:    'PAID',
+        paymentCollected: data.paymentCollected,
+        paymentMethod:    data.paymentMethod,
+        transactionRef:   data.transactionRef,
+        status:           'COMPLETED',
+        billGenerated:    true,
+      },
+    });
+    return updated;
+  }
+
   async getEncounterStats(doctorId?: string) {
     const where: any = {};
     if (doctorId) where.doctorId = doctorId;

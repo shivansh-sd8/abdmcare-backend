@@ -48,6 +48,20 @@ class EncounterController {
       ResponseHandler.success(res, result.message, result.data);
     }
   );
+
+  collectPayment = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const currentUser = (req as any).user;
+      const { paymentMethod, paymentCollected, transactionRef } = req.body;
+      const result = await encounterService.collectPayment(id, {
+        paymentMethod,
+        paymentCollected: parseFloat(paymentCollected) || 0,
+        transactionRef,
+      }, currentUser);
+      ResponseHandler.success(res, 'Payment recorded successfully', result);
+    }
+  );
 }
 
 export default new EncounterController();

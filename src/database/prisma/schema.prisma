@@ -21,7 +21,7 @@ model Patient {
   firstName        String
   lastName         String
   gender           Gender
-  dob              DateTime
+  dob              DateTime?
   mobile           String        @unique
   email            String?
   address          Json
@@ -45,6 +45,7 @@ model Patient {
   vitals           Vitals[]
   investigations   Investigation[]
   payments         Payment[]
+  admissions       Admission[]
   
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
@@ -89,6 +90,7 @@ model Doctor {
   mobile          String
   email           String
   isActive        Boolean       @default(true)
+  consultationFee Decimal?      @db.Decimal(10, 2)   // OPD fee set by admin
   
   hospitalId      String?
   hospital        Hospital?     @relation(fields: [hospitalId], references: [id])
@@ -112,10 +114,11 @@ model Doctor {
 }
 
 model Department {
-  id          String    @id @default(uuid())
-  name        String
-  code        String    @unique
-  description String?
+  id           String    @id @default(uuid())
+  name         String
+  code         String    @unique
+  description  String?
+  subspecialty String?   // e.g. "Retina", "Cataract", "Squint" for Ophthalmology
   
   hospitalId  String?
   hospital    Hospital? @relation(fields: [hospitalId], references: [id])
@@ -191,6 +194,9 @@ model Encounter {
   scanCharges              Decimal?        @db.Decimal(10, 2)
   totalAmount              Decimal?        @db.Decimal(10, 2)
   paymentStatus            String?         // PENDING, PAID, PARTIAL
+  paymentCollected         Decimal?        @db.Decimal(10, 2)
+  paymentMethod            String?         // CASH, UPI, CARD, BANK_TRANSFER
+  transactionRef           String?
   
   status          EncounterStatus @default(SCHEDULED)
   visitDate       DateTime
@@ -198,11 +204,16 @@ model Encounter {
   careContextId   String?         @unique
   careContext     CareContext?
   
+  // IPD: if this encounter is an IPD daily round, link it to the admission
+  admissionId     String?
+  ipdAdmission    Admission?      @relation("IPDRounds", fields: [admissionId], references: [id])
+
   appointment     Appointment?
   emrRecords      EmrRecord[]
   prescriptions   EncounterPrescription[]
   labOrders       LabOrder[]
   referrals       Referral[]
+  admissions      Admission[]     @relation("OPDAdmissions")
   
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
@@ -210,6 +221,7 @@ model Encounter {
   @@index([patientId])
   @@index([doctorId])
   @@index([visitDate])
+  @@index([admissionId])
   @@map("encounters")
 }
 
@@ -330,10 +342,17 @@ model Prescription {
   doctor          Doctor    @relation(fields: [doctorId], references: [id])
   
   encounterId     String?
+  admissionId     String?   // set when prescription originates from IPD round
   
-  medications     Json      // Array of {name, dosage, frequency, duration, instructions}
+  medications     Json      // Array of {name, dosage, frequency, duration, instructions, price?, quantity?}
   diagnosis       String?
   notes           String?
+  
+  // Pharmacy dispensing
+  status          String    @default("PENDING")  // PENDING, DISPENSED, CANCELLED
+  dispensedAt     DateTime?
+  dispensedBy     String?   // User id of pharmacist
+  totalCharges    Decimal?  @db.Decimal(10, 2)
   
   issuedAt        DateTime  @default(now())
   validUntil      DateTime?
@@ -344,6 +363,7 @@ model Prescription {
   @@index([patientId])
   @@index([doctorId])
   @@index([issuedAt])
+  @@index([status])
   @@map("prescriptions")
 }
 
@@ -406,6 +426,8 @@ model Investigation {
   results         Json?
   reportUrl       String?
   notes           String?
+  amount          Decimal?  @db.Decimal(10, 2)   // test charge set by lab tech / admin
+  admissionId     String?                          // if ordered during IPD stay
   
   labTechnicianId String?
   
@@ -431,6 +453,9 @@ model Payment {
   
   appointmentId   String?
   appointment     Appointment?  @relation(fields: [appointmentId], references: [id])
+
+  admissionId     String?       // Link IPD payments to an admission
+  admission       Admission?    @relation(fields: [admissionId], references: [id])
   
   amount          Float
   paymentMethod   PaymentMethod
@@ -450,6 +475,7 @@ model Payment {
   
   @@index([patientId])
   @@index([hospitalId])
+  @@index([admissionId])
   @@index([status])
   @@index([createdAt])
   @@map("payments")
@@ -590,6 +616,9 @@ model Hospital {
   
   // Subscription & Plan
   plan        HospitalPlan    @default(FREE)
+  
+  // Default OPD charges (used if doctor has no individual fee set)
+  defaultOpdCharge Decimal?  @db.Decimal(10, 2)
   status      HospitalStatus  @default(TRIAL)
   trialEndsAt DateTime?
   trialStartedAt DateTime?
@@ -637,6 +666,8 @@ model Hospital {
   departments  Department[]
   investigations Investigation[]
   payments     Payment[]
+  wards        Ward[]
+  admissions   Admission[]
   
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -842,6 +873,7 @@ model EncounterPrescription {
   duration      String
   instructions  String?
   quantity      Int?
+  price         Decimal?  @db.Decimal(10, 2)   // unit price set by admin/pharmacist
   
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -925,4 +957,126 @@ enum ReferralUrgency {
   ROUTINE
   URGENT
   EMERGENCY
+}
+
+// ─── IPD / Ward / Admission ─────────────────────────────────────────────────
+
+enum WardType {
+  GENERAL
+  ICU
+  PRIVATE
+  SEMI_PRIVATE
+  NICU
+  HDU
+}
+
+enum BedStatus {
+  AVAILABLE
+  OCCUPIED
+  RESERVED
+  UNDER_MAINTENANCE
+}
+
+enum AdmissionStatus {
+  ADMITTED
+  DISCHARGED
+  TRANSFERRED
+  ABSCONDED
+}
+
+model Ward {
+  id           String    @id @default(uuid())
+  name         String
+  type         WardType  @default(GENERAL)
+  floor        String?
+  totalBeds    Int       @default(0)
+  dailyCharges Float     @default(0)   // Standard per-day rate set by admin
+  hospitalId   String
+  hospital     Hospital  @relation(fields: [hospitalId], references: [id])
+  
+  beds        Bed[]
+  admissions  Admission[]
+
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([hospitalId])
+  @@map("wards")
+}
+
+model Bed {
+  id         String    @id @default(uuid())
+  bedNumber  String
+  wardId     String
+  ward       Ward      @relation(fields: [wardId], references: [id])
+  status     BedStatus @default(AVAILABLE)
+  
+  admissions Admission[]
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([wardId, bedNumber])
+  @@index([wardId])
+  @@index([status])
+  @@map("beds")
+}
+
+model Admission {
+  id               String          @id @default(uuid())
+  admissionNumber  String          @unique
+
+  patientId        String
+  patient          Patient         @relation(fields: [patientId], references: [id])
+
+  // Optional link to the OPD encounter that triggered admission
+  encounterId      String?
+  encounter        Encounter?      @relation("OPDAdmissions", fields: [encounterId], references: [id])
+
+  wardId           String
+  ward             Ward            @relation(fields: [wardId], references: [id])
+
+  bedId            String?
+  bed              Bed?            @relation(fields: [bedId], references: [id])
+
+  hospitalId       String
+  hospital         Hospital        @relation(fields: [hospitalId], references: [id])
+
+  admittedBy       String?         // Doctor name / userId
+  admittedAt       DateTime        @default(now())
+  dischargedAt     DateTime?
+
+  admissionReason  String?
+  diagnosis        String?
+  notes            String?
+
+  dailyCharges     Float           @default(0)
+  advancePaid      Float           @default(0)
+  totalAmount      Float           @default(0)
+
+  // Payment settlement on discharge
+  paymentCollected  Float?
+  paymentMethod     String?         // CASH, UPI, CARD, BANK_TRANSFER
+  transactionRef    String?         // UPI transaction ID / card ref / bank ref
+  paymentSettledAt  DateTime?
+  paymentStatus     String?         @default("PENDING") // PENDING, PARTIAL, PAID
+
+  status           AdmissionStatus @default(ADMITTED)
+
+  // Doctor marks patient ready; receptionist then processes payment + discharge
+  dischargeReadyAt   DateTime?
+  dischargeReadyBy   String?         // Doctor userId who marked ready
+
+  payments         Payment[]
+  rounds           Encounter[]     @relation("IPDRounds")
+
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@index([patientId])
+  @@index([hospitalId])
+  @@index([wardId])
+  @@index([status])
+  @@map("admissions")
 }

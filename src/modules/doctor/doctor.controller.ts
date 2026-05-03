@@ -65,6 +65,15 @@ export class DoctorController {
       ResponseHandler.success(res, 'Doctor stats fetched successfully', result.data);
     }
   );
+
+  getDoctorAvailability = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const { date } = req.query as { date?: string };
+      const result = await this.doctorService.getDoctorAvailability(id, date);
+      ResponseHandler.success(res, 'Doctor availability fetched successfully', result);
+    }
+  );
 }
 
 export default new DoctorController();

@@ -58,6 +58,17 @@ class EncounterController {
     const stats = await encounterService.getEncounterStats(doctorId);
     ResponseHandler.success(res, 'Encounter stats retrieved successfully', stats);
   });
+
+  collectPayment = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
+    const user = (req as any).user;
+    const { paymentMethod, paymentCollected, transactionRef } = req.body;
+    const result = await encounterService.collectPayment(req.params.id, {
+      paymentMethod,
+      paymentCollected: parseFloat(paymentCollected) || 0,
+      transactionRef,
+    }, user);
+    ResponseHandler.success(res, 'Payment recorded successfully', result);
+  });
 }
 
 export default new EncounterController();

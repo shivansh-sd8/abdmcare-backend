@@ -49,4 +49,12 @@ router.delete(
   prescriptionController.deletePrescription
 );
 
+router.patch(
+  '/:id/dispense',
+  authorize('PHARMACIST', 'ADMIN', 'SUPER_ADMIN'),
+  [body('medicines').isArray({ min: 1 }).withMessage('Medicines list is required')],
+  validate,
+  prescriptionController.dispensePrescription
+);
+
 export default router;

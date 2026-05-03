@@ -38,6 +38,12 @@ router.get(
 );
 
 router.get(
+  '/:id/availability',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
+  doctorController.getDoctorAvailability
+);
+
+router.get(
   '/:id',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
   doctorController.getDoctorById

@@ -8,7 +8,7 @@ const router = Router();
 router.get(
   '/',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'BILLING_STAFF'),
   encounterController.getDoctorEncounters
 );
 
@@ -42,6 +42,14 @@ router.post(
   authenticate,
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
   encounterController.completeConsultation
+);
+
+// Collect OPD payment
+router.patch(
+  '/:id/collect-payment',
+  authenticate,
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
+  encounterController.collectPayment
 );
 
 export default router;

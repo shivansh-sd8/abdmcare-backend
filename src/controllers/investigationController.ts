@@ -6,9 +6,9 @@ import ResponseHandler from '../common/utils/response';
 class InvestigationController {
   createInvestigation = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const user = (req as any).user;
+    // doctorId must come from req.body (should be Doctor.id, not User.id)
     const data = {
       ...req.body,
-      doctorId: user.role === 'DOCTOR' ? user.id : req.body.doctorId,
       hospitalId: user.hospitalId,
     };
     const investigation = await investigationService.createInvestigation(data);
@@ -17,14 +17,16 @@ class InvestigationController {
 
   getAllInvestigations = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const user = (req as any).user;
-    const filters: any = { ...req.query };
+    const { page, limit, ...rest } = req.query as any;
+    const filters: any = {
+      ...rest,
+      page:  page  ? parseInt(page,  10) : 1,
+      limit: limit ? parseInt(limit, 10) : 10,
+    };
 
-    if (user.role === 'ADMIN' && user.hospitalId) {
+    // All non-SUPER_ADMIN users see only their hospital's data
+    if (user.role !== 'SUPER_ADMIN' && user.hospitalId) {
       filters.hospitalId = user.hospitalId;
-    }
-
-    if (user.role === 'DOCTOR') {
-      filters.doctorId = user.id;
     }
 
     const result = await investigationService.getAllInvestigations(filters);
@@ -38,7 +40,7 @@ class InvestigationController {
   });
 
   updateInvestigationStatus = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const { status, results, reportUrl, notes } = req.body;
+    const { status, results, reportUrl, notes, amount } = req.body;
     const user = (req as any).user;
     
     const investigation = await investigationService.updateInvestigationStatus(
@@ -48,6 +50,7 @@ class InvestigationController {
         results,
         reportUrl,
         notes,
+        amount: amount ? parseFloat(amount) : undefined,
         labTechnicianId: user.role === 'LAB_TECHNICIAN' ? user.id : undefined,
       },
       user

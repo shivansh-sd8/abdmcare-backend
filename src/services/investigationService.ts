@@ -138,6 +138,7 @@ class InvestigationService {
     reportUrl?: string;
     notes?: string;
     labTechnicianId?: string;
+    amount?: number;
   }, currentUser?: any) {
     const investigation = await prisma.investigation.findUnique({
       where: { id },
@@ -162,19 +163,79 @@ class InvestigationService {
       updateData.reportedAt = new Date();
     }
 
-    if (data?.results) updateData.results = data.results;
-    if (data?.reportUrl) updateData.reportUrl = data.reportUrl;
-    if (data?.notes) updateData.notes = data.notes;
-    if (data?.labTechnicianId) updateData.labTechnicianId = data.labTechnicianId;
+    if (data?.results)           updateData.results           = data.results;
+    if (data?.reportUrl)         updateData.reportUrl         = data.reportUrl;
+    if (data?.notes)             updateData.notes             = data.notes;
+    if (data?.labTechnicianId)   updateData.labTechnicianId   = data.labTechnicianId;
+    if (data?.amount !== undefined && data.amount > 0) updateData.amount = data.amount;
 
     const updated = await prisma.investigation.update({
       where: { id },
       data: updateData,
-      include: {
-        patient: true,
-        doctor: true,
-      },
+      include: { patient: true, doctor: true },
     });
+
+    // When completed — update Encounter billing + advance encounter status if all tests done
+    if (status === 'COMPLETED') {
+      const encId = investigation.encounterId;
+
+      // Sync the originating LabOrder row so EHR timeline shows accurate status
+      if (encId) {
+        await prisma.labOrder.updateMany({
+          where: { encounterId: encId, testName: investigation.testName },
+          data:  { status: 'COMPLETED' },
+        });
+      }
+
+      if (encId) {
+        const enc = await prisma.encounter.findUnique({
+          where: { id: encId },
+          select: {
+            labCharges: true, consultationFee: true, medicineCharges: true,
+            status: true, medicinesDispensed: true,
+          },
+        });
+        if (enc) {
+          const newLabCharges   = Number(enc.labCharges    ?? 0) + (data?.amount ?? 0);
+          const consultationFee = Number(enc.consultationFee ?? 0);
+          const medicineCharges = Number(enc.medicineCharges  ?? 0);
+
+          // Check if all investigations for this encounter are now COMPLETED
+          const pendingCount = await prisma.investigation.count({
+            where: {
+              encounterId: encId,
+              status: { notIn: ['COMPLETED', 'CANCELLED'] },
+              id: { not: id }, // exclude current one (already updated)
+            },
+          });
+          const allLabsDone = pendingCount === 0;
+
+          // Determine next status only if encounter is still LAB_PENDING
+          let nextStatus: string | undefined;
+          if (allLabsDone && enc.status === 'LAB_PENDING') {
+            // Check if there are pending prescriptions (not yet dispensed)
+            const pendingRx = await prisma.prescription.count({
+              where: { encounterId: encId, status: { not: 'DISPENSED' } },
+            });
+            nextStatus = pendingRx > 0 ? 'PHARMACY_PENDING' : 'BILLING_PENDING';
+          }
+
+          await prisma.encounter.update({
+            where: { id: encId },
+            data: {
+              ...(data?.amount && data.amount > 0
+                ? {
+                    labCharges:  newLabCharges,
+                    totalAmount: consultationFee + newLabCharges + medicineCharges,
+                  }
+                : {}),
+              labTestsCompleted: allLabsDone,
+              ...(nextStatus ? { status: nextStatus as any } : {}),
+            },
+          });
+        }
+      }
+    }
 
     return updated;
   }

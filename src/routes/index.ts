@@ -15,6 +15,8 @@ import vitalsRoutes from './vitalsRoutes';
 import investigationRoutes from './investigationRoutes';
 import hipRoutes from '../modules/hip/hip.routes';
 import hiuRoutes from '../modules/hiu/hiu.routes';
+import ehrRoutes from '../modules/ehr/ehr.routes';
+import ipdRoutes from '../modules/ipd/ipd.routes';
 
 const router = Router();
 
@@ -34,5 +36,7 @@ router.use('/vitals', vitalsRoutes);
 router.use('/investigations', investigationRoutes);
 router.use('/hip', hipRoutes);
 router.use('/hiu', hiuRoutes);
+router.use('/ehr', ehrRoutes);
+router.use('/ipd', ipdRoutes);
 
 export default router;

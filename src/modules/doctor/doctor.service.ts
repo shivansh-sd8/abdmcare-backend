@@ -217,6 +217,9 @@ export class DoctorService {
           qualification: data.qualification,
           mobile: data.mobile,
           email: data.email,
+          consultationFee: (data as any).consultationFee !== undefined
+            ? (data as any).consultationFee
+            : undefined,
         },
       });
 
@@ -374,6 +377,51 @@ export class DoctorService {
         error.statusCode || 500
       );
     }
+  }
+
+  async getDoctorAvailability(doctorId: string, date?: string) {
+    const doctor = await prisma.doctor.findUnique({
+      where: { id: doctorId },
+      select: { id: true, firstName: true, lastName: true, specialization: true, isActive: true },
+    });
+    if (!doctor) throw new AppError('Doctor not found', 404);
+
+    const targetDate = date ? new Date(date) : new Date();
+    const dayStart = new Date(targetDate);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd   = new Date(targetDate);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const appointments = await prisma.appointment.findMany({
+      where: {
+        doctorId,
+        scheduledAt: { gte: dayStart, lte: dayEnd },
+        status: { notIn: ['CANCELLED', 'NO_SHOW'] },
+      },
+      select: {
+        id: true, scheduledAt: true, status: true,
+        patient: { select: { firstName: true, lastName: true, uhid: true } },
+      },
+      orderBy: { scheduledAt: 'asc' },
+    });
+
+    const MAX_SLOTS = 20; // default daily capacity
+    const bookedCount    = appointments.length;
+    const remainingSlots = Math.max(0, MAX_SLOTS - bookedCount);
+    const isAvailable    = doctor.isActive && remainingSlots > 0;
+
+    return {
+      doctor,
+      date:           dayStart.toISOString().split('T')[0],
+      isAvailable,
+      bookedCount,
+      remainingSlots,
+      maxSlots:       MAX_SLOTS,
+      appointments,
+      message: isAvailable
+        ? `Dr. ${doctor.firstName} ${doctor.lastName} is available today. ${remainingSlots} slot(s) remaining.`
+        : `Dr. ${doctor.firstName} ${doctor.lastName} has no available slots for this date.`,
+    };
   }
 }
 
