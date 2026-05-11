@@ -261,19 +261,23 @@ class EncounterService {
             select: { patientId: true, doctorId: true, patient: { select: { hospitalId: true } } },
           });
           if (enc) {
-            await prisma.investigation.createMany({
-              data: toAdd.map((order) => ({
-                patientId:   enc.patientId,
-                doctorId:    enc.doctorId,
-                hospitalId:  enc.patient.hospitalId!,
-                encounterId: id,
-                testName:    order.testName,
-                testType:    order.testType || 'LAB',
-                priority:    (order.priority as any) || 'ROUTINE',
-                status:      'ORDERED',
-              })),
-              skipDuplicates: true,
-            });
+            if (!enc.patient.hospitalId) {
+              logger.warn(`Skipping investigation creation: patient ${enc.patientId} has no hospitalId`);
+            } else {
+              await prisma.investigation.createMany({
+                data: toAdd.map((order) => ({
+                  patientId:   enc.patientId,
+                  doctorId:    enc.doctorId,
+                  hospitalId:  enc.patient.hospitalId!,
+                  encounterId: id,
+                  testName:    order.testName,
+                  testType:    order.testType || 'LAB',
+                  priority:    (order.priority as any) || 'ROUTINE',
+                  status:      'ORDERED',
+                })),
+                skipDuplicates: true,
+              });
+            }
           }
         }
       }
@@ -445,7 +449,7 @@ class EncounterService {
         });
         const existingTestNames = new Set(existingInvestigations.map(i => i.testName.toLowerCase()));
         const toCreate = encounter.labOrders.filter(lo => !existingTestNames.has(lo.testName.toLowerCase()));
-        if (toCreate.length > 0) {
+        if (toCreate.length > 0 && encounter.patient.hospitalId) {
           await prisma.investigation.createMany({
             data: toCreate.map((lo) => ({
               patientId:   encounter.patientId,
@@ -533,17 +537,23 @@ class EncounterService {
     }
 
     const totalAmount = Number(encounter.totalAmount ?? 0);
+    const paid        = Number(data.paymentCollected ?? 0);
+    const paymentStatus = totalAmount > 0 && paid >= totalAmount
+      ? 'PAID'
+      : paid > 0
+        ? 'PARTIAL'
+        : 'PENDING';
     const receiptNumber = `RCPT-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
 
-    // Mark encounter as paid + completed
+    // Mark encounter payment fields; only set COMPLETED when fully paid
     const updated = await prisma.encounter.update({
       where: { id },
       data: {
-        paymentStatus:    'PAID',
-        paymentCollected: data.paymentCollected,
+        paymentStatus,
+        paymentCollected: paid,
         paymentMethod:    data.paymentMethod,
         transactionRef:   data.transactionRef,
-        status:           'COMPLETED',
+        status:           paymentStatus === 'PAID' ? 'COMPLETED' : undefined,
         billGenerated:    true,
       },
     });
@@ -554,9 +564,9 @@ class EncounterService {
         patientId:     encounter.patientId,
         hospitalId:    encounter.patient.hospitalId!,
         appointmentId: encounter.appointment?.id,
-        amount:        data.paymentCollected,
+        amount:        paid,
         paymentMethod: data.paymentMethod as any,
-        status:        'PAID',
+        status:        paymentStatus as any,
         receiptNumber,
         transactionId: data.transactionRef || undefined,
         description:   `OPD consultation payment — ${encounter.encounterId}`,
@@ -567,6 +577,7 @@ class EncounterService {
           labCharges:       Number(encounter.labCharges       ?? 0),
           medicineCharges:  Number(encounter.medicineCharges  ?? 0),
           total:            totalAmount,
+          paid,
         },
       },
     });

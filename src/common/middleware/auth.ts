@@ -10,6 +10,7 @@ interface JwtPayload {
   email: string;
   role: string;
   hospitalId?: string;
+  doctorId?: string;
 }
 
 export const authenticate = async (
@@ -33,6 +34,7 @@ export const authenticate = async (
       email: decoded.email,
       role: decoded.role,
       hospitalId: decoded.hospitalId,
+      doctorId: decoded.doctorId,
     };
 
     logger.debug('User authenticated', { userId: decoded.id });

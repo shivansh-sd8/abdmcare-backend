@@ -88,7 +88,7 @@ class EhrService {
     }
 
     // Fetch hospital info and all patient-linked events in parallel
-    const [hospital, appointments, encounters, prescriptions, vitals, investigations, payments] =
+    const [hospital, appointments, encounters, prescriptions, vitals, investigations, payments, admissions] =
       await Promise.all([
         prisma.hospital.findUnique({
           where: { id: patient.hospitalId ?? '' },
@@ -150,6 +150,19 @@ class EhrService {
           where: { patientId },
           orderBy: { createdAt: 'asc' },
         }),
+
+        (prisma as any).admission.findMany({
+          where: { patientId },
+          select: {
+            id: true, admissionNumber: true, status: true,
+            admittedAt: true, dischargedAt: true,
+            admissionReason: true, diagnosis: true, notes: true,
+            dailyCharges: true, advancePaid: true,
+            ward: { select: { name: true, type: true } },
+            bed:  { select: { bedNumber: true } },
+          },
+          orderBy: { admittedAt: 'asc' },
+        }),
       ]);
 
     // ── Build unified timeline ────────────────────────────────────────────────
@@ -209,7 +222,7 @@ class EhrService {
           ? `BP: ${v.bloodPressureSystolic}/${v.bloodPressureDiastolic} mmHg`
           : null,
         v.heartRate        ? `Pulse: ${v.heartRate} bpm`      : null,
-        v.temperature      ? `Temp: ${v.temperature}°F`       : null,
+        v.temperature      ? `Temp: ${v.temperature}°C`       : null,
         v.oxygenSaturation ? `SpO₂: ${v.oxygenSaturation}%`  : null,
         v.weight           ? `Wt: ${v.weight} kg`             : null,
       ].filter(Boolean);
@@ -348,6 +361,45 @@ class EhrService {
       });
     });
 
+    // 8. IPD Admissions
+    admissions.forEach((adm: any) => {
+      timeline.push({
+        id:          `adm-${adm.id}`,
+        type:        'ADMISSION',
+        date:        adm.admittedAt,
+        title:       `IPD Admitted — ${adm.ward?.name ?? 'Ward'}`,
+        description: `${adm.admissionNumber}  ·  ${adm.status}${adm.admissionReason ? `  ·  ${adm.admissionReason}` : ''}`,
+        status:      adm.status,
+        data: {
+          admissionNumber: adm.admissionNumber,
+          ward:            adm.ward?.name,
+          wardType:        adm.ward?.type,
+          bed:             adm.bed?.bedNumber,
+          admittedAt:      adm.admittedAt,
+          dischargedAt:    adm.dischargedAt,
+          admissionReason: adm.admissionReason,
+          diagnosis:       adm.diagnosis,
+          notes:           adm.notes,
+          dailyCharges:    adm.dailyCharges,
+          advancePaid:     adm.advancePaid,
+        },
+      });
+      if (adm.dischargedAt) {
+        timeline.push({
+          id:          `dsc-${adm.id}`,
+          type:        'DISCHARGE',
+          date:        adm.dischargedAt,
+          title:       'IPD Discharged',
+          description: `${adm.admissionNumber}  ·  ${adm.diagnosis ?? ''}`,
+          data: {
+            admissionNumber: adm.admissionNumber,
+            dischargedAt:    adm.dischargedAt,
+            diagnosis:       adm.diagnosis,
+          },
+        });
+      }
+    });
+
     // Sort all events chronologically (newest first)
     timeline.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
@@ -360,11 +412,12 @@ class EhrService {
       hospital,
       timeline,
       summary: {
-        totalAppointments:  appointments.length,
-        totalEncounters:    encounters.length,
-        totalPrescriptions: prescriptions.length,
-        totalVitals:        vitals.length,
+        totalAppointments:   appointments.length,
+        totalEncounters:     encounters.length,
+        totalPrescriptions:  prescriptions.length,
+        totalVitals:         vitals.length,
         totalInvestigations: investigations.length,
+        totalAdmissions:     admissions.length,
         totalLabOrders,
         totalPayments:      payments.length,
         lastVisit:          appointments[appointments.length - 1]?.scheduledAt || null,

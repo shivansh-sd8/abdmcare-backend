@@ -123,7 +123,7 @@ export class IPDService {
         rounds:   {
           include: {
             doctor: { select: { id: true, firstName: true, lastName: true, specialization: true } },
-            prescriptions: true,
+            prescriptions: true,  // EncounterPrescription (old-style)
             labOrders: true,
           },
           orderBy: { visitDate: 'asc' },
@@ -132,7 +132,40 @@ export class IPDService {
       },
     });
     if (!admission) throw new Error('Admission not found');
-    return admission;
+
+    // Attach new-style Prescription rows (created during IPD rounds) grouped by encounterId
+    const roundEncounterIds = (admission as any).rounds.map((r: any) => r.id);
+    const rxByAdmission = await (prisma as any).prescription.findMany({
+      where: {
+        OR: [
+          { admissionId },
+          ...(roundEncounterIds.length ? [{ encounterId: { in: roundEncounterIds } }] : []),
+        ],
+      },
+      include: {
+        doctor: { select: { id: true, firstName: true, lastName: true } },
+      },
+      orderBy: { issuedAt: 'asc' },
+    });
+
+    // Attach to each round by encounterId for easy UI access
+    const rxByEncounter: Record<string, any[]> = {};
+    rxByAdmission.forEach((rx: any) => {
+      const key = rx.encounterId || 'admission';
+      if (!rxByEncounter[key]) rxByEncounter[key] = [];
+      rxByEncounter[key].push(rx);
+    });
+
+    const rounds = (admission as any).rounds.map((round: any) => ({
+      ...round,
+      newPrescriptions: rxByEncounter[round.id] || [],
+    }));
+
+    return {
+      ...(admission as any),
+      rounds,
+      allPrescriptions: rxByAdmission, // full flat list for the UI summary panel
+    };
   }
 
   async admitPatient(hospitalId: string, data: {

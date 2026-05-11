@@ -67,6 +67,8 @@ class VitalsService {
     limit?: number;
   }) {
     const { patientId, encounterId, startDate, endDate, page = 1, limit = 10 } = filters;
+    const pageNum  = parseInt(String(page),  10) || 1;
+    const limitNum = parseInt(String(limit), 10) || 10;
 
     const where: any = {};
     if (patientId) where.patientId = patientId;
@@ -92,8 +94,8 @@ class VitalsService {
           },
         },
         orderBy: { recordedAt: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
+        skip: (pageNum - 1) * limitNum,
+        take: limitNum,
       }),
       prisma.vitals.count({ where }),
     ]);
@@ -101,9 +103,9 @@ class VitalsService {
     return {
       vitals,
       total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
+      page:       pageNum,
+      limit:      limitNum,
+      totalPages: Math.ceil(total / limitNum),
     };
   }
 

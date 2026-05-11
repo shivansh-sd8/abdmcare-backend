@@ -127,8 +127,8 @@ export async function createAdmissionRound(req: Request, res: Response) {
   try {
     const hospitalId = (req as any).user.hospitalId;
     const user       = (req as any).user;
-    // Resolve doctorId: if doctor role, look up their doctor record by email
-    let doctorId = req.body.doctorId;
+    // Resolve doctorId: body → JWT claim → DB lookup by email
+    let doctorId = req.body.doctorId || user.doctorId;
     if (!doctorId && user.role === 'DOCTOR') {
       const db = (await import('../../common/config/database')).default;
       const doctor = await db.doctor.findFirst({ where: { email: user.email } });

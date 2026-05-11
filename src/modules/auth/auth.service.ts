@@ -85,6 +85,7 @@ export class AuthService {
         lastName: user.lastName,
         role: user.role,
         hospitalId: user.hospitalId,
+        doctorId,
       },
       token,
       refreshToken,

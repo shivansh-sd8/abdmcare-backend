@@ -64,7 +64,7 @@ export class AppointmentService {
           hospitalId: patient.hospitalId,
           scheduledAt: appointmentDateTime,
           type: (data.type as AppointmentType) || AppointmentType.OPD,
-          notes: data.notes,
+          notes: data.notes || data.reason || undefined,
           status: AppointmentStatus.SCHEDULED,
         },
         include: {

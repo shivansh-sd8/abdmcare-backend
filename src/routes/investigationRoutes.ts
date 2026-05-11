@@ -45,7 +45,7 @@ router.get(
 
 router.put(
   '/:id/status',
-  authorize('DOCTOR', 'LAB_TECHNICIAN'),
+  authorize('DOCTOR', 'LAB_TECHNICIAN', 'RADIOLOGIST', 'ADMIN', 'SUPER_ADMIN'),
   [
     body('status').isIn(['ORDERED', 'SAMPLE_COLLECTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']).withMessage('Valid status is required'),
   ],

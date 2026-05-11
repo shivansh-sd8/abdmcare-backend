@@ -59,9 +59,16 @@ class InvestigationController {
   });
 
   getInvestigationStats = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const user = (req as any).user;
-    const hospitalId = user.role === 'ADMIN' ? user.hospitalId : req.query.hospitalId as string;
-    const doctorId = user.role === 'DOCTOR' ? user.id : req.query.doctorId as string;
+    const user       = (req as any).user;
+    const hospitalId = user.hospitalId ?? req.query.hospitalId as string;
+
+    // For DOCTOR role: use doctorId from JWT (set at login) or fall back to DB lookup by email
+    let doctorId: string | undefined = user.doctorId ?? (req.query.doctorId as string | undefined);
+    if (!doctorId && user.role === 'DOCTOR') {
+      const prisma = (await import('../common/config/database')).default;
+      const doctor = await prisma.doctor.findFirst({ where: { email: user.email }, select: { id: true } });
+      doctorId = doctor?.id;
+    }
 
     const stats = await investigationService.getInvestigationStats(hospitalId, doctorId);
     ResponseHandler.success(res, 'Investigation stats retrieved successfully', stats);

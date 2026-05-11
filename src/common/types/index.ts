@@ -6,6 +6,7 @@ export interface AuthenticatedRequest extends Request {
     email: string;
     role: string;
     hospitalId?: string;
+    doctorId?: string;
   };
 }
 
