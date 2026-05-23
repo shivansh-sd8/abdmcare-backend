@@ -1,0 +1,72 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+      - beta
+
+jobs:
+  deploy-production:
+    name: Deploy Production
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            set -e
+            echo "--- Ensuring nginx upload limit ---"
+            if ! grep -q "client_max_body_size" /etc/nginx/nginx.conf; then
+              sed -i '/http {/a \    client_max_body_size 10m;' /etc/nginx/nginx.conf
+              nginx -t && systemctl reload nginx
+            fi
+            echo "--- Pulling latest code ---"
+            cd /var/www/abhaayushman/abdmcare-backend
+            git pull origin main
+            echo "--- Installing dependencies ---"
+            npm ci --omit=dev
+            echo "--- Building TypeScript ---"
+            npm run build
+            echo "--- Restarting server ---"
+            pm2 reload abhaayushman-backend --update-env
+            pm2 save
+            echo "--- Production deploy complete ---"
+
+  deploy-beta:
+    name: Deploy Beta
+    if: github.ref == 'refs/heads/beta'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            set -e
+            echo "--- Ensuring nginx upload limit ---"
+            if ! grep -q "client_max_body_size" /etc/nginx/nginx.conf; then
+              sed -i '/http {/a \    client_max_body_size 10m;' /etc/nginx/nginx.conf
+              nginx -t && systemctl reload nginx
+            fi
+            echo "--- Pulling latest beta code ---"
+            cd /var/www/abhaayushman/abdmcare-backend-beta
+            git pull origin beta
+            echo "--- Installing dependencies ---"
+            npm install --omit=dev
+            echo "--- Building TypeScript ---"
+            npm run build
+            echo "--- Restarting beta server ---"
+            if pm2 list | grep -q "abhaayushman-backend-beta"; then
+              pm2 reload abhaayushman-backend-beta --update-env
+            else
+              PORT=8083 NODE_ENV=production pm2 start dist/server.js --name abhaayushman-backend-beta
+            fi
+            pm2 save
+            echo "--- Beta deploy complete ---"
