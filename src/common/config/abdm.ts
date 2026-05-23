@@ -1,23 +1,38 @@
 export const abdmConfig = {
-  baseUrl: process.env.ABDM_BASE_URL || 'https://dev.abdm.gov.in/gateway',
+  baseUrl: process.env.ABDM_BASE_URL || 'https://dev.abdm.gov.in',
+  // Gateway base — all HIP/HIU/consent async APIs live here
+  gatewayUrl: process.env.ABDM_GATEWAY_URL || 'https://dev.abdm.gov.in/gateway',
+  // DevService base — sandbox-only bridge registration lives here
+  devServiceUrl: process.env.ABDM_DEVSERVICE_URL || 'https://dev.abdm.gov.in/devservice',
   clientId: process.env.ABDM_CLIENT_ID || '',
   clientSecret: process.env.ABDM_CLIENT_SECRET || '',
   callbackUrl: process.env.ABDM_CALLBACK_URL || '',
-  
+  // X-CM-ID header: 'sbx' for sandbox, 'abdm' for production
+  cmId: process.env.ABDM_CM_ID || 'sbx',
+
   hip: {
     id: process.env.HIP_ID || '',
     name: process.env.HIP_NAME || '',
   },
-  
+
   hiu: {
     id: process.env.HIU_ID || '',
     name: process.env.HIU_NAME || '',
   },
-  
+
   endpoints: {
     auth: {
       cert: '/v2/auth/cert',
-      sessions: '/v2/sessions',
+      // Correct ABDM gateway session endpoint
+      sessions: '/gateway/v0.5/sessions',
+    },
+    bridge: {
+      // PATCH bridge URL — uses gatewayUrl (https://dev.abdm.gov.in/gateway/v1/bridges)
+      update: '/v1/bridges',
+      // POST add/update HIP/HIU service
+      addUpdateServices: '/v1/bridges/addUpdateServices',
+      // GET check registered services
+      getServices: '/v1/bridges/getServices',
     },
     // ABHA M1 APIs (v2)
     abha: {

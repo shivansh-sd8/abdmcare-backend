@@ -22,6 +22,8 @@ export class AbdmClient {
       timeout: abdmConfig.timeout,
       headers: {
         'Content-Type': 'application/json',
+        // Required by ABDM gateway on all calls: 'sbx' in sandbox, 'abdm' in production
+        'X-CM-ID': abdmConfig.cmId,
       },
     });
 
@@ -99,6 +101,7 @@ export class AbdmClient {
 
   private async authenticate(): Promise<void> {
     try {
+      // Sessions endpoint lives on baseUrl (not gatewayUrl) — e.g. https://dev.abdm.gov.in/gateway/v0.5/sessions
       const response = await axios.post<AbdmAuthResponse>(
         `${abdmConfig.baseUrl}${abdmConfig.endpoints.auth.sessions}`,
         {
@@ -155,9 +158,42 @@ export class AbdmClient {
     return response.data;
   }
 
+  async patch<T = any>(url: string, data?: any, config?: AxiosRequestConfig): Promise<T> {
+    const response = await this.axiosInstance.patch<T>(url, data, config);
+    return response.data;
+  }
+
   async delete<T = any>(url: string, config?: AxiosRequestConfig): Promise<T> {
     const response = await this.axiosInstance.delete<T>(url, config);
     return response.data;
+  }
+
+  // -------------------------------------------------------------------------
+  // Bridge management helpers (called once during sandbox setup)
+  // -------------------------------------------------------------------------
+
+  async updateBridgeUrl(bridgeUrl: string): Promise<void> {
+    // PATCH callback URL — lives on gatewayUrl (confirmed from ABDM email)
+    await this.patch(`${abdmConfig.gatewayUrl}${abdmConfig.endpoints.bridge.update}`, {
+      url: bridgeUrl,
+    });
+    logger.info(`ABDM bridge URL registered: ${bridgeUrl}`);
+  }
+
+  async addBridgeService(service: {
+    id: string;
+    name: string;
+    type: 'HIP' | 'HIU' | 'HEALTH_LOCKER';
+    active: boolean;
+    alias?: string[];
+    endpoints: { address: string; connectionType: string; use: string }[];
+  }): Promise<void> {
+    await this.post(`${abdmConfig.gatewayUrl}${abdmConfig.endpoints.bridge.addUpdateServices}`, [service]);
+    logger.info(`ABDM bridge service registered: ${service.id} (${service.type})`);
+  }
+
+  async getBridgeServices(): Promise<any> {
+    return this.get(`${abdmConfig.gatewayUrl}${abdmConfig.endpoints.bridge.getServices}`);
   }
 
   encryptSensitiveData(data: string): string {
