@@ -418,6 +418,74 @@ export class HipService {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // M1: SCAN & SHARE PATIENT MANAGEMENT
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async findPatientByAbha(abhaNumber: string) {
+    const normalized = abhaNumber.replace(/-/g, '');
+    return prisma.patient.findFirst({
+      where: {
+        OR: [
+          { abhaNumber: normalized },
+          { abhaId: normalized },
+          { abhaRecord: { abhaNumber: normalized } },
+        ],
+      },
+      include: { abhaRecord: true },
+    });
+  }
+
+  async createPatientFromScanShare(profile: any, abhaNumber: string, abhaAddress: string) {
+    const normalized = abhaNumber.replace(/-/g, '');
+    const firstName = profile.firstName || profile.name?.split(' ')[0] || 'Unknown';
+    const lastName = profile.lastName || profile.name?.split(' ').slice(1).join(' ') || '';
+    const gender = (profile.gender === 'M' ? 'MALE' : profile.gender === 'F' ? 'FEMALE' : 'OTHER') as any;
+    const mobile = profile.mobile || profile.phoneNumber || `SCAN-${Date.now()}`;
+
+    const dob = profile.yearOfBirth
+      ? new Date(`${profile.yearOfBirth}-${profile.monthOfBirth || '01'}-${profile.dayOfBirth || '01'}`)
+      : null;
+
+    const patient = await prisma.patient.create({
+      data: {
+        uhid: `UHID-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        firstName,
+        lastName,
+        gender,
+        dob,
+        mobile,
+        abhaNumber: normalized,
+        abhaId: normalized,
+        abhaAddress: abhaAddress || null,
+        address: {
+          line: profile.address || '',
+          district: profile.districtName || '',
+          state: profile.stateName || '',
+          pincode: profile.pinCode || '',
+        },
+      },
+    });
+
+    await prisma.abhaRecord.upsert({
+      where: { abhaNumber: normalized },
+      create: {
+        abhaNumber: normalized,
+        abhaAddress: abhaAddress || null,
+        patientId: patient.id,
+        kycStatus: 'VERIFIED',
+        profileData: profile,
+      },
+      update: {
+        patientId: patient.id,
+        abhaAddress: abhaAddress || undefined,
+        profileData: profile,
+      },
+    });
+
+    return patient;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // PRIVATE HELPERS
   // ═══════════════════════════════════════════════════════════════════════════
 

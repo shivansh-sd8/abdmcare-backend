@@ -271,4 +271,13 @@ router.get(
   abhaController.getLocalRecord
 );
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW vs RETURNING PATIENT LOOKUP
+// ─────────────────────────────────────────────────────────────────────────────
+router.get(
+  '/patient/lookup',
+  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  abhaController.lookupPatient
+);
+
 export default router;

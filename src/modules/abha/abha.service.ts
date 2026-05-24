@@ -671,6 +671,61 @@ export class AbhaService {
     const normalized = abhaNumber.replace(/-/g, '');
     return prisma.abhaRecord.findUnique({ where: { abhaNumber: normalized } });
   }
+
+  // ===========================================================================
+  // SECTION 11 — NEW vs RETURNING PATIENT LOOKUP
+  // ===========================================================================
+
+  async lookupPatientByAbha(identifier: string) {
+    const normalized = identifier.replace(/-/g, '').replace(/@.*$/, '');
+
+    const patient = await prisma.patient.findFirst({
+      where: {
+        OR: [
+          { abhaNumber: normalized },
+          { abhaId: normalized },
+          { abhaAddress: identifier },
+          { abhaRecord: { abhaNumber: normalized } },
+          { abhaRecord: { abhaAddress: identifier } },
+        ],
+      },
+      include: {
+        abhaRecord: true,
+        encounters: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          include: { doctor: true },
+        },
+      },
+    });
+
+    if (!patient) {
+      return { isReturning: false, patient: null };
+    }
+
+    return {
+      isReturning: true,
+      patient: {
+        id: patient.id,
+        uhid: patient.uhid,
+        firstName: patient.firstName,
+        lastName: patient.lastName,
+        gender: patient.gender,
+        dob: patient.dob,
+        mobile: patient.mobile,
+        abhaNumber: patient.abhaNumber,
+        abhaAddress: patient.abhaAddress,
+        lastVisit: patient.encounters[0]?.createdAt || null,
+        visitCount: patient.encounters.length,
+        recentEncounters: patient.encounters.map(e => ({
+          id: e.id,
+          type: e.type,
+          date: e.createdAt,
+          doctor: e.doctor ? `Dr. ${e.doctor.firstName} ${e.doctor.lastName}` : null,
+        })),
+      },
+    };
+  }
 }
 
 export default new AbhaService();

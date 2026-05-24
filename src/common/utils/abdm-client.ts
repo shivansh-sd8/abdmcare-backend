@@ -89,10 +89,11 @@ export class AbdmClient {
   private async authenticate(): Promise<void> {
     try {
       const response = await axios.post<AbdmV3SessionResponse>(
-        `https://dev.abdm.gov.in/gateway/v0.5/sessions`,
+        `https://dev.abdm.gov.in/api/hiecm/gateway/v3/sessions`,
         {
           clientId: abdmConfig.clientId,
           clientSecret: abdmConfig.clientSecret,
+          grantType: 'client_credentials',
         },
         {
           headers: {

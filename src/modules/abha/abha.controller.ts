@@ -216,6 +216,16 @@ export class AbhaController {
     if (!data) res.status(404).json({ success: false, message: 'ABHA record not found' });
     else res.json({ success: true, data });
   });
+
+  lookupPatient = asyncHandler(async (req: Request, res: Response) => {
+    const { identifier } = req.query;
+    if (!identifier || typeof identifier !== 'string') {
+      res.status(400).json({ success: false, message: 'identifier query param required (ABHA number or address)' });
+      return;
+    }
+    const data = await abhaService.lookupPatientByAbha(identifier);
+    res.json({ success: true, data });
+  });
 }
 
 export default new AbhaController();

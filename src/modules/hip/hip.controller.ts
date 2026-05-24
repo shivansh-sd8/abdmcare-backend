@@ -20,15 +20,38 @@ export class HipController {
     logger.info('Scan & Share received', { hipId: payload?.metaData?.hipId });
     setImmediate(async () => {
       try {
-        await abdmClient.gatewayPost(abdmConfig.endpoints.scanAndShare.onShare, {
+        const profile = payload?.profile?.patient || payload?.profile || {};
+        const abhaNumber = profile?.abhaNumber || profile?.ABHANumber || '';
+        const abhaAddr = profile?.abhaAddress || profile?.preferredAbhaAddress || '';
+        const tokenNumber = `TKN-${Date.now()}`;
+
+        // Persist or update patient from Scan & Share
+        if (abhaNumber) {
+          const normalized = abhaNumber.replace(/-/g, '');
+          const existingPatient = await this.hipService.findPatientByAbha(normalized);
+          if (!existingPatient) {
+            await this.hipService.createPatientFromScanShare(profile, normalized, abhaAddr);
+            logger.info('Scan & Share: new patient created', { abhaNumber: normalized });
+          } else {
+            logger.info('Scan & Share: returning patient found', { abhaNumber: normalized, patientId: existingPatient.id });
+          }
+        }
+
+        // Send on-share acknowledgement (absolute URL)
+        await abdmClient.post(abdmConfig.endpoints.scanAndShare.onShare, {
           acknowledgement: {
             status: 'SUCCESS',
-            abhaAddress: payload?.profile?.abhaAddress || '',
-            profile: { context: payload?.metaData?.context || '', tokenNumber: payload?.metaData?.tokenNumber || '', patient: payload?.profile?.patient || {} },
+            abhaAddress: abhaAddr,
+            profile: {
+              context: payload?.metaData?.context || '',
+              tokenNumber,
+              expiry: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+            },
           },
           error: null,
           resp: { requestId: payload?.requestId || '' },
         });
+        logger.info('Scan & Share: on-share acknowledged', { tokenNumber });
       } catch (err) { logger.error('on-share acknowledgement failed', err); }
     });
   });

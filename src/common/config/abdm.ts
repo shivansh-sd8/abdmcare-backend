@@ -102,7 +102,7 @@ export const abdmConfig = {
     // └─────────────────────────────────────────────────────────────────────┘
     scanAndShare: {
       profileShare: '/api/v3/hip/patient/share',
-      onShare: '/patient-share/v3/on-share',
+      onShare: `${GATEWAY_BASE}/api/hiecm/patient-share/v3/on-share`,
     },
 
     // ┌─────────────────────────────────────────────────────────────────────┐
