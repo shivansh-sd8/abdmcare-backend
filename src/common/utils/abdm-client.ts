@@ -28,7 +28,7 @@ export class AbdmClient {
   private axiosInstance: AxiosInstance;
   private accessToken: string | null = null;
   private tokenExpiryTime: number = 0;
-  private publicKey: string | null = null;   // RSA public key from ABHA cert API
+  private publicKey: string | null = null;
 
   constructor() {
     this.axiosInstance = axios.create({
@@ -50,6 +50,7 @@ export class AbdmClient {
         this.logTransaction(error.config, error.response, error);
         const retried = (error.config as any)?._retried;
         if (error.response?.status === 401 && !retried) {
+          logger.warn('[ABDM-INTERCEPTOR] Got 401, re-authenticating (one retry)...');
           this.accessToken = null;
           this.tokenExpiryTime = 0;
           error.config._retried = true;
@@ -91,7 +92,7 @@ export class AbdmClient {
     }
   }
 
-  // ── Auth: Session Token (tries V3 then V0.5 fallback) ──────────────────────
+  // ── Auth: Session Token (tries v0.5 first, then V3 fallback) ───────────────
 
   private async authenticate(): Promise<void> {
     const payload = {
@@ -99,39 +100,51 @@ export class AbdmClient {
       clientSecret: abdmConfig.clientSecret,
       grantType: 'client_credentials',
     };
-    const reqConfig = {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: abdmConfig.timeout,
-    };
 
-    let lastError: any;
+    logger.info('[ABDM-AUTH] Starting authentication', {
+      clientId: abdmConfig.clientId || '(EMPTY)',
+      hasSecret: !!abdmConfig.clientSecret,
+      endpoints: SESSION_ENDPOINTS,
+    });
+
     for (const endpoint of SESSION_ENDPOINTS) {
       try {
-        const response = await axios.post<AbdmV3SessionResponse>(endpoint, payload, reqConfig);
+        logger.info(`[ABDM-AUTH] Trying endpoint: ${endpoint}`);
+        const response = await axios.post<AbdmV3SessionResponse>(
+          endpoint,
+          payload,
+          {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: abdmConfig.timeout,
+          }
+        );
         this.accessToken = response.data.accessToken;
         this.tokenExpiryTime = Date.now() + (response.data.expiresIn || 1800) * 1000 - 60_000;
-        logger.info(`ABDM authentication successful via ${endpoint}`);
+        logger.info(`[ABDM-AUTH] SUCCESS via ${endpoint}`, {
+          tokenPreview: this.accessToken?.substring(0, 20) + '...',
+          expiresIn: response.data.expiresIn,
+        });
         return;
       } catch (error: any) {
-        lastError = error;
-        logger.warn(`ABDM auth attempt failed on ${endpoint}`, {
+        logger.error(`[ABDM-AUTH] FAILED on ${endpoint}`, {
           status: error?.response?.status,
-          data: error?.response?.data,
+          statusText: error?.response?.statusText,
+          data: JSON.stringify(error?.response?.data)?.substring(0, 500),
+          message: error?.message,
+          code: error?.code,
         });
       }
     }
 
-    logger.error('ABDM authentication failed on ALL endpoints', {
-      message: lastError?.message,
-      status: lastError?.response?.status,
-      data: lastError?.response?.data,
-      clientId: abdmConfig.clientId ? `${abdmConfig.clientId.substring(0, 6)}...` : '(empty)',
+    logger.error('[ABDM-AUTH] ALL endpoints failed', {
+      clientId: abdmConfig.clientId || '(EMPTY)',
     });
     throw new Error('Failed to authenticate with ABDM gateway');
   }
 
   async ensureValidToken(): Promise<string> {
     if (!this.accessToken || Date.now() >= this.tokenExpiryTime) {
+      logger.info('[ABDM-TOKEN] Token expired or missing, re-authenticating...');
       await this.authenticate();
     }
     return this.accessToken!;
@@ -140,21 +153,31 @@ export class AbdmClient {
   // ── RSA public key + OAEP encryption ────────────────────────────────────────
 
   async getPublicKey(): Promise<string> {
-    if (this.publicKey) return this.publicKey;
+    if (this.publicKey) {
+      logger.info('[ABDM-KEY] Using cached public key');
+      return this.publicKey;
+    }
+    const certUrl = `${abdmConfig.abhaUrl}${abdmConfig.endpoints.profile.publicCertificate}`;
+    logger.info(`[ABDM-KEY] Fetching public key from ${certUrl}`);
     try {
       const token = await this.ensureValidToken();
       const response = await axios.get<{ publicKey: string; encryptionAlgorithm: string }>(
-        `${abdmConfig.abhaUrl}${abdmConfig.endpoints.profile.publicCertificate}`,
+        certUrl,
         { headers: this.abhaHeaders(token) }
       );
       const raw = response.data.publicKey;
-      // Wrap in PEM if not already
       this.publicKey = raw.includes('BEGIN') ? raw :
         `-----BEGIN PUBLIC KEY-----\n${raw.match(/.{1,64}/g)!.join('\n')}\n-----END PUBLIC KEY-----`;
-      logger.info('ABDM V3 public key fetched');
+      logger.info('[ABDM-KEY] Public key fetched successfully');
       return this.publicKey;
     } catch (error: any) {
-      logger.error('Failed to fetch ABDM public key', { message: error?.message, status: error?.response?.status });
+      logger.error('[ABDM-KEY] Failed to fetch public key', {
+        url: certUrl,
+        status: error?.response?.status,
+        data: JSON.stringify(error?.response?.data)?.substring(0, 300),
+        message: error?.message,
+        code: error?.code,
+      });
       throw error;
     }
   }
@@ -164,6 +187,7 @@ export class AbdmClient {
    * RSA/ECB/OAEPWithSHA-1AndMGF1Padding — required by ABDM V3.
    */
   async encrypt(plaintext: string): Promise<string> {
+    logger.info('[ABDM-ENCRYPT] Encrypting value', { length: plaintext.length });
     const key = await this.getPublicKey();
     const encrypted = crypto.publicEncrypt(
       {
@@ -173,6 +197,7 @@ export class AbdmClient {
       },
       Buffer.from(plaintext, 'utf8')
     );
+    logger.info('[ABDM-ENCRYPT] Encryption successful');
     return encrypted.toString('base64');
   }
 
@@ -204,13 +229,25 @@ export class AbdmClient {
   // ── Generic HTTP helpers for ABHA server ────────────────────────────────────
 
   async abhaPost<T = any>(path: string, data?: any, xToken?: string): Promise<T> {
+    const fullUrl = `${abdmConfig.abhaUrl}${path}`;
+    logger.info(`[ABDM-API] POST ${fullUrl}`, { bodyKeys: data ? Object.keys(data) : [] });
     const token = await this.ensureValidToken();
-    const response = await this.axiosInstance.post<T>(
-      `${abdmConfig.abhaUrl}${path}`,
-      data,
-      { headers: this.abhaHeaders(token, xToken) }
-    );
-    return response.data;
+    try {
+      const response = await this.axiosInstance.post<T>(
+        fullUrl,
+        data,
+        { headers: this.abhaHeaders(token, xToken) }
+      );
+      logger.info(`[ABDM-API] POST ${path} => ${response.status} OK`);
+      return response.data;
+    } catch (error: any) {
+      logger.error(`[ABDM-API] POST ${path} FAILED`, {
+        status: error?.response?.status,
+        data: JSON.stringify(error?.response?.data)?.substring(0, 500),
+        message: error?.message,
+      });
+      throw error;
+    }
   }
 
   async abhaGet<T = any>(path: string, xToken?: string, params?: Record<string, string>, responseType?: 'json' | 'arraybuffer'): Promise<T> {
