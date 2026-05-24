@@ -1,8 +1,12 @@
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import prisma from '../../common/config/database';
 import { generateToken, generateRefreshToken } from '../../common/middleware/auth';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
+
+// In-memory store for password reset tokens (production: use Redis or DB)
+const resetTokens = new Map<string, { email: string; expiresAt: number }>();
 
 interface RegisterData {
   email: string;
@@ -455,5 +459,94 @@ export class AuthService {
       where: { id },
       data: { isActive: false },
     });
+  }
+
+  async forgotPassword(email: string) {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      // Don't reveal whether email exists
+      return { message: 'If an account with that email exists, a reset code has been sent.' };
+    }
+
+    // Generate 6-digit OTP
+    const otp = crypto.randomInt(100000, 999999).toString();
+    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes
+
+    resetTokens.set(otp, { email, expiresAt });
+
+    // Clean up expired tokens periodically
+    for (const [key, val] of resetTokens) {
+      if (val.expiresAt < Date.now()) resetTokens.delete(key);
+    }
+
+    logger.info('Password reset OTP generated', { email, otp });
+
+    // In production, send via email/SMS. For sandbox, return OTP in response.
+    return {
+      message: 'Reset code generated. Check your email/console.',
+      otp, // Remove in production — included for development/testing only
+      expiresIn: '15 minutes',
+    };
+  }
+
+  async resetPassword(email: string, otp: string, newPassword: string) {
+    const tokenData = resetTokens.get(otp);
+
+    if (!tokenData) {
+      throw new AppError('Invalid or expired reset code', 400);
+    }
+
+    if (tokenData.email !== email) {
+      throw new AppError('Invalid or expired reset code', 400);
+    }
+
+    if (tokenData.expiresAt < Date.now()) {
+      resetTokens.delete(otp);
+      throw new AppError('Reset code has expired. Please request a new one.', 400);
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      throw new AppError('User not found', 404);
+    }
+
+    if (newPassword.length < 6) {
+      throw new AppError('Password must be at least 6 characters', 400);
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({
+      where: { email },
+      data: { password: hashedPassword },
+    });
+
+    resetTokens.delete(otp);
+    logger.info('Password reset successful', { email });
+
+    return { message: 'Password updated successfully. You can now log in.' };
+  }
+
+  async updatePassword(userId: string, currentPassword: string, newPassword: string) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AppError('User not found', 404);
+    }
+
+    const isValid = await bcrypt.compare(currentPassword, user.password);
+    if (!isValid) {
+      throw new AppError('Current password is incorrect', 401);
+    }
+
+    if (newPassword.length < 6) {
+      throw new AppError('New password must be at least 6 characters', 400);
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({
+      where: { id: userId },
+      data: { password: hashedPassword },
+    });
+
+    return { message: 'Password updated successfully' };
   }
 }

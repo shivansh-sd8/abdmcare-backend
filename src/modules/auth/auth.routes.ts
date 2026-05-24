@@ -71,6 +71,36 @@ router.post(
 
 router.post('/logout', authController.logout);
 
+// Password management
+router.post(
+  '/forgot-password',
+  [body('email').isEmail().withMessage('Valid email is required')],
+  validate,
+  authController.forgotPassword
+);
+
+router.post(
+  '/reset-password',
+  [
+    body('email').isEmail().withMessage('Valid email is required'),
+    body('otp').notEmpty().withMessage('Reset code is required'),
+    body('newPassword').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  ],
+  validate,
+  authController.resetPassword
+);
+
+router.post(
+  '/update-password',
+  authenticate,
+  [
+    body('currentPassword').notEmpty().withMessage('Current password is required'),
+    body('newPassword').isLength({ min: 6 }).withMessage('New password must be at least 6 characters'),
+  ],
+  validate,
+  authController.updatePassword
+);
+
 // User Management - SUPER_ADMIN and ADMIN
 router.get('/users', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), authController.getAllUsers);
 router.get('/users/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), authController.getUserById);

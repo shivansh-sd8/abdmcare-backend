@@ -1,94 +1,153 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// ABDM V3 Configuration — M1 + M2 + M3
+// All URLs confirmed from official Postman Collections (M1: 18-08-2025, M2/M3: 16-02-2026)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GATEWAY_BASE = process.env.ABDM_GATEWAY_BASE || 'https://dev.abdm.gov.in';
+
 export const abdmConfig = {
-  baseUrl: process.env.ABDM_BASE_URL || 'https://dev.abdm.gov.in',
-  // Gateway base — all HIP/HIU/consent async APIs live here
-  gatewayUrl: process.env.ABDM_GATEWAY_URL || 'https://dev.abdm.gov.in/gateway',
-  // DevService base — sandbox-only bridge registration lives here
-  devServiceUrl: process.env.ABDM_DEVSERVICE_URL || 'https://dev.abdm.gov.in/devservice',
+  // ── Base URLs ──────────────────────────────────────────────────────────────
+  gatewayUrl: process.env.ABDM_GATEWAY_URL || `${GATEWAY_BASE}/api/hiecm/gateway/v3`,
+  abhaUrl: process.env.ABDM_ABHA_URL || 'https://abhasbx.abdm.gov.in/abha/api',
+  phrUrl: process.env.ABDM_PHR_URL || 'https://abhasbx.abdm.gov.in/abha/api/v3/phr/web',
+  facilityUrl: process.env.ABDM_FACILITY_URL || 'https://apihspsbx.abdm.gov.in/v4/int',
+
+  // ── Client credentials ─────────────────────────────────────────────────────
   clientId: process.env.ABDM_CLIENT_ID || '',
   clientSecret: process.env.ABDM_CLIENT_SECRET || '',
   callbackUrl: process.env.ABDM_CALLBACK_URL || '',
-  // X-CM-ID header: 'sbx' for sandbox, 'abdm' for production
   cmId: process.env.ABDM_CM_ID || 'sbx',
 
   hip: {
     id: process.env.HIP_ID || '',
     name: process.env.HIP_NAME || '',
   },
-
   hiu: {
     id: process.env.HIU_ID || '',
     name: process.env.HIU_NAME || '',
   },
 
+  // ── Endpoints ─────────────────────────────────────────────────────────────
+
   endpoints: {
+    // ┌─────────────────────────────────────────────────────────────────────┐
+    // │  GATEWAY (relative to gatewayUrl)                                    │
+    // └─────────────────────────────────────────────────────────────────────┘
     auth: {
-      cert: '/v2/auth/cert',
-      // Correct ABDM gateway session endpoint
-      sessions: '/gateway/v0.5/sessions',
+      sessions: '/sessions',
+      cert: '/certs',
+      openidConfig: '/.well-known/openid-configuration',
     },
+
     bridge: {
-      // PATCH bridge URL — uses gatewayUrl (https://dev.abdm.gov.in/gateway/v1/bridges)
-      update: '/v1/bridges',
-      // POST add/update HIP/HIU service
-      addUpdateServices: '/v1/bridges/addUpdateServices',
-      // GET check registered services
-      getServices: '/v1/bridges/getServices',
+      updateUrl: '/bridge/url',
+      getServices: '/bridge-services',
+      getServiceById: '/bridge-service/serviceId',
     },
-    // ABHA M1 APIs (v2)
-    abha: {
-      generateAadhaarOtp: '/v2/registration/aadhaar/generateOtp',
-      verifyAadhaarOtp: '/v2/registration/aadhaar/verifyOTP',
-      resendAadhaarOtp: '/v2/registration/aadhaar/resendAadhaarOtp',
-      createHealthId: '/v2/registration/aadhaar/createHealthIdWithPreVerified',
-      generateMobileOtp: '/v2/registration/mobile/generateOtp',
-      verifyMobileOtp: '/v2/registration/mobile/verifyOtp',
-      
-      // Profile APIs
-      profile: '/v2/account/profile',
-      updateProfile: '/v2/account/profile',
-      qrCode: '/v2/account/qrCode',
-      card: '/v2/account/getPngCard',
-      
-      // Search & Retrieve
-      searchByHealthId: '/v2/search/searchByHealthId',
-      searchByMobile: '/v2/search/existsByMobile',
-      authInit: '/v2/auth/init',
-      authConfirm: '/v2/auth/confirm',
+
+    // ┌─────────────────────────────────────────────────────────────────────┐
+    // │  FACILITY (relative to facilityUrl)                                  │
+    // └─────────────────────────────────────────────────────────────────────┘
+    facility: {
+      addUpdateServices: '/v1/bridges/MutipleHRPAddUpdateServices',
     },
-    // HIP APIs (M2)
+
+    // ┌─────────────────────────────────────────────────────────────────────┐
+    // │  M1 — ABHA ENROLLMENT (relative to abhaUrl)                          │
+    // └─────────────────────────────────────────────────────────────────────┘
+    enrollment: {
+      requestOtp: '/v3/enrollment/request/otp',
+      enrolByAadhaar: '/v3/enrollment/enrol/byAadhaar',
+      enrolByDocument: '/v3/enrollment/enrol/byDocument',
+      authByAbdm: '/v3/enrollment/auth/byAbdm',
+      suggestion: '/v3/enrollment/enrol/suggestion',
+      abhaAddress: '/v3/enrollment/enrol/abha-address',
+      children: '/v3/enrollment/profile/children',
+    },
+
+    // ┌─────────────────────────────────────────────────────────────────────┐
+    // │  M1 — ABHA PROFILE / LOGIN (relative to abhaUrl)                     │
+    // └─────────────────────────────────────────────────────────────────────┘
+    profile: {
+      publicCertificate: '/v3/profile/public/certificate',
+      loginRequestOtp: '/v3/profile/login/request/otp',
+      loginVerify: '/v3/profile/login/verify',
+      loginVerifyUser: '/v3/profile/login/verify/user',
+      loginSearch: '/v3/profile/login/search',
+      account: '/v3/profile/account',
+      qrCode: '/v3/profile/account/qrCode',
+      abhaCard: '/v3/profile/account/abha-card',
+      requestOtp: '/v3/profile/account/request/otp',
+      verify: '/v3/profile/account/verify',
+      requestEmailVerification: '/v3/profile/account/request/emailVerificationLink',
+      logout: '/v3/profile/account/request/logout',
+      refreshToken: '/v3/profile/account/request/token',
+      abhaSearch: '/v3/profile/account/abha/search',
+    },
+
+    // ┌─────────────────────────────────────────────────────────────────────┐
+    // │  M1 — PHR / ABHA Address Verification (relative to phrUrl)           │
+    // └─────────────────────────────────────────────────────────────────────┘
+    phr: {
+      search: '/login/abha/search',
+      requestOtp: '/login/abha/request/otp',
+      verify: '/login/abha/verify',
+      profile: '/login/profile/abha-profile',
+      phrCard: '/login/profile/abha/phr-card',
+      qrCode: '/login/profile/abha/qr-code',
+    },
+
+    // ┌─────────────────────────────────────────────────────────────────────┐
+    // │  M1 — SCAN & SHARE                                                   │
+    // └─────────────────────────────────────────────────────────────────────┘
+    scanAndShare: {
+      profileShare: '/api/v3/hip/patient/share',
+      onShare: '/patient-share/v3/on-share',
+    },
+
+    // ┌─────────────────────────────────────────────────────────────────────┐
+    // │  M2 — HIP LINKING & DATA TRANSFER (absolute URLs — GATEWAY_BASE)     │
+    // └─────────────────────────────────────────────────────────────────────┘
     hip: {
-      discover: '/v0.5/care-contexts/discover',
-      link: '/v0.5/links/link/init',
-      onDiscover: '/v0.5/care-contexts/on-discover',
-      onLink: '/v0.5/links/link/on-init',
-      healthInformation: '/v0.5/health-information/hip/request',
-      onRequest: '/v0.5/health-information/hip/on-request',
-      notify: '/v0.5/links/link/add-contexts',
+      // HIP Initiated Linking
+      generateToken: `${GATEWAY_BASE}/api/hiecm/v3/token/generate-token`,
+      linkCareContext: `${GATEWAY_BASE}/api/hiecm/hip/v3/link/carecontext`,
+      linkContextNotify: `${GATEWAY_BASE}/api/hiecm/hip/v3/link/context/notify`,
+      smsNotify: `${GATEWAY_BASE}/api/hiecm/hip/v3/link/patient/links/sms/notify2`,
+
+      // User Initiated Linking (HIP sends these back to gateway)
+      onDiscover: `${GATEWAY_BASE}/api/hiecm/user-initiated-linking/v3/patient/care-context/on-discover`,
+      onLinkInit: `${GATEWAY_BASE}/api/hiecm/user-initiated-linking/v3/link/care-context/on-init`,
+      onLinkConfirm: `${GATEWAY_BASE}/api/hiecm/user-initiated-linking/v3/link/care-context/on-confirm`,
+
+      // Data Transfer (HIP side)
+      consentOnNotify: `${GATEWAY_BASE}/api/hiecm/consent/v3/request/hip/on-notify`,
+      healthInfoOnRequest: `${GATEWAY_BASE}/api/hiecm/data-flow/v3/health-information/hip/on-request`,
+      dataFlowNotify: `${GATEWAY_BASE}/api/hiecm/data-flow/v3/health-information/notify`,
     },
-    // HIU APIs (M3)
+
+    // ┌─────────────────────────────────────────────────────────────────────┐
+    // │  M3 — HIU CONSENT & DATA REQUEST (absolute URLs — GATEWAY_BASE)      │
+    // └─────────────────────────────────────────────────────────────────────┘
     hiu: {
-      discover: '/v0.5/care-contexts/discover',
-      link: '/v0.5/links/link/init',
-      consentRequest: '/v0.5/consent-requests/init',
-      healthInformationRequest: '/v0.5/health-information/cm/request',
-      onDiscover: '/v0.5/care-contexts/on-discover',
-      onInit: '/v0.5/consent-requests/on-init',
-      onStatus: '/v0.5/consent-requests/on-status',
-      onFetch: '/v0.5/consents/hip/on-notify',
+      consentInit: `${GATEWAY_BASE}/api/hiecm/consent/v3/request/init`,
+      consentStatus: `${GATEWAY_BASE}/api/hiecm/consent/v3/request/status`,
+      consentOnNotify: `${GATEWAY_BASE}/api/hiecm/consent/v3/request/hiu/on-notify`,
+      consentFetch: `${GATEWAY_BASE}/api/hiecm/consent/v3/fetch`,
+      healthInfoRequest: `${GATEWAY_BASE}/api/hiecm/data-flow/v3/health-information/request`,
+      dataFlowNotify: `${GATEWAY_BASE}/api/hiecm/data-flow/v3/health-information/notify`,
+      dataPushUrl: `${GATEWAY_BASE}/api-hiu/data/notification`,
     },
-    // Consent Management
+
+    // Keep legacy keys for any remaining old references (aliases)
     consent: {
-      init: '/v0.5/consent-requests/init',
-      status: '/v0.5/consent-requests/status',
-      fetch: '/v0.5/consents/fetch',
-      notify: '/v0.5/consents/hip/notify',
-      onNotify: '/v0.5/consents/hip/on-notify',
+      init: `${GATEWAY_BASE}/api/hiecm/consent/v3/request/init`,
+      fetch: `${GATEWAY_BASE}/api/hiecm/consent/v3/fetch`,
+      notify: `${GATEWAY_BASE}/api/hiecm/consent/v3/request/hiu/on-notify`,
     },
   },
-  
+
   timeout: 30000,
-  retryAttempts: 3,
-  retryDelay: 1000,
 };
 
 export default abdmConfig;

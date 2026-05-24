@@ -2,21 +2,76 @@ import { Router } from 'express';
 import hipController from './hip.controller';
 import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
+import { authenticate, authorize } from '../../common/middleware/auth';
 
 const router = Router();
 
-// ABDM Gateway callbacks (no auth required - verified by ABDM signature)
-router.post('/v0.5/care-contexts/discover', hipController.discoverCareContexts);
-router.post('/v0.5/links/link/init', hipController.linkCareContexts);
-router.post('/v0.5/health-information/hip/request', hipController.handleHealthInformationRequest);
+// ─────────────────────────────────────────────────────────────────────────────
+// ABDM V3 CALLBACKS (no local auth — ABDM verifies via token)
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Internal APIs (auth required)
+// Scan & Share
+router.post('/patient/share', hipController.handleProfileShare);
+
+// User Initiated Linking callbacks (ABDM → HIP)
+router.post('/patient/care-context/discover', hipController.discoverCareContexts);
+router.post('/link/care-context/init', hipController.linkCareContexts);
+router.post('/link/care-context/confirm', hipController.confirmLinkCareContexts);
+
+// Data Transfer callbacks (ABDM → HIP)
+router.post('/consent/notify', hipController.handleConsentHipNotify);
+router.post('/health-information/request', hipController.handleHealthInformationRequest);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTERNAL APIs (auth required) — M2 HIP-initiated actions
+// ─────────────────────────────────────────────────────────────────────────────
+router.use(authenticate);
+
+router.post(
+  '/link/generate-token',
+  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  [
+    body('abhaNumber').notEmpty(),
+    body('abhaAddress').notEmpty(),
+    body('name').notEmpty(),
+    body('gender').notEmpty(),
+    body('yearOfBirth').isInt(),
+  ],
+  validate,
+  hipController.generateLinkToken
+);
+
+router.post(
+  '/link/carecontext',
+  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  [body('abhaNumber').notEmpty(), body('abhaAddress').notEmpty(), body('patient').isArray()],
+  validate,
+  hipController.hipInitiatedLink
+);
+
+router.post(
+  '/link/context/notify',
+  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  [body('abhaAddress').notEmpty(), body('careContextReference').notEmpty()],
+  validate,
+  hipController.linkContextNotify
+);
+
+router.post(
+  '/sms/notify',
+  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  [body('phoneNo').notEmpty()],
+  validate,
+  hipController.smsNotify
+);
+
 router.post(
   '/patients/:patientId/care-contexts',
+  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
   [
     body('careContexts').isArray().withMessage('Care contexts must be an array'),
-    body('careContexts.*.encounterId').notEmpty().withMessage('Encounter ID is required'),
-    body('careContexts.*.display').notEmpty().withMessage('Display name is required'),
+    body('careContexts.*.encounterId').notEmpty(),
+    body('careContexts.*.display').notEmpty(),
   ],
   validate,
   hipController.addCareContexts

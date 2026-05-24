@@ -1,70 +1,221 @@
-import { Request, Response, NextFunction } from 'express';
-import { AbhaService } from './abha.service';
-import ResponseHandler from '../../common/utils/response';
+import { Request, Response } from 'express';
 import { asyncHandler } from '../../common/middleware/errorHandler';
+import abhaService from './abha.service';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper — extract X-token from body or header
+// ─────────────────────────────────────────────────────────────────────────────
+function getXToken(req: Request): string {
+  const fromHeader = req.headers['x-token'] as string;
+  const fromBody = (req.body as any).xToken;
+  const raw = fromHeader || fromBody || '';
+  return raw.replace(/^Bearer\s+/i, '');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Controllers
+// ─────────────────────────────────────────────────────────────────────────────
 
 export class AbhaController {
-  private abhaService: AbhaService;
 
-  constructor() {
-    this.abhaService = new AbhaService();
-  }
+  // ── Enrollment: Aadhaar ────────────────────────────────────────────────────
 
-  generateAadhaarOtp = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const { aadhaar } = req.body;
-      const result = await this.abhaService.generateAadhaarOtp({ aadhaar });
-      ResponseHandler.success(res, result.message, result);
+  generateAadhaarOtp = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.generateAadhaarOtp(req.body.aadhaar);
+    res.json({ success: true, data });
+  });
+
+  resendAadhaarOtp = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.resendAadhaarOtp(req.body.txnId, req.body.aadhaar);
+    res.json({ success: true, data });
+  });
+
+  enrolByAadhaar = asyncHandler(async (req: Request, res: Response) => {
+    const { txnId, otp, mobile } = req.body;
+    if (!mobile || mobile.length !== 10) {
+      res.status(400).json({ success: false, message: 'A valid 10-digit mobile number is required for ABHA enrollment' });
+      return;
     }
-  );
+    const data = await abhaService.enrolByAadhaar({ txnId, otp, mobile });
+    res.json({ success: true, data });
+  });
 
-  verifyAadhaarOtp = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const { txnId, otp } = req.body;
-      const result = await this.abhaService.verifyAadhaarOtp({ txnId, otp });
-      ResponseHandler.success(res, result.message, result);
-    }
-  );
+  // ── Mobile verification (post Aadhaar enrol) ───────────────────────────────
 
-  createAbha = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const { txnId, mobile, email } = req.body;
-      const result = await this.abhaService.createAbha({ txnId, mobile, email });
-      ResponseHandler.success(res, result.message, result.data, 201);
-    }
-  );
+  sendMobileVerifyOtp = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.sendMobileVerifyOtp(req.body.txnId, req.body.mobile);
+    res.json({ success: true, data });
+  });
 
-  getProfile = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const { abhaId } = req.params;
-      const result = await this.abhaService.getProfile(abhaId);
-      ResponseHandler.success(res, 'Profile fetched successfully', result.data);
-    }
-  );
+  verifyMobileOtp = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.verifyMobileOtp(req.body.txnId, req.body.otp);
+    res.json({ success: true, data });
+  });
 
-  getQrCode = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const { abhaId } = req.params;
-      const result = await this.abhaService.getQrCode(abhaId);
-      ResponseHandler.success(res, 'QR code fetched successfully', result.data);
-    }
-  );
+  // ── ABHA Address ───────────────────────────────────────────────────────────
 
-  searchAbha = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const query = req.body;
-      const result = await this.abhaService.searchAbha(query);
-      ResponseHandler.success(res, 'Search completed successfully', result.data);
-    }
-  );
+  getAbhaAddressSuggestions = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.getAbhaAddressSuggestions(req.body.txnId || req.query.txnId as string);
+    res.json({ success: true, data });
+  });
 
-  linkToPatient = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const { abhaNumber, patientId } = req.body;
-      const result = await this.abhaService.linkToPatient(abhaNumber, patientId);
-      ResponseHandler.success(res, result.message);
+  createAbhaAddress = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.createAbhaAddress(req.body.txnId, req.body.abhaAddress);
+    res.json({ success: true, data });
+  });
+
+  // ── Enrollment: Driving License ────────────────────────────────────────────
+
+  dlSendMobileOtp = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.dlSendMobileOtp(req.body.mobile);
+    res.json({ success: true, data });
+  });
+
+  dlVerifyMobileOtp = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.dlVerifyMobileOtp(req.body.txnId, req.body.otp);
+    res.json({ success: true, data });
+  });
+
+  enrolByDrivingLicense = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.enrolByDrivingLicense(req.body);
+    res.json({ success: true, data });
+  });
+
+  // ── Login / Verification ───────────────────────────────────────────────────
+
+  loginRequestOtp = asyncHandler(async (req: Request, res: Response) => {
+    const { scope, loginHint, loginId, otpSystem } = req.body;
+    const data = await abhaService.loginRequestOtp({ scope, loginHint, loginId, otpSystem });
+    res.json({ success: true, data });
+  });
+
+  loginVerify = asyncHandler(async (req: Request, res: Response) => {
+    const { scope, txnId, otp } = req.body;
+    const data = await abhaService.loginVerify({ scope, txnId, otp });
+    res.json({ success: true, data });
+  });
+
+  loginVerifyPassword = asyncHandler(async (req: Request, res: Response) => {
+    const { scope, abhaNumber, password } = req.body;
+    const data = await abhaService.loginVerifyPassword({ scope, abhaNumber, password });
+    res.json({ success: true, data });
+  });
+
+  loginVerifyUser = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.loginVerifyUser(req.body.abhaNumber, req.body.txnId);
+    res.json({ success: true, data });
+  });
+
+  loginSearch = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.loginSearch(req.body.abhaNumber);
+    res.json({ success: true, data });
+  });
+
+  // ── Profile (X-token required) ─────────────────────────────────────────────
+
+  getProfile = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.getProfile(getXToken(req));
+    res.json({ success: true, data });
+  });
+
+  updateProfile = asyncHandler(async (req: Request, res: Response) => {
+    const xToken = getXToken(req);
+    const { xToken: _omit, ...updates } = req.body;
+    const data = await abhaService.updateProfile(xToken, updates);
+    res.json({ success: true, data });
+  });
+
+  getQrCode = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.getQrCode(getXToken(req));
+    res.json({ success: true, data });
+  });
+
+  getAbhaCard = asyncHandler(async (req: Request, res: Response) => {
+    const cardData = await abhaService.getAbhaCard(getXToken(req));
+    if (Buffer.isBuffer(cardData) || typeof cardData === 'string') {
+      res.set('Content-Type', 'image/png');
+      res.send(cardData);
+    } else {
+      res.json({ success: true, data: cardData });
     }
-  );
+  });
+
+  logout = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.logout(getXToken(req));
+    res.json({ success: true, data });
+  });
+
+  // ── Profile OTP ops ────────────────────────────────────────────────────────
+
+  profileRequestOtp = asyncHandler(async (req: Request, res: Response) => {
+    const xToken = getXToken(req);
+    const { scope, loginHint, loginId, otpSystem } = req.body;
+    const data = await abhaService.profileRequestOtp(xToken, { scope, loginHint, loginId, otpSystem });
+    res.json({ success: true, data });
+  });
+
+  profileVerifyOtp = asyncHandler(async (req: Request, res: Response) => {
+    const xToken = getXToken(req);
+    const { scope, txnId, otp } = req.body;
+    const data = await abhaService.profileVerifyOtp(xToken, { scope, txnId, otp });
+    res.json({ success: true, data });
+  });
+
+  // ── Find ABHA ──────────────────────────────────────────────────────────────
+
+  findAbhaByMobile = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.findAbhaByMobile(req.body.mobile);
+    res.json({ success: true, data });
+  });
+
+  // ── PHR / ABHA Address Verification ───────────────────────────────────────
+
+  phrSearch = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.phrSearch(req.body.abhaAddress);
+    res.json({ success: true, data });
+  });
+
+  phrRequestOtp = asyncHandler(async (req: Request, res: Response) => {
+    const { abhaAddress, scope, otpSystem } = req.body;
+    const data = await abhaService.phrRequestOtp({ abhaAddress, scope, otpSystem });
+    res.json({ success: true, data });
+  });
+
+  phrVerifyOtp = asyncHandler(async (req: Request, res: Response) => {
+    const { scope, txnId, otp } = req.body;
+    const data = await abhaService.phrVerifyOtp({ scope, txnId, otp });
+    res.json({ success: true, data });
+  });
+
+  phrGetProfile = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.phrGetProfile(getXToken(req));
+    res.json({ success: true, data });
+  });
+
+  phrGetCard = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.phrGetCard(getXToken(req));
+    res.json({ success: true, data });
+  });
+
+  // ── Patient linking ────────────────────────────────────────────────────────
+
+  linkToPatient = asyncHandler(async (req: Request, res: Response) => {
+    const { abhaNumber, patientId, abhaAddress } = req.body;
+    const data = await abhaService.linkToPatient(abhaNumber, patientId, abhaAddress);
+    res.json({ success: true, data });
+  });
+
+  unlinkFromPatient = asyncHandler(async (req: Request, res: Response) => {
+    const { abhaNumber, patientId } = req.body;
+    const data = await abhaService.unlinkFromPatient(abhaNumber, patientId);
+    res.json({ success: true, data });
+  });
+
+  getLocalRecord = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.getLocalAbhaRecord(req.params.abhaNumber);
+    if (!data) res.status(404).json({ success: false, message: 'ABHA record not found' });
+    else res.json({ success: true, data });
+  });
 }
 
 export default new AbhaController();

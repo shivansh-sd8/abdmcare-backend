@@ -26,6 +26,3 @@ export interface PaginatedResponse<T> {
     totalPages: number;
   };
 }
-
-export * from './abdm.types';
-export * from './fhir.types';

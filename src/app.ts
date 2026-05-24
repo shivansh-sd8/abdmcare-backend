@@ -36,7 +36,7 @@ app.use(
     origin: corsOrigin,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-token', 'REQUEST-ID', 'TIMESTAMP'],
     exposedHeaders: ['Content-Range', 'X-Content-Range'],
     maxAge: 86400, // 24 hours
   })
@@ -82,6 +82,12 @@ app.get('/', (_req, res) => {
 
 import routes from './routes';
 app.use('/api/v1', routes);
+
+// ── ABDM V3 callbacks (ABDM gateway calls these — no /api/v1 prefix) ─────
+import hipCallbackRoutes from './modules/hip/hip.routes';
+import hiuCallbackRoutes from './modules/hiu/hiu.routes';
+app.use('/api/v3/hip', hipCallbackRoutes);
+app.use('/api/v3/hiu', hiuCallbackRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

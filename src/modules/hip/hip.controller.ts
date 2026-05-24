@@ -2,6 +2,9 @@ import { Request, Response, NextFunction } from 'express';
 import { HipService } from './hip.service';
 import ResponseHandler from '../../common/utils/response';
 import { asyncHandler } from '../../common/middleware/errorHandler';
+import abdmClient from '../../common/utils/abdm-client';
+import { abdmConfig } from '../../common/config/abdm';
+import logger from '../../common/config/logger';
 
 export class HipController {
   private hipService: HipService;
@@ -10,37 +13,83 @@ export class HipController {
     this.hipService = new HipService();
   }
 
-  // ABDM Gateway callbacks
-  discoverCareContexts = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.hipService.discoverCareContexts(req.body);
-      ResponseHandler.success(res, 'Care contexts discovered', result);
-    }
-  );
+  // ── Scan & Share callback (ABDM → HIP) ────────────────────────────────────
+  handleProfileShare = asyncHandler(async (req: Request, res: Response) => {
+    res.status(202).json({ message: 'Profile share received' });
+    const payload = req.body;
+    logger.info('Scan & Share received', { hipId: payload?.metaData?.hipId });
+    setImmediate(async () => {
+      try {
+        await abdmClient.gatewayPost(abdmConfig.endpoints.scanAndShare.onShare, {
+          acknowledgement: {
+            status: 'SUCCESS',
+            abhaAddress: payload?.profile?.abhaAddress || '',
+            profile: { context: payload?.metaData?.context || '', tokenNumber: payload?.metaData?.tokenNumber || '', patient: payload?.profile?.patient || {} },
+          },
+          error: null,
+          resp: { requestId: payload?.requestId || '' },
+        });
+      } catch (err) { logger.error('on-share acknowledgement failed', err); }
+    });
+  });
 
-  linkCareContexts = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.hipService.linkCareContexts(req.body);
-      ResponseHandler.success(res, 'Care contexts linked', result);
-    }
-  );
+  // ── M2: HIP Initiated Linking ──────────────────────────────────────────────
+  generateLinkToken = asyncHandler(async (req: Request, res: Response) => {
+    const result = await this.hipService.generateLinkToken(req.body);
+    ResponseHandler.success(res, 'Link token generated', result);
+  });
 
-  handleHealthInformationRequest = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.hipService.handleHealthInformationRequest(req.body);
-      ResponseHandler.success(res, result.message, result);
-    }
-  );
+  hipInitiatedLink = asyncHandler(async (req: Request, res: Response) => {
+    const result = await this.hipService.hipInitiatedLink(req.body);
+    ResponseHandler.success(res, 'Care context linked', result);
+  });
 
-  // Internal APIs
-  addCareContexts = asyncHandler(
-    async (req: Request, res: Response, _next: NextFunction) => {
-      const { patientId } = req.params;
-      const { careContexts } = req.body;
-      const result = await this.hipService.addCareContexts(patientId, careContexts);
-      ResponseHandler.success(res, result.message, result.data, 201);
-    }
-  );
+  linkContextNotify = asyncHandler(async (req: Request, res: Response) => {
+    const result = await this.hipService.linkContextNotify(req.body);
+    ResponseHandler.success(res, 'Link notification sent', result);
+  });
+
+  smsNotify = asyncHandler(async (req: Request, res: Response) => {
+    const { phoneNo, hipName, hipId } = req.body;
+    const result = await this.hipService.smsNotify(phoneNo, hipName || abdmConfig.hip.name, hipId || abdmConfig.hip.id);
+    ResponseHandler.success(res, 'SMS notification sent', result);
+  });
+
+  // ── M2: User Initiated Linking (ABDM callbacks) ────────────────────────────
+  discoverCareContexts = asyncHandler(async (req: Request, res: Response) => {
+    const result = await this.hipService.discoverCareContexts(req.body);
+    res.status(202).json(result);
+  });
+
+  linkCareContexts = asyncHandler(async (req: Request, res: Response) => {
+    const result = await this.hipService.linkCareContexts(req.body);
+    res.status(202).json(result);
+  });
+
+  confirmLinkCareContexts = asyncHandler(async (req: Request, res: Response) => {
+    const result = await this.hipService.confirmLinkCareContexts(req.body);
+    res.status(202).json(result);
+  });
+
+  // ── M2: Data Transfer (ABDM callbacks) ─────────────────────────────────────
+  handleConsentHipNotify = asyncHandler(async (req: Request, res: Response) => {
+    const { requestId, consentId, status } = req.body;
+    await this.hipService.handleConsentHipNotify({ requestId, consentId, status });
+    res.status(202).json({ message: 'Acknowledged' });
+  });
+
+  handleHealthInformationRequest = asyncHandler(async (req: Request, res: Response) => {
+    const result = await this.hipService.handleHealthInformationRequest(req.body);
+    res.status(202).json(result);
+  });
+
+  // ── Internal APIs ──────────────────────────────────────────────────────────
+  addCareContexts = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
+    const { patientId } = req.params;
+    const { careContexts } = req.body;
+    const result = await this.hipService.addCareContexts(patientId, careContexts);
+    ResponseHandler.success(res, result.message, result.data, 201);
+  });
 }
 
 export default new HipController();
