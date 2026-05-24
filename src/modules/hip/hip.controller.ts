@@ -51,6 +51,18 @@ export class HipController {
           error: null,
           resp: { requestId: payload?.requestId || '' },
         });
+        // Persist received share event for frontend polling
+        await this.hipService.saveReceivedShare({
+          abhaNumber: abhaNumber.replace(/-/g, ''),
+          abhaAddress: abhaAddr,
+          name: profile?.name || `${profile?.firstName || ''} ${profile?.lastName || ''}`.trim(),
+          gender: profile?.gender || '',
+          mobile: profile?.mobile || profile?.phoneNumber || '',
+          tokenNumber,
+          requestId: payload?.requestId || '',
+          rawProfile: profile,
+        });
+
         logger.info('Scan & Share: on-share acknowledged', { tokenNumber });
       } catch (err) { logger.error('on-share acknowledgement failed', err); }
     });
@@ -104,6 +116,23 @@ export class HipController {
   handleHealthInformationRequest = asyncHandler(async (req: Request, res: Response) => {
     const result = await this.hipService.handleHealthInformationRequest(req.body);
     res.status(202).json(result);
+  });
+
+  // ── M1: Facility QR & Received Shares ──────────────────────────────────────
+  getFacilityQrData = asyncHandler(async (_req: Request, res: Response) => {
+    const data = {
+      hipId: abdmConfig.hip.id,
+      hipName: abdmConfig.hip.name,
+      callbackUrl: abdmConfig.callbackUrl,
+      scanAndShareUrl: `${abdmConfig.callbackUrl}/api/v3/hip/patient/share`,
+      counter: Date.now().toString(36),
+    };
+    ResponseHandler.success(res, 'Facility QR data', data);
+  });
+
+  getReceivedShares = asyncHandler(async (_req: Request, res: Response) => {
+    const shares = await this.hipService.getReceivedShares();
+    ResponseHandler.success(res, 'Received profile shares', shares);
   });
 
   // ── Internal APIs ──────────────────────────────────────────────────────────

@@ -27,6 +27,19 @@ router.post('/health-information/request', hipController.handleHealthInformation
 // ─────────────────────────────────────────────────────────────────────────────
 router.use(authenticate);
 
+// M1: Facility QR data & received shares
+router.get(
+  '/facility-qr',
+  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  hipController.getFacilityQrData
+);
+
+router.get(
+  '/received-shares',
+  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  hipController.getReceivedShares
+);
+
 router.post(
   '/link/generate-token',
   authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),

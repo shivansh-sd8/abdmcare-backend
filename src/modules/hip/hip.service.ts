@@ -52,7 +52,42 @@ interface HealthInformationRequest {
 // HIP Service V3
 // ─────────────────────────────────────────────────────────────────────────────
 
+interface ReceivedShare {
+  id: string;
+  abhaNumber: string;
+  abhaAddress: string;
+  name: string;
+  gender: string;
+  mobile: string;
+  tokenNumber: string;
+  requestId: string;
+  rawProfile: any;
+  receivedAt: string;
+}
+
+const receivedShares: ReceivedShare[] = [];
+const MAX_SHARES = 100;
+
 export class HipService {
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // M1: SCAN & SHARE — RECEIVED EVENTS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async saveReceivedShare(data: Omit<ReceivedShare, 'id' | 'receivedAt'>) {
+    const share: ReceivedShare = {
+      ...data,
+      id: crypto.randomUUID(),
+      receivedAt: new Date().toISOString(),
+    };
+    receivedShares.unshift(share);
+    if (receivedShares.length > MAX_SHARES) receivedShares.length = MAX_SHARES;
+    return share;
+  }
+
+  async getReceivedShares() {
+    return receivedShares;
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // M2: HIP INITIATED LINKING

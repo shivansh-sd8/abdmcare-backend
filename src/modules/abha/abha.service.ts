@@ -678,17 +678,21 @@ export class AbhaService {
 
   async lookupPatientByAbha(identifier: string) {
     const normalized = identifier.replace(/-/g, '').replace(/@.*$/, '');
+    const isMobile = /^\d{10}$/.test(identifier.trim());
+
+    const conditions: any[] = [
+      { abhaNumber: normalized },
+      { abhaId: normalized },
+      { abhaAddress: identifier },
+      { abhaRecord: { abhaNumber: normalized } },
+      { abhaRecord: { abhaAddress: identifier } },
+    ];
+    if (isMobile) {
+      conditions.push({ mobile: identifier.trim() });
+    }
 
     const patient = await prisma.patient.findFirst({
-      where: {
-        OR: [
-          { abhaNumber: normalized },
-          { abhaId: normalized },
-          { abhaAddress: identifier },
-          { abhaRecord: { abhaNumber: normalized } },
-          { abhaRecord: { abhaAddress: identifier } },
-        ],
-      },
+      where: { OR: conditions },
       include: {
         abhaRecord: true,
         encounters: {
