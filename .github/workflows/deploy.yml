@@ -29,9 +29,11 @@ jobs:
             cd /var/www/abhaayushman/abdmcare-backend
             git pull origin main
             echo "--- Installing dependencies ---"
-            npm ci --omit=dev
+            npm ci
             echo "--- Building TypeScript ---"
             npm run build
+            echo "--- Pruning dev dependencies ---"
+            npm prune --omit=dev
             echo "--- Restarting server ---"
             pm2 reload abhaayushman-backend --update-env
             pm2 save
@@ -59,9 +61,11 @@ jobs:
             cd /var/www/abhaayushman/abdmcare-backend-beta
             git pull origin beta
             echo "--- Installing dependencies ---"
-            npm install --omit=dev
+            npm install
             echo "--- Building TypeScript ---"
             npm run build
+            echo "--- Pruning dev dependencies ---"
+            npm prune --omit=dev
             echo "--- Restarting beta server ---"
             if pm2 list | grep -q "abhaayushman-backend-beta"; then
               pm2 reload abhaayushman-backend-beta --update-env
