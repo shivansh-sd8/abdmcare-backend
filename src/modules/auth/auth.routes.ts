@@ -33,7 +33,7 @@ const registerValidation = [
     .notEmpty().withMessage('Role is required')
     .custom((value) => {
       // Only allow specific roles - SUPER_ADMIN validation will be done in controller
-      const allowedRoles = ['SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'];
+      const allowedRoles = ['SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST', 'BILLING_STAFF', 'RADIOLOGIST'];
       if (!allowedRoles.includes(value)) {
         throw new Error(`Invalid role. Allowed roles: ${allowedRoles.join(', ')}`);
       }
@@ -100,6 +100,11 @@ router.post(
   validate,
   authController.updatePassword
 );
+
+// Profile and Settings - Authenticated users (any role)
+router.get('/users/profile', authenticate, authController.getProfile);
+router.put('/users/profile', authenticate, authController.updateProfile);
+router.put('/users/settings', authenticate, authController.updateSettings);
 
 // User Management - SUPER_ADMIN and ADMIN
 router.get('/users', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), authController.getAllUsers);

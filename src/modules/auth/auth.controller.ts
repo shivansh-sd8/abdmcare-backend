@@ -66,6 +66,24 @@ export class AuthController {
     ResponseHandler.success(res, 'User deactivated successfully');
   });
 
+  getProfile = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
+    const userId = (req as any).user.id;
+    const result = await this.authService.getProfile(userId);
+    ResponseHandler.success(res, 'Profile retrieved successfully', result);
+  });
+
+  updateProfile = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
+    const userId = (req as any).user.id;
+    const result = await this.authService.updateProfile(userId, req.body);
+    ResponseHandler.success(res, 'Profile updated successfully', result);
+  });
+
+  updateSettings = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
+    const userId = (req as any).user.id;
+    const result = await this.authService.updateSettings(userId, req.body);
+    ResponseHandler.success(res, 'Settings updated successfully', result);
+  });
+
   forgotPassword = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const { email } = req.body;
     const result = await this.authService.forgotPassword(email);

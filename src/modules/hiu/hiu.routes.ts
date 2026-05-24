@@ -18,7 +18,7 @@ router.use(authenticate);
 
 router.post(
   '/request',
-  authorize('admin', 'doctor'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
   [
     body('consentId').notEmpty().withMessage('Consent ID is required'),
     body('dateRangeFrom').isISO8601().withMessage('Valid from date required'),
@@ -30,7 +30,7 @@ router.post(
 
 router.get(
   '/patient/:patientId/records',
-  authorize('admin', 'doctor', 'nurse'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
   hiuController.getPatientHealthRecords
 );
 

@@ -8,7 +8,7 @@ const router = Router();
 router.get(
   '/',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
   encounterController.getDoctorEncounters
 );
 
@@ -24,7 +24,7 @@ router.get(
 router.get(
   '/:id',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
   encounterController.getEncounterById
 );
 

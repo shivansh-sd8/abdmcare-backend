@@ -33,6 +33,10 @@ import prisma from '../../common/config/database';
 const E = abdmConfig.endpoints;
 
 function toAppError(error: any, fallback: string, fallbackStatus = 500): never {
+  if (error?.message?.includes('Failed to authenticate with ABDM gateway')) {
+    logger.error('ABDM gateway authentication failed — check ABDM_CLIENT_ID and ABDM_CLIENT_SECRET', { endpoint: error?.config?.url });
+    throw new AppError('ABDM gateway authentication failed. Please verify your sandbox credentials (ABDM_CLIENT_ID / ABDM_CLIENT_SECRET) are valid and not expired.', 502);
+  }
   const respData = error?.response?.data;
   let msg = fallback;
   if (respData) {

@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import prisma from '../../common/config/database';
-import { generateToken, generateRefreshToken } from '../../common/middleware/auth';
+import { generateToken, generateRefreshToken, verifyRefreshToken } from '../../common/middleware/auth';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 
@@ -15,7 +15,7 @@ interface RegisterData {
   firstName: string;
   lastName: string;
   phone?: string;
-  role?: 'SUPER_ADMIN' | 'ADMIN' | 'DOCTOR' | 'NURSE' | 'RECEPTIONIST' | 'LAB_TECHNICIAN' | 'PHARMACIST';
+  role?: 'SUPER_ADMIN' | 'ADMIN' | 'DOCTOR' | 'NURSE' | 'RECEPTIONIST' | 'LAB_TECHNICIAN' | 'PHARMACIST' | 'BILLING_STAFF' | 'RADIOLOGIST';
   hospitalId?: string;
   // Doctor-specific fields
   specialization?: string;
@@ -166,7 +166,7 @@ export class AuthService {
   async register(data: RegisterData, currentUser?: any) {
     // Role escalation prevention
     const adminOnlyRoles: string[] = ['SUPER_ADMIN'];
-    const staffRoles: string[] = ['DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'];
+    const staffRoles: string[] = ['DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST', 'BILLING_STAFF', 'RADIOLOGIST'];
 
     if (currentUser?.role === 'ADMIN') {
       // ADMIN can only create staff roles within their hospital
@@ -301,11 +301,23 @@ export class AuthService {
     };
   }
 
-  async refreshToken(_refreshToken: string) {
+  async refreshToken(refreshTokenStr: string) {
+    const decoded = verifyRefreshToken(refreshTokenStr);
+
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: { id: true, email: true, role: true, hospitalId: true },
+    });
+
+    if (!user) {
+      throw new AppError('User not found', 401);
+    }
+
     const token = generateToken({
-      id: 'temp',
-      email: 'temp@example.com',
-      role: 'RECEPTIONIST',
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      hospitalId: user.hospitalId || undefined,
     });
 
     return { token };
@@ -524,6 +536,69 @@ export class AuthService {
     logger.info('Password reset successful', { email });
 
     return { message: 'Password updated successfully. You can now log in.' };
+  }
+
+  async getProfile(userId: string) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        hospitalId: true,
+        hospital: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
+          },
+        },
+        isActive: true,
+        createdAt: true,
+      },
+    });
+
+    if (!user) {
+      throw new AppError('User not found', 404);
+    }
+
+    return user;
+  }
+
+  async updateProfile(userId: string, data: { firstName?: string; lastName?: string; phone?: string; email?: string }) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AppError('User not found', 404);
+    }
+
+    const updateData: any = {};
+    if (data.firstName) updateData.firstName = data.firstName;
+    if (data.lastName) updateData.lastName = data.lastName;
+    if (data.email) updateData.email = data.email;
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: updateData,
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        hospitalId: true,
+        isActive: true,
+      },
+    });
+
+    return updated;
+  }
+
+  async updateSettings(_userId: string, settings: Record<string, any>) {
+    return { message: 'Settings saved successfully', settings };
   }
 
   async updatePassword(userId: string, currentPassword: string, newPassword: string) {

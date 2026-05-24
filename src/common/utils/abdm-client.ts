@@ -15,6 +15,11 @@ interface AbdmV3SessionResponse {
   tokenType: string;
 }
 
+const SESSION_ENDPOINTS = [
+  'https://dev.abdm.gov.in/gateway/v0.5/sessions',
+  'https://dev.abdm.gov.in/api/hiecm/gateway/v3/sessions',
+];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ABDM Client  (V3)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,9 +48,11 @@ export class AbdmClient {
       },
       async (error) => {
         this.logTransaction(error.config, error.response, error);
-        if (error.response?.status === 401) {
+        const retried = (error.config as any)?._retried;
+        if (error.response?.status === 401 && !retried) {
           this.accessToken = null;
           this.tokenExpiryTime = 0;
+          error.config._retried = true;
           await this.authenticate();
           return this.axiosInstance.request(error.config);
         }
@@ -84,31 +91,43 @@ export class AbdmClient {
     }
   }
 
-  // ── Auth: V3 Session Token ──────────────────────────────────────────────────
+  // ── Auth: Session Token (tries V3 then V0.5 fallback) ──────────────────────
 
   private async authenticate(): Promise<void> {
-    try {
-      const response = await axios.post<AbdmV3SessionResponse>(
-        `https://dev.abdm.gov.in/api/hiecm/gateway/v3/sessions`,
-        {
-          clientId: abdmConfig.clientId,
-          clientSecret: abdmConfig.clientSecret,
-          grantType: 'client_credentials',
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          timeout: abdmConfig.timeout,
-        }
-      );
-      this.accessToken = response.data.accessToken;
-      this.tokenExpiryTime = Date.now() + response.data.expiresIn * 1000 - 60_000;
-      logger.info('ABDM V3 authentication successful');
-    } catch (error: any) {
-      logger.error('ABDM V3 authentication failed', { message: error?.message, status: error?.response?.status, data: error?.response?.data });
-      throw new Error('Failed to authenticate with ABDM gateway');
+    const payload = {
+      clientId: abdmConfig.clientId,
+      clientSecret: abdmConfig.clientSecret,
+      grantType: 'client_credentials',
+    };
+    const reqConfig = {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: abdmConfig.timeout,
+    };
+
+    let lastError: any;
+    for (const endpoint of SESSION_ENDPOINTS) {
+      try {
+        const response = await axios.post<AbdmV3SessionResponse>(endpoint, payload, reqConfig);
+        this.accessToken = response.data.accessToken;
+        this.tokenExpiryTime = Date.now() + (response.data.expiresIn || 1800) * 1000 - 60_000;
+        logger.info(`ABDM authentication successful via ${endpoint}`);
+        return;
+      } catch (error: any) {
+        lastError = error;
+        logger.warn(`ABDM auth attempt failed on ${endpoint}`, {
+          status: error?.response?.status,
+          data: error?.response?.data,
+        });
+      }
     }
+
+    logger.error('ABDM authentication failed on ALL endpoints', {
+      message: lastError?.message,
+      status: lastError?.response?.status,
+      data: lastError?.response?.data,
+      clientId: abdmConfig.clientId ? `${abdmConfig.clientId.substring(0, 6)}...` : '(empty)',
+    });
+    throw new Error('Failed to authenticate with ABDM gateway');
   }
 
   async ensureValidToken(): Promise<string> {

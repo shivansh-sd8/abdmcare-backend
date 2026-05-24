@@ -30,19 +30,19 @@ router.use(authenticate);
 // M1: Facility QR data & received shares
 router.get(
   '/facility-qr',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   hipController.getFacilityQrData
 );
 
 router.get(
   '/received-shares',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   hipController.getReceivedShares
 );
 
 router.post(
   '/link/generate-token',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [
     body('abhaNumber').notEmpty(),
     body('abhaAddress').notEmpty(),
@@ -56,7 +56,7 @@ router.post(
 
 router.post(
   '/link/carecontext',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('abhaNumber').notEmpty(), body('abhaAddress').notEmpty(), body('patient').isArray()],
   validate,
   hipController.hipInitiatedLink
@@ -64,7 +64,7 @@ router.post(
 
 router.post(
   '/link/context/notify',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('abhaAddress').notEmpty(), body('careContextReference').notEmpty()],
   validate,
   hipController.linkContextNotify
@@ -72,7 +72,7 @@ router.post(
 
 router.post(
   '/sms/notify',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('phoneNo').notEmpty()],
   validate,
   hipController.smsNotify
@@ -80,7 +80,7 @@ router.post(
 
 router.post(
   '/patients/:patientId/care-contexts',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [
     body('careContexts').isArray().withMessage('Care contexts must be an array'),
     body('careContexts.*.encounterId').notEmpty(),

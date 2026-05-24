@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../../common/middleware/errorHandler';
 import abhaService from './abha.service';
+import abdmClient from '../../common/utils/abdm-client';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — extract X-token from body or header
@@ -225,6 +226,23 @@ export class AbhaController {
     }
     const data = await abhaService.lookupPatientByAbha(identifier);
     res.json({ success: true, data });
+  });
+
+  healthCheck = asyncHandler(async (_req: Request, res: Response) => {
+    try {
+      const token = await abdmClient.ensureValidToken();
+      res.json({
+        success: true,
+        message: 'ABDM gateway connection OK',
+        tokenPreview: token ? `${token.substring(0, 10)}...` : null,
+      });
+    } catch (error: any) {
+      res.status(502).json({
+        success: false,
+        message: 'ABDM gateway authentication failed',
+        error: error?.message,
+      });
+    }
   });
 }
 

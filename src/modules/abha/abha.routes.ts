@@ -7,7 +7,12 @@ import { validate } from '../../common/middleware/validation';
 const router = Router();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// All routes require authentication
+// Health check (no auth required — for diagnosing ABDM connectivity)
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/health', abhaController.healthCheck);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// All other routes require authentication
 // ─────────────────────────────────────────────────────────────────────────────
 router.use(authenticate);
 
@@ -16,7 +21,7 @@ router.use(authenticate);
 // ─────────────────────────────────────────────────────────────────────────────
 router.post(
   '/enrollment/aadhaar/send-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('aadhaar').notEmpty().withMessage('aadhaar is required')],
   validate,
   abhaController.generateAadhaarOtp
@@ -24,7 +29,7 @@ router.post(
 
 router.post(
   '/enrollment/aadhaar/resend-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [
     body('txnId').notEmpty().withMessage('txnId is required'),
     body('aadhaar').notEmpty().withMessage('aadhaar is required'),
@@ -35,7 +40,7 @@ router.post(
 
 router.post(
   '/enrollment/aadhaar/enrol',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [
     body('txnId').notEmpty().withMessage('txnId is required'),
     body('otp').notEmpty().withMessage('otp is required'),
@@ -49,7 +54,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────────────────────
 router.post(
   '/enrollment/mobile/send-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [
     body('txnId').notEmpty(),
     body('mobile').isMobilePhone('en-IN').withMessage('Valid Indian mobile required'),
@@ -60,7 +65,7 @@ router.post(
 
 router.post(
   '/enrollment/mobile/verify-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('txnId').notEmpty(), body('otp').notEmpty()],
   validate,
   abhaController.verifyMobileOtp
@@ -71,7 +76,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────────────────────
 router.get(
   '/enrollment/abha-address/suggestions',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [query('txnId').notEmpty().withMessage('txnId is required')],
   validate,
   abhaController.getAbhaAddressSuggestions
@@ -79,7 +84,7 @@ router.get(
 
 router.post(
   '/enrollment/abha-address',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [
     body('txnId').notEmpty(),
     body('abhaAddress').notEmpty().withMessage('abhaAddress is required'),
@@ -93,7 +98,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────────────────────
 router.post(
   '/enrollment/dl/send-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('mobile').isMobilePhone('en-IN')],
   validate,
   abhaController.dlSendMobileOtp
@@ -101,7 +106,7 @@ router.post(
 
 router.post(
   '/enrollment/dl/verify-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('txnId').notEmpty(), body('otp').notEmpty()],
   validate,
   abhaController.dlVerifyMobileOtp
@@ -109,7 +114,7 @@ router.post(
 
 router.post(
   '/enrollment/dl/enrol',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [
     body('txnId').notEmpty(),
     body('dlNumber').notEmpty(),
@@ -127,7 +132,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────────────────────
 router.post(
   '/login/request-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [
     body('scope').isArray().notEmpty(),
     body('loginHint').notEmpty(),
@@ -140,7 +145,7 @@ router.post(
 
 router.post(
   '/login/verify-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('scope').isArray().notEmpty(), body('txnId').notEmpty(), body('otp').notEmpty()],
   validate,
   abhaController.loginVerify
@@ -148,7 +153,7 @@ router.post(
 
 router.post(
   '/login/verify-password',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('scope').isArray(), body('abhaNumber').notEmpty(), body('password').notEmpty()],
   validate,
   abhaController.loginVerifyPassword
@@ -156,7 +161,7 @@ router.post(
 
 router.post(
   '/login/verify-user',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('abhaNumber').notEmpty(), body('txnId').notEmpty()],
   validate,
   abhaController.loginVerifyUser
@@ -164,7 +169,7 @@ router.post(
 
 router.post(
   '/login/search',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('abhaNumber').notEmpty()],
   validate,
   abhaController.loginSearch
@@ -175,7 +180,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────────────────────
 router.post(
   '/find',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('mobile').isMobilePhone('en-IN')],
   validate,
   abhaController.findAbhaByMobile
@@ -184,25 +189,25 @@ router.post(
 // ─────────────────────────────────────────────────────────────────────────────
 // PROFILE (requires X-token from login)
 // ─────────────────────────────────────────────────────────────────────────────
-router.get('/profile', authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'), abhaController.getProfile);
+router.get('/profile', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), abhaController.getProfile);
 
 router.patch(
   '/profile',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   abhaController.updateProfile
 );
 
-router.get('/profile/qr', authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'), abhaController.getQrCode);
+router.get('/profile/qr', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), abhaController.getQrCode);
 
-router.get('/profile/card', authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'), abhaController.getAbhaCard);
+router.get('/profile/card', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), abhaController.getAbhaCard);
 
-router.get('/profile/logout', authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'), abhaController.logout);
+router.get('/profile/logout', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), abhaController.logout);
 
 // ── Profile OTP operations ─────────────────────────────────────────────────
 
 router.post(
   '/profile/request-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('scope').isArray().notEmpty(), body('loginHint').notEmpty(), body('loginId').notEmpty(), body('otpSystem').notEmpty()],
   validate,
   abhaController.profileRequestOtp
@@ -210,7 +215,7 @@ router.post(
 
 router.post(
   '/profile/verify-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('scope').isArray().notEmpty(), body('txnId').notEmpty(), body('otp').notEmpty()],
   validate,
   abhaController.profileVerifyOtp
@@ -221,7 +226,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────────────────────
 router.post(
   '/phr/search',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('abhaAddress').notEmpty()],
   validate,
   abhaController.phrSearch
@@ -229,7 +234,7 @@ router.post(
 
 router.post(
   '/phr/request-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('abhaAddress').notEmpty(), body('scope').isArray().notEmpty(), body('otpSystem').notEmpty()],
   validate,
   abhaController.phrRequestOtp
@@ -237,21 +242,21 @@ router.post(
 
 router.post(
   '/phr/verify-otp',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('scope').isArray().notEmpty(), body('txnId').notEmpty(), body('otp').notEmpty()],
   validate,
   abhaController.phrVerifyOtp
 );
 
-router.get('/phr/profile', authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'), abhaController.phrGetProfile);
-router.get('/phr/card', authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'), abhaController.phrGetCard);
+router.get('/phr/profile', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), abhaController.phrGetProfile);
+router.get('/phr/card', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), abhaController.phrGetCard);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATIENT LINKING
 // ─────────────────────────────────────────────────────────────────────────────
 router.post(
   '/link',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('abhaNumber').notEmpty(), body('patientId').notEmpty()],
   validate,
   abhaController.linkToPatient
@@ -259,7 +264,7 @@ router.post(
 
 router.post(
   '/unlink',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   [body('abhaNumber').notEmpty(), body('patientId').notEmpty()],
   validate,
   abhaController.unlinkFromPatient
@@ -267,7 +272,7 @@ router.post(
 
 router.get(
   '/record/:abhaNumber',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   abhaController.getLocalRecord
 );
 
@@ -276,7 +281,7 @@ router.get(
 // ─────────────────────────────────────────────────────────────────────────────
 router.get(
   '/patient/lookup',
-  authorize('super_admin', 'admin', 'doctor', 'nurse', 'receptionist'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   abhaController.lookupPatient
 );
 

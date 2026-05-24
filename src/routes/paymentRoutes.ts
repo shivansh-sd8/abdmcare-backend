@@ -15,38 +15,38 @@ router.get(
   paymentController.getPaymentStats
 );
 
-// Create payment - RECEPTIONIST, ADMIN, SUPER_ADMIN
+// Create payment - RECEPTIONIST, BILLING_STAFF, ADMIN, SUPER_ADMIN
 router.post(
   '/',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
   paymentController.createPayment
 );
 
-// Get all payments - RECEPTIONIST, ADMIN, SUPER_ADMIN
+// Get all payments - RECEPTIONIST, BILLING_STAFF, ADMIN, SUPER_ADMIN
 router.get(
   '/',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
   paymentController.getAllPayments
 );
 
 // Get payment by ID
 router.get(
   '/:id',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
   paymentController.getPaymentById
 );
 
-// Update payment - RECEPTIONIST, ADMIN, SUPER_ADMIN
+// Update payment - RECEPTIONIST, BILLING_STAFF, ADMIN, SUPER_ADMIN
 router.put(
   '/:id',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
   paymentController.updatePayment
 );
 
-// Mark as paid - RECEPTIONIST, ADMIN, SUPER_ADMIN
+// Mark as paid - RECEPTIONIST, BILLING_STAFF, ADMIN, SUPER_ADMIN
 router.post(
   '/:id/mark-paid',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
   paymentController.markAsPaid
 );
 
