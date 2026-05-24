@@ -84,8 +84,8 @@ export class AbhaController {
   // ── Login / Verification ───────────────────────────────────────────────────
 
   loginRequestOtp = asyncHandler(async (req: Request, res: Response) => {
-    const { scope, loginHint, loginId, otpSystem } = req.body;
-    const data = await abhaService.loginRequestOtp({ scope, loginHint, loginId, otpSystem });
+    const { scope, loginHint, loginId, otpSystem, txnId } = req.body;
+    const data = await abhaService.loginRequestOtp({ scope, loginHint, loginId, otpSystem, txnId });
     res.json({ success: true, data });
   });
 

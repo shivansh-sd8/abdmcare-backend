@@ -345,15 +345,18 @@ export class AbhaService {
     loginHint: string;
     loginId: string;          // plain text — will be encrypted
     otpSystem: 'aadhaar' | 'abdm';
+    txnId?: string;           // required for search-then-verify (mobile index flow)
   }) {
     try {
       const encId = await abdmClient.encrypt(params.loginId);
-      const res = await abdmClient.abhaPost(E.profile.loginRequestOtp, {
+      const payload: Record<string, any> = {
         scope: params.scope,
         loginHint: params.loginHint,
         loginId: encId,
         otpSystem: params.otpSystem,
-      });
+      };
+      if (params.txnId) payload.txnId = params.txnId;
+      const res = await abdmClient.abhaPost(E.profile.loginRequestOtp, payload);
       return { txnId: res.txnId, message: res.message };
     } catch (e) { toAppError(e, 'Failed to send login OTP'); }
   }
