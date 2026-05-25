@@ -91,22 +91,42 @@ export class HospitalService {
     try {
       logger.info('Starting hospital onboarding', { name: data.name, email: data.email });
 
-      // Check if hospital email already exists
-      const existingHospital = await prisma.hospital.findUnique({
+      // Duplicate checks — hospital email
+      const existingByEmail = await prisma.hospital.findUnique({
         where: { email: data.email },
       });
-
-      if (existingHospital) {
-        throw new AppError('Hospital with this email already exists', 400);
+      if (existingByEmail) {
+        throw new AppError('A hospital with this email already exists', 409);
       }
 
-      // Check if admin email already exists
-      const existingUser = await prisma.user.findUnique({
-        where: { email: data.ownerEmail },
-      });
+      // Duplicate checks — registration number (unique in DB)
+      if (data.registrationNumber) {
+        const existingByRegNo = await prisma.hospital.findUnique({
+          where: { registrationNumber: data.registrationNumber },
+        });
+        if (existingByRegNo) {
+          throw new AppError('A hospital with this registration number already exists', 409);
+        }
+      }
 
-      if (existingUser) {
-        throw new AppError('Admin email already registered', 400);
+      // Duplicate checks — admin username
+      if (data.adminUsername) {
+        const existingByUsername = await prisma.user.findUnique({
+          where: { username: data.adminUsername },
+        });
+        if (existingByUsername) {
+          throw new AppError('Admin username is already taken', 409);
+        }
+      }
+
+      // Duplicate checks — admin/owner email
+      if (data.ownerEmail) {
+        const existingUser = await prisma.user.findUnique({
+          where: { email: data.ownerEmail },
+        });
+        if (existingUser) {
+          throw new AppError('Owner/admin email is already registered as a user', 409);
+        }
       }
 
       // Generate unique hospital code
@@ -359,6 +379,18 @@ export class HospitalService {
 
       if (!hospital) {
         throw new AppError('Hospital not found', 404);
+      }
+
+      // Check email uniqueness if changing
+      if (data.email && data.email !== hospital.email) {
+        const dup = await prisma.hospital.findUnique({ where: { email: data.email } });
+        if (dup) throw new AppError('Another hospital already uses this email', 409);
+      }
+
+      // Check registration number uniqueness if changing
+      if (data.registrationNumber && data.registrationNumber !== hospital.registrationNumber) {
+        const dup = await prisma.hospital.findUnique({ where: { registrationNumber: data.registrationNumber } });
+        if (dup) throw new AppError('Another hospital already uses this registration number', 409);
       }
 
       const updatedHospital = await prisma.hospital.update({
