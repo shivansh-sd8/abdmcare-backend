@@ -8,7 +8,7 @@ const router = Router();
 router.get(
   '/',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   encounterController.getDoctorEncounters
 );
 
@@ -16,15 +16,23 @@ router.get(
 router.get(
   '/doctor/:doctorId',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
   encounterController.getDoctorEncounters
+);
+
+// Get full encounter snapshot (encounter + vitals + labs + Rx + payments + hospital)
+router.get(
+  '/:id/full',
+  authenticate,
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'BILLING_STAFF'),
+  encounterController.getEncounterFull
 );
 
 // Get encounter by ID
 router.get(
   '/:id',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'BILLING_STAFF'),
   encounterController.getEncounterById
 );
 
@@ -50,6 +58,14 @@ router.patch(
   authenticate,
   authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
   encounterController.collectPayment
+);
+
+// Apply discount (admin-only)
+router.patch(
+  '/:id/discount',
+  authenticate,
+  authorize('SUPER_ADMIN', 'ADMIN'),
+  encounterController.applyDiscount
 );
 
 export default router;

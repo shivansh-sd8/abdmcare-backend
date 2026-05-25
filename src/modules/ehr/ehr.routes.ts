@@ -7,7 +7,8 @@ const router = Router();
 router.use(authenticate);
 router.use(authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'RADIOLOGIST'));
 
-router.get('/patients',            ehrController.getPatientList);
-router.get('/patients/:patientId', ehrController.getPatientEHR);
+router.get('/patients',                    ehrController.getPatientList);
+router.get('/patients/:patientId',         ehrController.getPatientEHR);
+router.get('/patients/:patientId/profile', ehrController.getPatientProfile);
 
 export default router;

@@ -167,7 +167,10 @@ class InvestigationService {
     if (data?.reportUrl)         updateData.reportUrl         = data.reportUrl;
     if (data?.notes)             updateData.notes             = data.notes;
     if (data?.labTechnicianId)   updateData.labTechnicianId   = data.labTechnicianId;
-    if (data?.amount !== undefined && data.amount > 0) updateData.amount = data.amount;
+    if (data?.amount !== undefined) {
+      if (data.amount < 0) throw new AppError('Investigation amount must be non-negative', 400);
+      if (data.amount > 0) updateData.amount = data.amount;
+    }
 
     const updated = await prisma.investigation.update({
       where: { id },
@@ -188,32 +191,36 @@ class InvestigationService {
       }
 
       if (encId) {
-        const enc = await prisma.encounter.findUnique({
-          where: { id: encId },
-          select: {
-            labCharges: true, consultationFee: true, medicineCharges: true,
-            status: true, medicinesDispensed: true,
-          },
-        });
+          const enc = await prisma.encounter.findUnique({
+            where: { id: encId },
+            select: {
+              labCharges: true, consultationFee: true, medicineCharges: true,
+              scanCharges: true, status: true, medicinesDispensed: true,
+            },
+          });
         if (enc) {
-          const newLabCharges   = Number(enc.labCharges    ?? 0) + (data?.amount ?? 0);
+          const invAmount       = data?.amount ?? 0;
+          const isRadiology     = investigation.testType === 'RADIOLOGY';
+          const curLabCharges   = Number(enc.labCharges      ?? 0);
+          const curScanCharges  = Number((enc as any).scanCharges ?? 0);
+          const newLabCharges   = isRadiology ? curLabCharges : curLabCharges + invAmount;
+          const newScanCharges  = isRadiology ? curScanCharges + invAmount : curScanCharges;
           const consultationFee = Number(enc.consultationFee ?? 0);
-          const medicineCharges = Number(enc.medicineCharges  ?? 0);
+          const medicineCharges = Number(enc.medicineCharges ?? 0);
 
           // Check if all investigations for this encounter are now COMPLETED
           const pendingCount = await prisma.investigation.count({
             where: {
               encounterId: encId,
               status: { notIn: ['COMPLETED', 'CANCELLED'] },
-              id: { not: id }, // exclude current one (already updated)
+              id: { not: id },
             },
           });
           const allLabsDone = pendingCount === 0;
 
-          // Determine next status only if encounter is still LAB_PENDING
+          // Determine next status if all labs are done and encounter is in a pending state
           let nextStatus: string | undefined;
-          if (allLabsDone && enc.status === 'LAB_PENDING') {
-            // Check if there are pending prescriptions (not yet dispensed)
+          if (allLabsDone && ['LAB_PENDING', 'IN_PROGRESS'].includes(enc.status as string)) {
             const pendingRx = await prisma.prescription.count({
               where: { encounterId: encId, status: { not: 'DISPENSED' } },
             });
@@ -223,10 +230,11 @@ class InvestigationService {
           await prisma.encounter.update({
             where: { id: encId },
             data: {
-              ...(data?.amount && data.amount > 0
+              ...(invAmount > 0
                 ? {
                     labCharges:  newLabCharges,
-                    totalAmount: consultationFee + newLabCharges + medicineCharges,
+                    scanCharges: newScanCharges,
+                    totalAmount: consultationFee + newLabCharges + newScanCharges + medicineCharges,
                   }
                 : {}),
               labTestsCompleted: allLabsDone,

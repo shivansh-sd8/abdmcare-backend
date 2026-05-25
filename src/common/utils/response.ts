@@ -5,6 +5,7 @@ export interface ApiResponse<T = any> {
   message: string;
   data?: T;
   error?: any;
+  errors?: any;
   timestamp: string;
 }
 
@@ -54,7 +55,13 @@ export class ResponseHandler {
   }
 
   static validationError(res: Response, errors: any): Response {
-    return this.error(res, 'Validation failed', errors, 422);
+    const response: ApiResponse = {
+      success: false,
+      message: 'Validation failed',
+      errors,
+      timestamp: new Date().toISOString(),
+    };
+    return res.status(422).json(response);
   }
 }
 

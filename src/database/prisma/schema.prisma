@@ -92,6 +92,12 @@ model Doctor {
   isActive        Boolean       @default(true)
   consultationFee Decimal?      @db.Decimal(10, 2)   // OPD fee set by admin
   
+  // Scheduling Configuration
+  workingHours      Json?       // Override hospital hours per doctor, same format as operatingHours
+  slotDuration      Int?        // Override hospital default (minutes)
+  maxPatientsPerDay Int         @default(30)
+  breakTimes        Json?       // Doctor-specific breaks
+  
   hospitalId      String?
   hospital        Hospital?     @relation(fields: [hospitalId], references: [id])
   
@@ -197,6 +203,9 @@ model Encounter {
   paymentCollected         Decimal?        @db.Decimal(10, 2)
   paymentMethod            String?         // CASH, UPI, CARD, BANK_TRANSFER
   transactionRef           String?
+  discountAmount           Decimal?        @db.Decimal(10, 2) @default(0)
+  discountReason           String?
+  discountApprovedBy       String?
   
   status          EncounterStatus @default(SCHEDULED)
   visitDate       DateTime
@@ -648,6 +657,13 @@ model Hospital {
   currency    String   @default("INR")
   language    String   @default("en")
   
+  // Scheduling Configuration
+  operatingHours     Json?      // { "mon": { "start": "08:00", "end": "22:00" }, ... } null day = closed
+  defaultSlotDuration Int       @default(30)
+  breakTimes         Json?      // [{ "start": "13:00", "end": "14:00", "label": "Lunch" }]
+  holidays           Json?      // ["2026-01-26", "2026-08-15"]
+  is24x7             Boolean    @default(false)
+  
   // Status & Verification
   isActive    Boolean  @default(true)
   isVerified  Boolean  @default(false)
@@ -979,6 +995,7 @@ enum BedStatus {
 
 enum AdmissionStatus {
   ADMITTED
+  DISCHARGE_READY
   DISCHARGED
   TRANSFERRED
   ABSCONDED
@@ -1063,6 +1080,11 @@ model Admission {
   paymentStatus     String?         @default("PENDING") // PENDING, PARTIAL, PAID
 
   status           AdmissionStatus @default(ADMITTED)
+
+  // Discount (admin-only)
+  discountAmount     Float           @default(0)
+  discountReason     String?
+  discountApprovedBy String?
 
   // Doctor marks patient ready; receptionist then processes payment + discharge
   dischargeReadyAt   DateTime?

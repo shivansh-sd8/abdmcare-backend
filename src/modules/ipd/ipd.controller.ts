@@ -100,7 +100,8 @@ export async function updateAdmission(req: Request, res: Response) {
 export async function dischargePatient(req: Request, res: Response) {
   try {
     const hospitalId = (req as any).user.hospitalId;
-    const data = await ipdService.dischargePatient(req.params.admissionId, hospitalId, req.body);
+    const userRole = (req as any).user.role;
+    const data = await ipdService.dischargePatient(req.params.admissionId, hospitalId, req.body, userRole);
     ok(res, data);
   } catch (e) { err(res, e); }
 }
@@ -154,10 +155,37 @@ export async function markDischargeReady(req: Request, res: Response) {
   } catch (e) { err(res, e); }
 }
 
+export async function applyDiscount(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    const approvedBy = (req as any).user.name || (req as any).user.id;
+    const data = await ipdService.applyDiscount(req.params.admissionId, hospitalId, {
+      ...req.body, approvedBy,
+    });
+    ok(res, data);
+  } catch (e) { err(res, e); }
+}
+
+export async function collectPayment(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    const data = await ipdService.collectPayment(req.params.admissionId, hospitalId, req.body);
+    ok(res, data);
+  } catch (e) { err(res, e); }
+}
+
 export async function getAdmissionBill(req: Request, res: Response) {
   try {
     const hospitalId = (req as any).user.hospitalId;
     const data = await ipdService.getAdmissionBill(req.params.admissionId, hospitalId);
+    ok(res, data);
+  } catch (e) { err(res, e); }
+}
+
+export async function getDischargeSummary(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    const data = await ipdService.getDischargeSummary(req.params.admissionId, hospitalId);
     ok(res, data);
   } catch (e) { err(res, e); }
 }

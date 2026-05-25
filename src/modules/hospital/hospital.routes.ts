@@ -47,6 +47,20 @@ router.put(
   hospitalController.updateHospitalPlan
 );
 
+router.get(
+  '/:id/schedule',
+  authenticate,
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
+  hospitalController.getSchedule
+);
+
+router.put(
+  '/:id/schedule',
+  authenticate,
+  authorize('SUPER_ADMIN', 'ADMIN'),
+  hospitalController.updateSchedule
+);
+
 router.delete(
   '/:id',
   authenticate,

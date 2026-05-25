@@ -49,6 +49,15 @@ class EncounterController {
     }
   );
 
+  getEncounterFull = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const currentUser = (req as any).user;
+      const result = await encounterService.getEncounterFull(id, currentUser);
+      ResponseHandler.success(res, 'Full encounter fetched successfully', result.data);
+    }
+  );
+
   collectPayment = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
@@ -60,6 +69,19 @@ class EncounterController {
         transactionRef,
       }, currentUser);
       ResponseHandler.success(res, 'Payment recorded successfully', result);
+    }
+  );
+
+  applyDiscount = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const currentUser = (req as any).user;
+      const result = await encounterService.applyDiscount(id, {
+        amount: parseFloat(req.body.amount) || 0,
+        reason: req.body.reason,
+        approvedBy: currentUser.name || currentUser.id,
+      }, currentUser);
+      ResponseHandler.success(res, 'Discount applied successfully', result);
     }
   );
 }

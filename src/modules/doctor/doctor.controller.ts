@@ -66,12 +66,37 @@ export class DoctorController {
     }
   );
 
+  getDoctorProfile = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const currentUser = (req as any).user;
+      const result = await this.doctorService.getDoctorProfile(id, currentUser);
+      ResponseHandler.success(res, 'Doctor profile fetched successfully', result);
+    }
+  );
+
   getDoctorAvailability = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
       const { date } = req.query as { date?: string };
       const result = await this.doctorService.getDoctorAvailability(id, date);
       ResponseHandler.success(res, 'Doctor availability fetched successfully', result);
+    }
+  );
+
+  updateSchedule = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const result = await this.doctorService.updateSchedule(id, req.body);
+      ResponseHandler.success(res, result.message, result.data);
+    }
+  );
+
+  getSchedule = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const result = await this.doctorService.getSchedule(id);
+      ResponseHandler.success(res, 'Doctor schedule fetched', result.data);
     }
   );
 }

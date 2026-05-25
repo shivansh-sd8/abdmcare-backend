@@ -27,10 +27,24 @@ class VitalsService {
       bmi = Math.round(bmi * 10) / 10;
     }
 
+    // Auto-link to the patient's active encounter if not provided
+    let encounterId = data.encounterId;
+    if (!encounterId && data.patientId) {
+      const activeEnc = await prisma.encounter.findFirst({
+        where: {
+          patientId: data.patientId,
+          status: { in: ['IN_PROGRESS', 'SCHEDULED'] },
+        },
+        orderBy: { visitDate: 'desc' },
+        select: { id: true },
+      });
+      if (activeEnc) encounterId = activeEnc.id;
+    }
+
     const vitals = await prisma.vitals.create({
       data: {
         patientId: data.patientId,
-        encounterId: data.encounterId,
+        encounterId,
         temperature: data.temperature,
         bloodPressureSystolic: data.bloodPressureSystolic,
         bloodPressureDiastolic: data.bloodPressureDiastolic,

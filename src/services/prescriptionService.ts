@@ -194,6 +194,14 @@ class PrescriptionService {
     }
     if (prescription.status === 'DISPENSED') throw new AppError('Prescription already dispensed', 400);
 
+    if (!data.medicines || data.medicines.length === 0) {
+      throw new AppError('At least one medicine with pricing is required', 400);
+    }
+    for (const m of data.medicines) {
+      if (m.price < 0) throw new AppError(`Invalid price for ${m.name}: must be non-negative`, 400);
+      if (m.quantity <= 0) throw new AppError(`Invalid quantity for ${m.name}: must be positive`, 400);
+    }
+
     const totalCharges = data.medicines.reduce((s, m) => s + m.price * m.quantity, 0);
 
     // Merge prices/quantities back into medications JSON
@@ -221,11 +229,11 @@ class PrescriptionService {
     if (prescription.encounterId) {
       const enc = await prisma.encounter.findUnique({
         where:  { id: prescription.encounterId },
-        select: { consultationFee: true, labCharges: true, medicineCharges: true, status: true },
+        select: { consultationFee: true, labCharges: true, medicineCharges: true, scanCharges: true, status: true },
       });
       if (enc) {
         const newMedCharges = Number(enc.medicineCharges ?? 0) + totalCharges;
-        const newTotal      = Number(enc.consultationFee ?? 0) + Number(enc.labCharges ?? 0) + newMedCharges;
+        const newTotal      = Number(enc.consultationFee ?? 0) + Number(enc.labCharges ?? 0) + newMedCharges + Number(enc.scanCharges ?? 0);
 
         // Check if all prescriptions for this encounter are now dispensed
         const pendingRx = await prisma.prescription.count({
@@ -236,9 +244,14 @@ class PrescriptionService {
           },
         });
         const allDispensed = pendingRx === 0;
-        const nextStatus = allDispensed && enc.status === 'PHARMACY_PENDING'
-          ? 'BILLING_PENDING'
-          : undefined;
+        let nextStatus: string | undefined;
+        if (allDispensed && ['PHARMACY_PENDING', 'LAB_PENDING', 'IN_PROGRESS'].includes(enc.status as string)) {
+          // Check if labs are also done before advancing
+          const pendingLabs = await prisma.investigation.count({
+            where: { encounterId: prescription.encounterId, status: { notIn: ['COMPLETED', 'CANCELLED'] } },
+          });
+          nextStatus = pendingLabs > 0 ? 'LAB_PENDING' : 'BILLING_PENDING';
+        }
 
         await prisma.encounter.update({
           where: { id: prescription.encounterId },

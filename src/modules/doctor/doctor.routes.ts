@@ -38,9 +38,27 @@ router.get(
 );
 
 router.get(
+  '/:id/profile',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  doctorController.getDoctorProfile
+);
+
+router.get(
   '/:id/availability',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
   doctorController.getDoctorAvailability
+);
+
+router.get(
+  '/:id/schedule',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
+  doctorController.getSchedule
+);
+
+router.put(
+  '/:id/schedule',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
+  doctorController.updateSchedule
 );
 
 router.get(

@@ -379,18 +379,102 @@ export class DoctorService {
     }
   }
 
+  async getDoctorProfile(doctorId: string, currentUser?: any) {
+    const doctor = await prisma.doctor.findUnique({
+      where: { id: doctorId },
+      include: {
+        department: true,
+        hospital: { select: { id: true, name: true, city: true, state: true } },
+      },
+    });
+    if (!doctor) throw new AppError('Doctor not found', 404);
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId && doctor.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied', 403);
+    }
+
+    const [encounters, appointments, prescriptions] = await Promise.all([
+      prisma.encounter.findMany({
+        where: { doctorId },
+        include: {
+          patient: { select: { id: true, firstName: true, lastName: true, uhid: true, gender: true, mobile: true } },
+        },
+        orderBy: { visitDate: 'desc' },
+      }),
+      prisma.appointment.findMany({
+        where: { doctorId },
+        include: {
+          patient: { select: { id: true, firstName: true, lastName: true, uhid: true } },
+        },
+        orderBy: { scheduledAt: 'desc' },
+      }),
+      prisma.prescription.findMany({
+        where: { doctorId },
+        orderBy: { issuedAt: 'desc' },
+        take: 50,
+      }),
+    ]);
+
+    // Distinct patients
+    const patientMap = new Map<string, any>();
+    encounters.forEach((e) => {
+      const p = e.patient;
+      if (!patientMap.has(p.id)) {
+        patientMap.set(p.id, { ...p, lastVisit: e.visitDate, lastDiagnosis: e.finalDiagnosis || e.diagnosis || e.chiefComplaint, visitCount: 0 });
+      }
+      patientMap.get(p.id)!.visitCount++;
+    });
+    const patientsSeen = Array.from(patientMap.values()).sort((a, b) => new Date(b.lastVisit).getTime() - new Date(a.lastVisit).getTime());
+
+    // Earnings: sum of collected payments from encounters
+    let totalEarnings = 0;
+    const monthlyEarnings: Record<string, number> = {};
+    encounters.forEach((e: any) => {
+      const collected = parseFloat(e.paymentCollected || '0');
+      totalEarnings += collected;
+      const month = new Date(e.visitDate).toISOString().substring(0, 7);
+      monthlyEarnings[month] = (monthlyEarnings[month] || 0) + collected;
+    });
+
+    const earningsSummary = Object.entries(monthlyEarnings)
+      .map(([month, amount]) => ({ month, amount: Math.round(amount * 100) / 100 }))
+      .sort((a, b) => b.month.localeCompare(a.month))
+      .slice(0, 12);
+
+    return {
+      doctor,
+      summary: {
+        totalPatientsSeen: patientsSeen.length,
+        totalEncounters: encounters.length,
+        totalAppointments: appointments.length,
+        totalPrescriptions: prescriptions.length,
+        totalEarnings: Math.round(totalEarnings * 100) / 100,
+      },
+      encounters,
+      appointments,
+      patientsSeen,
+      earningsSummary,
+    };
+  }
+
   async getDoctorAvailability(doctorId: string, date?: string) {
     const doctor = await prisma.doctor.findUnique({
       where: { id: doctorId },
-      select: { id: true, firstName: true, lastName: true, specialization: true, isActive: true },
+      select: {
+        id: true, firstName: true, lastName: true, specialization: true, isActive: true,
+        workingHours: true, slotDuration: true, maxPatientsPerDay: true, breakTimes: true,
+        hospital: {
+          select: {
+            operatingHours: true, defaultSlotDuration: true, breakTimes: true,
+            holidays: true, is24x7: true,
+          },
+        },
+      },
     });
     if (!doctor) throw new AppError('Doctor not found', 404);
 
     const targetDate = date ? new Date(date) : new Date();
-    const dayStart = new Date(targetDate);
-    dayStart.setHours(0, 0, 0, 0);
-    const dayEnd   = new Date(targetDate);
-    dayEnd.setHours(23, 59, 59, 999);
+    const dayStart = new Date(targetDate); dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(targetDate); dayEnd.setHours(23, 59, 59, 999);
 
     const appointments = await prisma.appointment.findMany({
       where: {
@@ -405,23 +489,87 @@ export class DoctorService {
       orderBy: { scheduledAt: 'asc' },
     });
 
-    const MAX_SLOTS = 20; // default daily capacity
-    const bookedCount    = appointments.length;
-    const remainingSlots = Math.max(0, MAX_SLOTS - bookedCount);
-    const isAvailable    = doctor.isActive && remainingSlots > 0;
+    const bookedTimes = appointments.map(a => {
+      const d = new Date(a.scheduledAt);
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    });
+
+    const { generateSlots } = await import('../../common/utils/slotEngine');
+    const hospitalConfig = {
+      operatingHours: doctor.hospital?.operatingHours as any,
+      defaultSlotDuration: doctor.hospital?.defaultSlotDuration,
+      breakTimes: doctor.hospital?.breakTimes as any,
+      holidays: doctor.hospital?.holidays as any,
+      is24x7: doctor.hospital?.is24x7,
+    };
+    const doctorConfig = {
+      workingHours: doctor.workingHours as any,
+      slotDuration: doctor.slotDuration,
+      maxPatientsPerDay: doctor.maxPatientsPerDay,
+      breakTimes: doctor.breakTimes as any,
+    };
+
+    const slotResult = generateSlots(targetDate, hospitalConfig, doctorConfig, bookedTimes);
+    const isAvailable = doctor.isActive && slotResult.available.length > 0;
 
     return {
-      doctor,
-      date:           dayStart.toISOString().split('T')[0],
+      doctor: { id: doctor.id, firstName: doctor.firstName, lastName: doctor.lastName, specialization: doctor.specialization },
+      date: dayStart.toISOString().split('T')[0],
       isAvailable,
-      bookedCount,
-      remainingSlots,
-      maxSlots:       MAX_SLOTS,
+      bookedCount: bookedTimes.length,
+      remainingSlots: slotResult.available.length,
+      maxSlots: slotResult.maxPatientsPerDay,
+      slotDuration: slotResult.slotDuration,
+      availableSlots: slotResult.available,
       appointments,
       message: isAvailable
-        ? `Dr. ${doctor.firstName} ${doctor.lastName} is available today. ${remainingSlots} slot(s) remaining.`
+        ? `Dr. ${doctor.firstName} ${doctor.lastName} is available. ${slotResult.available.length} slot(s) remaining.`
         : `Dr. ${doctor.firstName} ${doctor.lastName} has no available slots for this date.`,
     };
+  }
+
+  async updateSchedule(doctorId: string, data: {
+    workingHours?: any;
+    slotDuration?: number | null;
+    maxPatientsPerDay?: number;
+    breakTimes?: any;
+  }) {
+    const doctor = await prisma.doctor.findUnique({ where: { id: doctorId } });
+    if (!doctor) throw new AppError('Doctor not found', 404);
+
+    if (data.slotDuration && ![10, 15, 20, 30, 45, 60].includes(data.slotDuration)) {
+      throw new AppError('Slot duration must be 10, 15, 20, 30, 45, or 60 minutes', 400);
+    }
+    if (data.maxPatientsPerDay !== undefined && (data.maxPatientsPerDay < 1 || data.maxPatientsPerDay > 200)) {
+      throw new AppError('Max patients per day must be between 1 and 200', 400);
+    }
+
+    const updateData: any = {};
+    if (data.workingHours !== undefined) updateData.workingHours = data.workingHours;
+    if (data.slotDuration !== undefined) updateData.slotDuration = data.slotDuration;
+    if (data.maxPatientsPerDay !== undefined) updateData.maxPatientsPerDay = data.maxPatientsPerDay;
+    if (data.breakTimes !== undefined) updateData.breakTimes = data.breakTimes;
+
+    const updated = await prisma.doctor.update({ where: { id: doctorId }, data: updateData });
+    return { success: true, data: updated, message: 'Doctor schedule updated successfully' };
+  }
+
+  async getSchedule(doctorId: string) {
+    const doctor = await prisma.doctor.findUnique({
+      where: { id: doctorId },
+      select: {
+        id: true, firstName: true, lastName: true,
+        workingHours: true, slotDuration: true, maxPatientsPerDay: true, breakTimes: true,
+        hospital: {
+          select: {
+            id: true, name: true, operatingHours: true, defaultSlotDuration: true,
+            breakTimes: true, holidays: true, is24x7: true,
+          },
+        },
+      },
+    });
+    if (!doctor) throw new AppError('Doctor not found', 404);
+    return { success: true, data: doctor };
   }
 }
 

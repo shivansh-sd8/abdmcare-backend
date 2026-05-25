@@ -78,6 +78,22 @@ export class HospitalController {
       ResponseHandler.success(res, result.message, result.data);
     }
   );
+
+  updateSchedule = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const result = await this.hospitalService.updateSchedule(id, req.body);
+      ResponseHandler.success(res, result.message, result.data);
+    }
+  );
+
+  getSchedule = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const result = await this.hospitalService.getSchedule(id);
+      ResponseHandler.success(res, 'Hospital schedule fetched', result.data);
+    }
+  );
 }
 
 export default new HospitalController();

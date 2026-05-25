@@ -182,6 +182,15 @@ export class IPDService {
     advanceTransactionRef?: string;
     notes?: string;
   }) {
+    // Prevent duplicate active admissions for the same patient (ADMITTED or DISCHARGE_READY)
+    const existingActive = await prisma.admission.findFirst({
+      where: { patientId: data.patientId, hospitalId, status: { in: ['ADMITTED', 'DISCHARGE_READY'] } },
+      select: { admissionNumber: true, status: true },
+    });
+    if (existingActive) {
+      throw new Error(`Patient already has an active admission (${existingActive.admissionNumber}, status: ${existingActive.status}). Discharge first before readmitting.`);
+    }
+
     // Ward must belong to this hospital
     const ward = await prisma.ward.findFirst({ where: { id: data.wardId, hospitalId } });
     if (!ward) throw new Error('Ward not found in this hospital');
@@ -422,13 +431,16 @@ export class IPDService {
 
   async markDischargeReady(admissionId: string, hospitalId: string, userId: string) {
     const admission = await prisma.admission.findFirst({
-      where: { id: admissionId, hospitalId, status: 'ADMITTED' },
+      where: { id: admissionId, hospitalId },
     });
-    if (!admission) throw new Error('Active admission not found');
+    if (!admission) throw new Error('Admission not found');
+    if (admission.status === 'DISCHARGE_READY') throw new Error('Patient is already marked as discharge-ready');
+    if (admission.status === 'DISCHARGED') throw new Error('Patient is already discharged');
+    if (admission.status !== 'ADMITTED') throw new Error(`Cannot mark discharge-ready from status: ${admission.status}`);
 
     return prisma.admission.update({
       where: { id: admissionId },
-      data:  { dischargeReadyAt: new Date(), dischargeReadyBy: userId },
+      data:  { status: 'DISCHARGE_READY', dischargeReadyAt: new Date(), dischargeReadyBy: userId },
     });
   }
 
@@ -441,12 +453,25 @@ export class IPDService {
     paymentCollected?: number;
     paymentMethod?: string;   // CASH, UPI, CARD, BANK_TRANSFER
     transactionRef?: string;
-  }) {
+  }, userRole?: string) {
     const admission = await prisma.admission.findFirst({
-      where:   { id: admissionId, hospitalId, status: 'ADMITTED' },
+      where:   { id: admissionId, hospitalId },
       include: { patient: { select: { firstName: true, lastName: true, mobile: true } } },
     });
-    if (!admission) throw new Error('Active admission not found');
+    if (!admission) throw new Error('Admission not found');
+
+    if (admission.status === 'DISCHARGED') {
+      throw new Error('Patient is already discharged');
+    }
+
+    // Require doctor to mark discharge-ready first, unless SUPER_ADMIN force-discharge
+    if (admission.status === 'ADMITTED' && userRole !== 'SUPER_ADMIN') {
+      throw new Error('Doctor must mark patient as discharge-ready before discharge can proceed');
+    }
+
+    if (!['ADMITTED', 'DISCHARGE_READY'].includes(admission.status)) {
+      throw new Error(`Cannot discharge from status: ${admission.status}`);
+    }
 
     const dischargedAt  = data.dischargedAt ? new Date(data.dischargedAt) : new Date();
     const days          = Math.max(1, Math.ceil(
@@ -454,21 +479,41 @@ export class IPDService {
     ));
     const wardCharges   = days * admission.dailyCharges;
 
-    // Aggregate lab/medicine charges via both OPD encounter + round encounters
+    // Aggregate lab/medicine charges from IPD round encounters + admission-linked items ONLY
+    // Do NOT re-include OPD encounter charges if OPD was already billed/paid
     const opdEncounterId = (admission as any).encounterId as string | null;
     const roundIds = (await prisma.encounter.findMany({
       where:  { admissionId: admissionId },
       select: { id: true },
     })).map(e => e.id);
 
-    const allEncIds = [...(opdEncounterId ? [opdEncounterId] : []), ...roundIds];
+    // Check if OPD encounter was already paid — if so, exclude it from IPD bill
+    let opdAlreadyPaid = false;
+    let consultationFee = 0;
+    if (opdEncounterId) {
+      const opdEnc = await prisma.encounter.findUnique({
+        where:  { id: opdEncounterId },
+        select: { consultationFee: true, paymentCollected: true, paymentStatus: true, totalAmount: true },
+      });
+      const opdPaid = Number(opdEnc?.paymentCollected ?? 0);
+      opdAlreadyPaid = opdPaid > 0 || opdEnc?.paymentStatus === 'PAID';
+      if (!opdAlreadyPaid) {
+        consultationFee = Number(opdEnc?.consultationFee ?? 0);
+      }
+    }
+
+    // Only include OPD encounter in charge queries if it wasn't already paid
+    const encIdsForCharges = [
+      ...(!opdAlreadyPaid && opdEncounterId ? [opdEncounterId] : []),
+      ...roundIds,
+    ];
 
     const labInvestigations = await prisma.investigation.findMany({
       where: {
         hospitalId,
         OR: [
           { admissionId: admissionId },
-          ...(allEncIds.length ? [{ encounterId: { in: allEncIds } }] : []),
+          ...(encIdsForCharges.length ? [{ encounterId: { in: encIdsForCharges } }] : []),
         ],
       },
       select: { amount: true },
@@ -480,25 +525,17 @@ export class IPDService {
         status: 'DISPENSED',
         OR: [
           { admissionId: admissionId },
-          ...(allEncIds.length ? [{ encounterId: { in: allEncIds } }] : []),
+          ...(encIdsForCharges.length ? [{ encounterId: { in: encIdsForCharges } }] : []),
         ],
       },
       select: { totalCharges: true },
     });
     const medicineCharges = dispensedRx.reduce((s, r) => s + Number(r.totalCharges ?? 0), 0);
 
-    // OPD consultation fee from the triggering encounter
-    let consultationFee = 0;
-    if (opdEncounterId) {
-      const opdEnc = await prisma.encounter.findUnique({
-        where:  { id: opdEncounterId },
-        select: { consultationFee: true },
-      });
-      consultationFee = Number(opdEnc?.consultationFee ?? 0);
-    }
-
     const computedTotal = wardCharges + consultationFee + labCharges + medicineCharges;
-    const totalAmount   = data.totalAmount ?? computedTotal;
+    const discount      = (admission as any).discountAmount || 0;
+    const afterDiscount = Math.max(0, computedTotal - discount);
+    const totalAmount   = data.totalAmount ?? afterDiscount;
     const collected     = data.paymentCollected ?? 0;
     const alreadyPaid   = admission.advancePaid;
     const totalReceived = collected + alreadyPaid;
@@ -544,6 +581,27 @@ export class IPDService {
       });
     }
 
+    // Mark linked OPD encounter + its appointment as COMPLETED on discharge
+    if (opdEncounterId) {
+      await prisma.encounter.updateMany({
+        where: { id: opdEncounterId, status: { not: 'COMPLETED' } },
+        data:  { status: 'COMPLETED' },
+      });
+      // Appointment references encounter via encounterId
+      await prisma.appointment.updateMany({
+        where: { encounterId: opdEncounterId, status: { notIn: ['COMPLETED', 'CANCELLED'] } },
+        data:  { status: 'COMPLETED' },
+      });
+    }
+
+    // Mark all IPD round encounters as COMPLETED
+    if (roundIds.length > 0) {
+      await prisma.encounter.updateMany({
+        where: { id: { in: roundIds }, status: { not: 'COMPLETED' } },
+        data:  { status: 'COMPLETED' },
+      });
+    }
+
     // SMS notification
     if (admission.patient?.mobile) {
       smsService.sendDischargeNotification({
@@ -557,6 +615,74 @@ export class IPDService {
     return { ...updated, days, wardCharges, labCharges, medicineCharges, totalAmount, balance: Math.max(0, totalAmount - totalReceived) };
   }
 
+  // ── Apply Discount (ADMIN/SUPER_ADMIN only) ─────────────────────────────
+
+  async applyDiscount(admissionId: string, hospitalId: string, data: {
+    amount: number;
+    reason?: string;
+    approvedBy: string;
+  }) {
+    const admission = await prisma.admission.findFirst({
+      where: { id: admissionId, hospitalId, status: { in: ['ADMITTED', 'DISCHARGE_READY'] } },
+    });
+    if (!admission) throw new Error('Active admission not found');
+    if (data.amount < 0) throw new Error('Discount amount must be non-negative');
+
+    return prisma.admission.update({
+      where: { id: admissionId },
+      data: {
+        discountAmount: data.amount,
+        discountReason: data.reason || undefined,
+        discountApprovedBy: data.approvedBy,
+      },
+    });
+  }
+
+  // ── Collect partial payment during stay ─────────────────────────────────
+
+  async collectPayment(admissionId: string, hospitalId: string, data: {
+    amount: number;
+    paymentMethod: string;
+    transactionRef?: string;
+  }) {
+    const admission = await prisma.admission.findFirst({
+      where: { id: admissionId, hospitalId },
+      include: { patient: { select: { firstName: true, lastName: true } } },
+    });
+    if (!admission) throw new Error('Admission not found');
+    if (admission.status === 'DISCHARGED') throw new Error('Cannot collect payment on a discharged admission. Use the discharge billing flow instead.');
+    if (!['ADMITTED', 'DISCHARGE_READY'].includes(admission.status)) throw new Error(`Cannot collect payment on admission with status: ${admission.status}`);
+    if (admission.paymentStatus === 'PAID') throw new Error('All payments have already been collected for this admission');
+    if (data.amount <= 0) throw new Error('Amount must be greater than zero');
+
+    const newAdvance = (admission.advancePaid || 0) + data.amount;
+
+    await prisma.admission.update({
+      where: { id: admissionId },
+      data: {
+        advancePaid: newAdvance,
+        paymentStatus: 'PARTIAL',
+      },
+    });
+
+    const payment = await prisma.payment.create({
+      data: {
+        patientId:     admission.patientId,
+        hospitalId,
+        admissionId,
+        amount:        data.amount,
+        paymentMethod: data.paymentMethod as any,
+        status:        'PAID',
+        paidAt:        new Date(),
+        transactionId: data.transactionRef || undefined,
+        receiptNumber: generateReceiptNumber(),
+        description:   `IPD Payment — ${admission.admissionNumber}`,
+      },
+    });
+
+    return { admission: { ...admission, advancePaid: newAdvance }, payment };
+  }
+
   // ── Get itemized bill preview for an admission ──────────────────────────
 
   async getAdmissionBill(admissionId: string, hospitalId: string) {
@@ -565,7 +691,7 @@ export class IPDService {
       select: {
         admittedAt: true, dischargedAt: true,
         dailyCharges: true, advancePaid: true, admissionNumber: true,
-        encounterId: true,  // OPD encounter that triggered the admission
+        encounterId: true, discountAmount: true, discountReason: true, status: true,
         patient: { select: { firstName: true, lastName: true, uhid: true } },
         ward:    { select: { name: true } },
         bed:     { select: { bedNumber: true } },
@@ -587,20 +713,44 @@ export class IPDService {
     });
     const roundIds = roundEncounters.map(e => e.id);
 
-    // All encounter IDs to search across: OPD trigger + all IPD rounds
-    const allEncounterIds = [
-      ...(admission.encounterId ? [admission.encounterId] : []),
+    // Check if OPD encounter was already paid — if so, exclude it from IPD bill to avoid double-counting
+    let opdAlreadyPaid = false;
+    let consultationFee = 0;
+    let opdDoctor: string | undefined;
+    if (admission.encounterId) {
+      const opdEncounter = await prisma.encounter.findUnique({
+        where:  { id: admission.encounterId },
+        select: {
+          consultationFee: true, paymentCollected: true, paymentStatus: true,
+          doctor: { select: { firstName: true, lastName: true, specialization: true } },
+        },
+      });
+      if (opdEncounter) {
+        const opdPaid = Number(opdEncounter.paymentCollected ?? 0);
+        opdAlreadyPaid = opdPaid > 0 || opdEncounter.paymentStatus === 'PAID';
+        if (!opdAlreadyPaid) {
+          consultationFee = Number(opdEncounter.consultationFee ?? 0);
+        }
+        if (opdEncounter.doctor) {
+          opdDoctor = `Dr. ${opdEncounter.doctor.firstName} ${opdEncounter.doctor.lastName}${opdEncounter.doctor.specialization ? ` (${opdEncounter.doctor.specialization})` : ''}`;
+        }
+      }
+    }
+
+    // Encounter IDs to search for charges: only IPD rounds + unpaid OPD encounter
+    const encIdsForCharges = [
+      ...(!opdAlreadyPaid && admission.encounterId ? [admission.encounterId] : []),
       ...roundIds,
     ];
 
     // ── Lab investigations ─────────────────────────────────────────────────
-    const labInvestigations = allEncounterIds.length
+    const labInvestigations = encIdsForCharges.length
       ? await prisma.investigation.findMany({
           where: {
             hospitalId,
             OR: [
               { admissionId },
-              { encounterId: { in: allEncounterIds } },
+              { encounterId: { in: encIdsForCharges } },
             ],
           },
           select: { id: true, testName: true, testType: true, amount: true, status: true, reportedAt: true, encounterId: true },
@@ -613,6 +763,10 @@ export class IPDService {
         });
 
     // LabOrders as fallback for encounters that have no matching Investigation rows
+    const allEncounterIds = [
+      ...(admission.encounterId ? [admission.encounterId] : []),
+      ...roundIds,
+    ];
     const labOrders = allEncounterIds.length ? await prisma.labOrder.findMany({
       where:  { encounterId: { in: allEncounterIds } },
       select: { testName: true, testType: true, status: true, encounterId: true },
@@ -621,12 +775,12 @@ export class IPDService {
     const extraLabOrders = labOrders.filter(lo => !investigationTestNames.has(lo.testName.toLowerCase()));
 
     // ── Prescriptions (Prescription table — new-style) ────────────────────
-    const prescriptions = allEncounterIds.length
+    const prescriptions = encIdsForCharges.length
       ? await prisma.prescription.findMany({
           where: {
             OR: [
               { admissionId },
-              { encounterId: { in: allEncounterIds } },
+              { encounterId: { in: encIdsForCharges } },
             ],
           },
           select: { medications: true, totalCharges: true, status: true, issuedAt: true, encounterId: true },
@@ -648,25 +802,6 @@ export class IPDService {
     const medicineCharges = prescriptions.filter(r => r.status === 'DISPENSED')
                                          .reduce((s, r) => s + Number(r.totalCharges ?? 0), 0);
 
-    // OPD consultation fee from the triggering encounter
-    let consultationFee = 0;
-    let opdDoctor: string | undefined;
-    if (admission.encounterId) {
-      const opdEncounter = await prisma.encounter.findUnique({
-        where:  { id: admission.encounterId },
-        select: {
-          consultationFee: true,
-          doctor: { select: { firstName: true, lastName: true, specialization: true } },
-        },
-      });
-      if (opdEncounter) {
-        consultationFee = Number(opdEncounter.consultationFee ?? 0);
-        if (opdEncounter.doctor) {
-          opdDoctor = `Dr. ${opdEncounter.doctor.firstName} ${opdEncounter.doctor.lastName}${opdEncounter.doctor.specialization ? ` (${opdEncounter.doctor.specialization})` : ''}`;
-        }
-      }
-    }
-
     const total = wardCharges + consultationFee + labCharges + medicineCharges;
 
     return {
@@ -682,13 +817,162 @@ export class IPDService {
       labCharges,
       medicineCharges,
       total,
+      discount:         (admission as any).discountAmount || 0,
+      discountReason:   (admission as any).discountReason || null,
+      totalAfterDiscount: Math.max(0, total - ((admission as any).discountAmount || 0)),
       advancePaid:      admission.advancePaid,
-      balance:          Math.max(0, total - admission.advancePaid),
+      balance:          Math.max(0, total - ((admission as any).discountAmount || 0) - admission.advancePaid),
+      status:           (admission as any).status,
       labItems:         labInvestigations,
       extraLabOrders,
       rxItems:          prescriptions,
       encPrescriptions,
       rounds:           roundEncounters,
+    };
+  }
+
+  // ── Discharge Summary data (for PDF generation) ─────────────────────────
+
+  async getDischargeSummary(admissionId: string, hospitalId: string) {
+    const admission = await (prisma.admission as any).findFirst({
+      where: { id: admissionId, hospitalId },
+      include: {
+        patient: {
+          select: {
+            id: true, firstName: true, lastName: true, uhid: true, mobile: true,
+            gender: true, dob: true, bloodGroup: true, email: true, address: true,
+          },
+        },
+        ward: { select: { name: true, type: true, dailyCharges: true } },
+        bed: { select: { bedNumber: true } },
+        encounter: {
+          include: {
+            doctor: { select: { id: true, firstName: true, lastName: true, specialization: true, registrationNo: true } },
+            prescriptions: true,
+            labOrders: true,
+          },
+        },
+      },
+    });
+    if (!admission) throw new Error('Admission not found');
+
+    const rounds = await prisma.encounter.findMany({
+      where: { admissionId },
+      include: {
+        doctor: { select: { firstName: true, lastName: true, specialization: true } },
+      },
+      orderBy: { visitDate: 'asc' },
+    });
+
+    const hospital = await prisma.hospital.findUnique({
+      where: { id: hospitalId },
+      select: {
+        name: true, addressLine1: true, city: true, state: true,
+        country: true, phone: true, email: true, website: true, gstNumber: true,
+      },
+    });
+
+    const bill = await this.getAdmissionBill(admissionId, hospitalId);
+
+    const roundIds = rounds.map(r => r.id);
+    const opdEncId = admission.encounter?.id;
+    const allEncIds = [...(opdEncId ? [opdEncId] : []), ...roundIds];
+    const investigations = allEncIds.length ? await prisma.investigation.findMany({
+      where: {
+        hospitalId,
+        OR: [
+          { admissionId },
+          { encounterId: { in: allEncIds } },
+        ],
+      },
+      select: { testName: true, testType: true, results: true, status: true, reportedAt: true, orderedAt: true },
+      orderBy: { orderedAt: 'asc' },
+    }) : [];
+
+    const prescriptions = allEncIds.length ? await prisma.prescription.findMany({
+      where: {
+        OR: [
+          { admissionId },
+          { encounterId: { in: allEncIds } },
+        ],
+      },
+      select: { medications: true, status: true, issuedAt: true },
+      orderBy: { issuedAt: 'desc' },
+    }) : [];
+
+    const now = new Date();
+    const endDate = admission.dischargedAt ?? now;
+    const days = Math.max(1, Math.ceil((endDate.getTime() - admission.admittedAt.getTime()) / 86400000));
+
+    const doctorMap = new Map<string, any>();
+    if (admission.encounter?.doctor) {
+      const d = admission.encounter.doctor;
+      doctorMap.set(d.id, { name: `Dr. ${d.firstName} ${d.lastName}`, specialization: d.specialization, role: 'Admitting Doctor' });
+    }
+    rounds.forEach(r => {
+      if (r.doctor && !doctorMap.has(r.doctorId)) {
+        doctorMap.set(r.doctorId, { name: `Dr. ${r.doctor.firstName} ${r.doctor.lastName}`, specialization: r.doctor.specialization, role: 'Attending Doctor' });
+      }
+    });
+
+    // Parse patient address (stored as JSON)
+    const addr = admission.patient?.address;
+    let addressStr = '';
+    if (typeof addr === 'string') addressStr = addr;
+    else if (addr && typeof addr === 'object') {
+      addressStr = [addr.line1, addr.addressLine1, addr.city, addr.state, addr.pincode].filter(Boolean).join(', ');
+    }
+
+    return {
+      hospital,
+      patient: { ...admission.patient, addressFormatted: addressStr },
+      admission: {
+        admissionNumber: admission.admissionNumber,
+        admittedAt: admission.admittedAt,
+        dischargedAt: admission.dischargedAt,
+        ward: admission.ward?.name,
+        bed: admission.bed?.bedNumber,
+        days,
+        admissionReason: admission.admissionReason,
+        diagnosis: admission.diagnosis,
+        notes: admission.notes,
+        status: admission.status,
+      },
+      doctors: Array.from(doctorMap.values()),
+      rounds: rounds.map(r => ({
+        date: r.visitDate,
+        doctor: `Dr. ${r.doctor?.firstName || ''} ${r.doctor?.lastName || ''}`.trim(),
+        notes: r.notes,
+        diagnosis: r.diagnosis,
+        vitals: r.vitalSigns ? JSON.stringify(r.vitalSigns) : undefined,
+      })),
+      investigations: investigations.map(inv => ({
+        testName: inv.testName,
+        testType: inv.testType,
+        result: inv.results ? (typeof inv.results === 'string' ? inv.results : JSON.stringify(inv.results)) : undefined,
+        date: inv.orderedAt || inv.reportedAt,
+        status: inv.status,
+      })),
+      medications: prescriptions.flatMap(rx => {
+        const meds = Array.isArray(rx.medications) ? rx.medications : [];
+        return (meds as any[]).map(m => ({
+          name: m.name || m.medicineName || '',
+          dosage: m.dosage || '',
+          frequency: m.frequency || '',
+          duration: m.duration || '',
+          instructions: m.instructions || '',
+        }));
+      }),
+      billing: {
+        wardCharges: bill.wardCharges,
+        consultationFee: bill.consultationFee,
+        labCharges: bill.labCharges,
+        medicineCharges: bill.medicineCharges,
+        totalAmount: bill.total,
+        advancePaid: bill.advancePaid,
+        amountCollected: admission.paymentCollected || 0,
+        balance: bill.balance,
+      },
     };
   }
 

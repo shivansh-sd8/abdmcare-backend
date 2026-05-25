@@ -17,7 +17,8 @@ router.post(
     body('gender').isIn(['MALE', 'FEMALE', 'OTHER']).withMessage('Valid gender is required'),
     body('dob').isISO8601().withMessage('Valid date of birth is required'),
     body('mobile').isMobilePhone('en-IN').withMessage('Valid mobile number is required'),
-    body('email').optional().isEmail().withMessage('Valid email is required'),
+    body('email').optional({ values: 'falsy' }).isEmail().withMessage('Valid email is required'),
+    body('bloodGroup').optional({ values: 'falsy' }).isIn(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']).withMessage('Invalid blood group'),
   ],
   validate,
   patientController.createPatient
@@ -58,8 +59,11 @@ router.put(
   [
     body('firstName').optional().notEmpty().withMessage('First name cannot be empty'),
     body('lastName').optional().notEmpty().withMessage('Last name cannot be empty'),
-    body('mobile').optional().isMobilePhone('en-IN').withMessage('Valid mobile number is required'),
-    body('email').optional().isEmail().withMessage('Valid email is required'),
+    body('gender').optional().isIn(['MALE', 'FEMALE', 'OTHER']).withMessage('Valid gender is required (MALE, FEMALE, OTHER)'),
+    body('dob').optional().isISO8601().withMessage('Valid date of birth is required (YYYY-MM-DD)'),
+    body('mobile').optional().isMobilePhone('en-IN').withMessage('Valid Indian mobile number is required'),
+    body('email').optional({ values: 'falsy' }).isEmail().withMessage('Valid email is required'),
+    body('bloodGroup').optional({ values: 'falsy' }).isIn(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']).withMessage('Invalid blood group'),
   ],
   validate,
   patientController.updatePatient

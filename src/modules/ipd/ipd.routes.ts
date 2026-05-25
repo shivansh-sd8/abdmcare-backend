@@ -6,6 +6,7 @@ import {
   listAdmissions, getAdmission, admitPatient, updateAdmission, dischargePatient,
   getWardOverview,
   getAdmissionRounds, createAdmissionRound, markDischargeReady, getAdmissionBill,
+  getDischargeSummary, applyDiscount, collectPayment,
 } from './ipd.controller';
 
 const router = Router();
@@ -37,8 +38,17 @@ router.post('/admissions/:admissionId/discharge-ready',    authorize('SUPER_ADMI
 router.get('/admissions/:admissionId/rounds',              authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), getAdmissionRounds);
 router.post('/admissions/:admissionId/rounds',             authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), createAdmissionRound);
 
+// Discount (admin-only)
+router.patch('/admissions/:admissionId/discount',          authorize('SUPER_ADMIN', 'ADMIN'), applyDiscount);
+
+// Collect partial payment during stay
+router.patch('/admissions/:admissionId/collect-payment',   authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'), collectPayment);
+
 // Bill preview (before discharge)
-router.get('/admissions/:admissionId/bill',                authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'), getAdmissionBill);
+router.get('/admissions/:admissionId/bill',                authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST', 'BILLING_STAFF'), getAdmissionBill);
+
+// Discharge summary data (for PDF generation)
+router.get('/admissions/:admissionId/discharge-summary',   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'), getDischargeSummary);
 
 // Ward overview / ward manager
 router.get('/overview', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), getWardOverview);

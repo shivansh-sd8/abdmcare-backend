@@ -6,8 +6,14 @@ class PaymentController {
   async createPayment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<Response | void> {
     try {
       const currentUser = req.user;
+      // Enforce hospital isolation: non-SUPER_ADMIN must use their own hospitalId
+      let hospitalId = req.body.hospitalId;
+      if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
+        hospitalId = currentUser.hospitalId;
+      }
       const payment = await paymentService.createPayment({
         ...req.body,
+        hospitalId,
         createdBy: currentUser?.id,
       });
 
@@ -26,9 +32,9 @@ class PaymentController {
       const currentUser = req.user;
       const { patientId, status, startDate, endDate, page, limit } = req.query;
 
-      // ADMIN and RECEPTIONIST see only their hospital's payments
+      // Non-SUPER_ADMIN users see only their own hospital's payments
       let hospitalId = req.query.hospitalId as string;
-      if ((currentUser?.role === 'ADMIN' || currentUser?.role === 'RECEPTIONIST') && currentUser?.hospitalId) {
+      if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
         hospitalId = currentUser.hospitalId;
       }
 
@@ -96,13 +102,28 @@ class PaymentController {
     }
   }
 
+  async getConsolidatedBilling(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<Response | void> {
+    try {
+      const currentUser = req.user;
+      let hospitalId = req.query.hospitalId as string;
+      if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
+        hospitalId = currentUser.hospitalId;
+      }
+      const patientId = req.query.patientId as string;
+      const result = await paymentService.getConsolidatedBilling(hospitalId, patientId);
+      return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   async getPaymentStats(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<Response | void> {
     try {
       const currentUser = req.user;
 
-      // ADMIN sees only their hospital's stats
+      // Non-SUPER_ADMIN users see only their own hospital's stats
       let hospitalId = req.query.hospitalId as string;
-      if (currentUser?.role === 'ADMIN' && currentUser?.hospitalId) {
+      if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
         hospitalId = currentUser.hospitalId;
       }
 

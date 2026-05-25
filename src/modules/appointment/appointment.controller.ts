@@ -76,6 +76,18 @@ export class AppointmentController {
       ResponseHandler.success(res, 'Appointment stats fetched successfully', result.data);
     }
   );
+
+  getAvailableSlots = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { doctorId, date } = req.query as { doctorId?: string; date?: string };
+      if (!doctorId || !date) {
+        ResponseHandler.error(res, 'doctorId and date are required', 400);
+        return;
+      }
+      const result = await this.appointmentService.getAvailableSlots(doctorId, date);
+      ResponseHandler.success(res, 'Available slots fetched successfully', result);
+    }
+  );
 }
 
 export default new AppointmentController();

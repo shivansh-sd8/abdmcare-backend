@@ -521,6 +521,46 @@ export class HospitalService {
     }
   }
 
+  // Update hospital schedule configuration
+  async updateSchedule(id: string, data: {
+    operatingHours?: any;
+    defaultSlotDuration?: number;
+    breakTimes?: any;
+    holidays?: string[];
+    is24x7?: boolean;
+  }) {
+    const hospital = await prisma.hospital.findUnique({ where: { id } });
+    if (!hospital) throw new AppError('Hospital not found', 404);
+
+    if (data.defaultSlotDuration && ![10, 15, 20, 30, 45, 60].includes(data.defaultSlotDuration)) {
+      throw new AppError('Slot duration must be 10, 15, 20, 30, 45, or 60 minutes', 400);
+    }
+
+    const updateData: any = {};
+    if (data.operatingHours !== undefined) updateData.operatingHours = data.operatingHours;
+    if (data.defaultSlotDuration !== undefined) updateData.defaultSlotDuration = data.defaultSlotDuration;
+    if (data.breakTimes !== undefined) updateData.breakTimes = data.breakTimes;
+    if (data.holidays !== undefined) updateData.holidays = data.holidays;
+    if (data.is24x7 !== undefined) updateData.is24x7 = data.is24x7;
+
+    const updated = await prisma.hospital.update({ where: { id }, data: updateData });
+    logger.info('Hospital schedule updated', { hospitalId: id });
+    return { success: true, data: updated, message: 'Schedule updated successfully' };
+  }
+
+  // Get hospital schedule configuration
+  async getSchedule(id: string) {
+    const hospital = await prisma.hospital.findUnique({
+      where: { id },
+      select: {
+        id: true, name: true, operatingHours: true, defaultSlotDuration: true,
+        breakTimes: true, holidays: true, is24x7: true,
+      },
+    });
+    if (!hospital) throw new AppError('Hospital not found', 404);
+    return { success: true, data: hospital };
+  }
+
   // Helper: Generate unique hospital code
   private generateHospitalCode(name: string): string {
     const prefix = name

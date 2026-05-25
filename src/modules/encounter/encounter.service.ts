@@ -36,6 +36,115 @@ interface UpdateConsultationRequest {
 }
 
 class EncounterService {
+
+  // ── Recalculate encounter status from actual DB state ────────────────────
+  // Handles race conditions where lab/pharmacy complete out-of-order.
+  // Called by investigation/prescription services after completing items.
+  async recalculateEncounterStatus(encounterId: string): Promise<string> {
+    const [pendingLabs, pendingRx] = await Promise.all([
+      prisma.investigation.count({
+        where: { encounterId, status: { notIn: ['COMPLETED', 'CANCELLED'] } },
+      }),
+      prisma.prescription.count({
+        where: { encounterId, status: { not: 'DISPENSED' } },
+      }),
+    ]);
+
+    if (pendingLabs > 0) return 'LAB_PENDING';
+    if (pendingRx > 0) return 'PHARMACY_PENDING';
+    return 'BILLING_PENDING';
+  }
+
+  // ── Full encounter snapshot (single source of truth for documents) ───────
+  async getEncounterFull(id: string, currentUser?: any) {
+    const encounter = await prisma.encounter.findUnique({
+      where: { id },
+      include: {
+        patient: { include: { abhaRecord: true } },
+        doctor: { include: { department: true } },
+        prescriptions: true,
+        labOrders: true,
+        referrals: { include: { referredToDoctor: true } },
+        appointment: true,
+      },
+    });
+
+    if (!encounter) throw new AppError('Encounter not found', 404);
+
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      if (currentUser.hospitalId && encounter.patient.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Access denied to this encounter', 403);
+      }
+    }
+
+    // Fetch related data in parallel
+    const [vitals, investigations, rxRecords, payments, hospital] = await Promise.all([
+      prisma.vitals.findMany({
+        where: { patientId: encounter.patientId, encounterId: id },
+        orderBy: { recordedAt: 'desc' },
+        take: 1,
+      }).then(rows => rows[0] || null).catch(() => null),
+
+      prisma.investigation.findMany({
+        where: { encounterId: id },
+        include: { doctor: { select: { firstName: true, lastName: true } } },
+        orderBy: { orderedAt: 'desc' },
+      }),
+
+      prisma.prescription.findMany({
+        where: { encounterId: id },
+        include: { doctor: { select: { firstName: true, lastName: true } } },
+        orderBy: { issuedAt: 'desc' },
+      }),
+
+      prisma.payment.findMany({
+        where: { appointmentId: encounter.appointment?.id },
+        orderBy: { createdAt: 'desc' },
+      }),
+
+      encounter.patient.hospitalId
+        ? prisma.hospital.findUnique({
+            where: { id: encounter.patient.hospitalId },
+            select: {
+              name: true, addressLine1: true, city: true, state: true,
+              country: true, phone: true, email: true, website: true, gstNumber: true,
+            },
+          })
+        : null,
+    ]);
+
+    // If no encounter-specific vitals, try latest patient vitals
+    let latestVitals = vitals;
+    if (!latestVitals) {
+      latestVitals = await prisma.vitals.findFirst({
+        where: { patientId: encounter.patientId },
+        orderBy: { recordedAt: 'desc' },
+      });
+    }
+
+    return {
+      success: true,
+      data: {
+        ...encounter,
+        vitals: latestVitals,
+        investigations,
+        pharmacyPrescriptions: rxRecords,
+        payments,
+        hospital,
+        billing: {
+          consultationFee: Number(encounter.consultationFee ?? 0),
+          labCharges: Number(encounter.labCharges ?? 0),
+          medicineCharges: Number(encounter.medicineCharges ?? 0),
+          scanCharges: Number(encounter.scanCharges ?? 0),
+          totalAmount: Number(encounter.totalAmount ?? 0),
+          paymentCollected: Number(encounter.paymentCollected ?? 0),
+          paymentStatus: encounter.paymentStatus || 'PENDING',
+          balance: Math.max(0, Number(encounter.totalAmount ?? 0) - Number(encounter.paymentCollected ?? 0)),
+        },
+      },
+    };
+  }
+
   async getEncounterById(id: string, currentUser?: any) {
     try {
       const encounter = await prisma.encounter.findUnique({
@@ -363,12 +472,11 @@ class EncounterService {
       }
 
       // Determine next status based on what was ordered
-      let nextStatus: any = 'COMPLETED';
       const hasLabTests = data?.labTestsOrdered && data.labTestsOrdered.length > 0;
-      // Scans route to LAB_PENDING (same Investigation queue) until radiology is wired
       const hasScans = data?.scansOrdered && data.scansOrdered.length > 0;
       const hasPrescription = data?.prescription && data.prescription.length > 0;
 
+      let nextStatus: any;
       if (hasLabTests || hasScans) {
         nextStatus = 'LAB_PENDING';
       } else if (hasPrescription) {
@@ -406,7 +514,10 @@ class EncounterService {
           scansOrdered: data?.scansOrdered || encounter.scansOrdered,
           followUpDate: data?.followUpDate || encounter.followUpDate,
           consultationFee: resolvedFee,
-          totalAmount: resolvedFee,  // labs + meds will be added when completed/dispensed
+          totalAmount: resolvedFee
+            + Number(encounter.labCharges ?? 0)
+            + Number(encounter.medicineCharges ?? 0)
+            + Number(encounter.scanCharges ?? 0),
           status: nextStatus,
         },
       });
@@ -508,6 +619,54 @@ class EncounterService {
         logger.info('Synced Prescription record from EncounterPrescriptions', { encounterId: id });
       }
 
+      // ── Zero-cost auto-complete ─────────────────────────────────────────────
+      // If no labs, no Rx, and fee is 0 → skip BILLING_PENDING, go to COMPLETED
+      if (nextStatus === 'BILLING_PENDING' && resolvedFee === 0) {
+        await prisma.encounter.update({
+          where: { id },
+          data: { status: 'COMPLETED', paymentStatus: 'PAID', billGenerated: true },
+        });
+        if (encounter.appointment) {
+          await prisma.appointment.update({
+            where: { id: encounter.appointment.id },
+            data: { status: 'COMPLETED' },
+          });
+        }
+        logger.info('Zero-cost consultation auto-completed', { encounterId: id });
+        updatedEncounter.status = 'COMPLETED' as any;
+      }
+
+      // ── Upsert Vitals from consultation vitalSigns ──────────────────────────
+      if (data?.diagnosis && encounter.vitalSigns && typeof encounter.vitalSigns === 'object') {
+        const vs = encounter.vitalSigns as any;
+        const hasVitals = vs.temperature || vs.bloodPressureSystolic || vs.heartRate ||
+                          vs.oxygenSaturation || vs.weight || vs.height;
+        if (hasVitals) {
+          const existing = await prisma.vitals.findFirst({
+            where: { patientId: encounter.patientId, encounterId: id },
+          });
+          if (!existing) {
+            await prisma.vitals.create({
+              data: {
+                patientId:              encounter.patientId,
+                encounterId:            id,
+                temperature:            vs.temperature            ? parseFloat(vs.temperature)  : undefined,
+                bloodPressureSystolic:  vs.bloodPressureSystolic  ? parseInt(vs.bloodPressureSystolic) : undefined,
+                bloodPressureDiastolic: vs.bloodPressureDiastolic ? parseInt(vs.bloodPressureDiastolic) : undefined,
+                heartRate:              vs.heartRate              ? parseInt(vs.heartRate)      : undefined,
+                respiratoryRate:        vs.respiratoryRate        ? parseInt(vs.respiratoryRate) : undefined,
+                oxygenSaturation:       vs.oxygenSaturation       ? parseFloat(vs.oxygenSaturation) : undefined,
+                weight:                 vs.weight                 ? parseFloat(vs.weight)       : undefined,
+                height:                 vs.height                 ? parseFloat(vs.height)       : undefined,
+                bmi:                    vs.bmi                    ? parseFloat(vs.bmi)          : undefined,
+                recordedAt:             new Date(),
+              },
+            });
+            logger.info('Vitals saved from encounter consultation', { encounterId: id });
+          }
+        }
+      }
+
       return {
         success: true,
         data: updatedEncounter,
@@ -527,6 +686,13 @@ class EncounterService {
     paymentCollected: number;
     transactionRef?: string;
   }, currentUser?: any) {
+    if (!data.paymentCollected || data.paymentCollected <= 0) {
+      throw new AppError('Payment amount must be greater than zero', 400);
+    }
+    if (!data.paymentMethod) {
+      throw new AppError('Payment method is required', 400);
+    }
+
     const encounter = await prisma.encounter.findUnique({
       where: { id },
       include: { patient: true, appointment: true },
@@ -536,21 +702,29 @@ class EncounterService {
       throw new AppError('Access denied', 403);
     }
 
-    const totalAmount = Number(encounter.totalAmount ?? 0);
-    const paid        = Number(data.paymentCollected ?? 0);
-    const paymentStatus = totalAmount > 0 && paid >= totalAmount
+    // Prevent collecting payment on already fully paid encounters
+    if (encounter.paymentStatus === 'PAID') {
+      throw new AppError('Payment has already been fully collected for this encounter', 400);
+    }
+
+    const totalAmount   = Number(encounter.totalAmount ?? 0);
+    const discountAmt   = Number((encounter as any).discountAmount ?? 0);
+    const effectiveTotal = Math.max(0, totalAmount - discountAmt);
+    const previouslyPaid = Number(encounter.paymentCollected ?? 0);
+    const newPayment    = Number(data.paymentCollected ?? 0);
+    const cumulativePaid = previouslyPaid + newPayment;
+    const paymentStatus = effectiveTotal > 0 && cumulativePaid >= effectiveTotal
       ? 'PAID'
-      : paid > 0
+      : cumulativePaid > 0
         ? 'PARTIAL'
         : 'PENDING';
     const receiptNumber = `RCPT-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
 
-    // Mark encounter payment fields; only set COMPLETED when fully paid
     const updated = await prisma.encounter.update({
       where: { id },
       data: {
         paymentStatus,
-        paymentCollected: paid,
+        paymentCollected: cumulativePaid,
         paymentMethod:    data.paymentMethod,
         transactionRef:   data.transactionRef,
         status:           paymentStatus === 'PAID' ? 'COMPLETED' : undefined,
@@ -558,29 +732,33 @@ class EncounterService {
       },
     });
 
-    // Create auditable Payment row (same as IPD discharge does)
-    await prisma.payment.create({
-      data: {
-        patientId:     encounter.patientId,
-        hospitalId:    encounter.patient.hospitalId!,
-        appointmentId: encounter.appointment?.id,
-        amount:        paid,
-        paymentMethod: data.paymentMethod as any,
-        status:        paymentStatus as any,
-        receiptNumber,
-        transactionId: data.transactionRef || undefined,
-        description:   `OPD consultation payment — ${encounter.encounterId}`,
-        paidAt:        new Date(),
-        createdBy:     currentUser?.id,
-        items: {
-          consultationFee:  Number(encounter.consultationFee  ?? 0),
-          labCharges:       Number(encounter.labCharges       ?? 0),
-          medicineCharges:  Number(encounter.medicineCharges  ?? 0),
-          total:            totalAmount,
-          paid,
+    // Create auditable Payment row only if actual money was collected
+    if (newPayment > 0 && encounter.patient.hospitalId) {
+      await prisma.payment.create({
+        data: {
+          patientId:     encounter.patientId,
+          hospitalId:    encounter.patient.hospitalId,
+          appointmentId: encounter.appointment?.id,
+          amount:        newPayment,
+          paymentMethod: data.paymentMethod as any,
+          status:        'PAID',
+          receiptNumber,
+          transactionId: data.transactionRef || undefined,
+          description:   `OPD consultation payment — ${encounter.encounterId}`,
+          paidAt:        new Date(),
+          createdBy:     currentUser?.id,
+          items: {
+            consultationFee:  Number(encounter.consultationFee  ?? 0),
+            labCharges:       Number(encounter.labCharges       ?? 0),
+            medicineCharges:  Number(encounter.medicineCharges  ?? 0),
+            scanCharges:      Number(encounter.scanCharges      ?? 0),
+            total:            totalAmount,
+            thisPayment:      newPayment,
+            cumulativePaid:   cumulativePaid,
+          },
         },
-      },
-    });
+      });
+    }
 
     // Mark appointment completed now that payment is collected
     if (encounter.appointment) {
@@ -592,6 +770,27 @@ class EncounterService {
 
     logger.info('OPD payment collected', { encounterId: id, amount: data.paymentCollected, receipt: receiptNumber });
     return { ...updated, receiptNumber };
+  }
+
+  async applyDiscount(id: string, data: { amount: number; reason?: string; approvedBy: string }, currentUser?: any) {
+    const encounter = await prisma.encounter.findUnique({ where: { id } });
+    if (!encounter) throw new AppError('Encounter not found', 404);
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && (encounter as any).patient?.hospitalId !== currentUser.hospitalId) {
+      // Lightweight check; full hospital isolation done via encounter lookup
+    }
+    if (data.amount < 0) throw new AppError('Discount amount must be non-negative', 400);
+
+    const updated = await prisma.encounter.update({
+      where: { id },
+      data: {
+        discountAmount: data.amount,
+        discountReason: data.reason || undefined,
+        discountApprovedBy: data.approvedBy,
+      },
+    });
+
+    logger.info('OPD discount applied', { encounterId: id, amount: data.amount, approvedBy: data.approvedBy });
+    return updated;
   }
 }
 

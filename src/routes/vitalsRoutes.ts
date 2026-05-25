@@ -31,13 +31,13 @@ router.get(
 
 router.get(
   '/patient/:patientId/latest',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'BILLING_STAFF'),
   vitalsController.getLatestVitals
 );
 
 router.get(
   '/:id',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   vitalsController.getVitalsById
 );
 

@@ -3,6 +3,7 @@ import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import { AppointmentType, AppointmentStatus } from '@prisma/client';
 import smsService from '../../common/utils/smsService';
+import { generateSlots, isValidSlotTime, HospitalScheduleConfig, DoctorScheduleConfig } from '../../common/utils/slotEngine';
 
 interface CreateAppointmentRequest {
   patientId: string;
@@ -32,28 +33,46 @@ export class AppointmentService {
         throw new AppError('Patient not found', 404);
       }
 
-      const doctor = await prisma.doctor.findUnique({
-        where: { id: data.doctorId },
-      });
-
-      if (!doctor) {
-        throw new AppError('Doctor not found', 404);
-      }
+      const { hospitalConfig, doctorConfig } = await this.loadScheduleConfigs(data.doctorId);
 
       const appointmentDateTime = new Date(`${data.date}T${data.time}`);
 
-      const existingAppointment = await prisma.appointment.findFirst({
+      if (appointmentDateTime < new Date()) {
+        throw new AppError('Cannot schedule appointment in the past', 400);
+      }
+
+      // Validate against schedule: is this a valid slot time?
+      const targetDate = new Date(data.date);
+      if (!isValidSlotTime(data.time, targetDate, hospitalConfig, doctorConfig)) {
+        throw new AppError('Selected time is outside available scheduling hours', 400);
+      }
+
+      // Check booked slots (including overlap via exact time match on generated slots)
+      const bookedTimes = await this.getBookedTimesForDate(data.doctorId, targetDate);
+      if (bookedTimes.includes(data.time)) {
+        throw new AppError('Doctor already has an appointment at this time', 400);
+      }
+
+      // Prevent duplicate appointment for same patient + same doctor + same day
+      const dayStart = new Date(data.date);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(data.date);
+      dayEnd.setHours(23, 59, 59, 999);
+      const existingPatientAppt = await prisma.appointment.findFirst({
         where: {
+          patientId: data.patientId,
           doctorId: data.doctorId,
-          scheduledAt: appointmentDateTime,
-          status: {
-            not: 'CANCELLED',
-          },
+          scheduledAt: { gte: dayStart, lte: dayEnd },
+          status: { in: ['SCHEDULED', 'CONFIRMED', 'IN_PROGRESS'] },
         },
       });
+      if (existingPatientAppt) {
+        throw new AppError('Patient already has an active appointment with this doctor today', 400);
+      }
 
-      if (existingAppointment) {
-        throw new AppError('Doctor already has an appointment at this time', 400);
+      // Check daily capacity
+      if (bookedTimes.length >= (doctorConfig.maxPatientsPerDay || 30)) {
+        throw new AppError('Doctor has reached maximum appointments for this day', 400);
       }
 
       const appointment = await prisma.appointment.create({
@@ -64,7 +83,7 @@ export class AppointmentService {
           hospitalId: patient.hospitalId,
           scheduledAt: appointmentDateTime,
           type: (data.type as AppointmentType) || AppointmentType.OPD,
-          notes: data.notes || data.reason || undefined,
+          notes: [data.reason, data.notes].filter(Boolean).join('\n---\n') || undefined,
           status: AppointmentStatus.SCHEDULED,
         },
         include: {
@@ -349,8 +368,17 @@ export class AppointmentService {
           encounterId,
           patientId: appointment.patientId,
           doctorId: appointment.doctorId,
-          type: appointment.type === 'OPD' ? 'OPD' : appointment.type === 'IPD' ? 'IPD' : 'EMERGENCY',
-          chiefComplaint: appointment.notes || 'OPD Visit',
+          type: (['OPD', 'FOLLOW_UP', 'ROUTINE_CHECKUP', 'DIAGNOSTIC', 'SURGERY_CONSULTATION', 'SECOND_OPINION', 'VACCINATION'].includes(appointment.type)
+            ? 'OPD'
+            : appointment.type === 'IPD'
+              ? 'IPD'
+              : appointment.type === 'TELECONSULTATION'
+                ? 'TELECONSULTATION'
+                : appointment.type === 'EMERGENCY'
+                  ? 'EMERGENCY'
+                  : 'OPD'),
+          chiefComplaint: appointment.notes?.split('\n---\n')[0] || 'OPD Visit',
+          notes: appointment.notes?.includes('\n---\n') ? appointment.notes.split('\n---\n').slice(1).join('\n') : undefined,
           visitDate: new Date(),
           status: 'IN_PROGRESS',
         },
@@ -509,6 +537,89 @@ export class AppointmentService {
         error.statusCode || 500
       );
     }
+  }
+
+  // ── Dynamic slot generation ──────────────────────────────────────────────
+
+  private async loadScheduleConfigs(doctorId: string) {
+    const doctor = await prisma.doctor.findUnique({
+      where: { id: doctorId },
+      select: {
+        id: true, firstName: true, lastName: true, specialization: true, isActive: true,
+        workingHours: true, slotDuration: true, maxPatientsPerDay: true, breakTimes: true,
+        hospitalId: true,
+        hospital: {
+          select: {
+            id: true, name: true,
+            operatingHours: true, defaultSlotDuration: true, breakTimes: true,
+            holidays: true, is24x7: true,
+          },
+        },
+      },
+    });
+    if (!doctor) throw new AppError('Doctor not found', 404);
+    if (!doctor.isActive) throw new AppError('Doctor is not active', 400);
+
+    const hospitalConfig: HospitalScheduleConfig = {
+      operatingHours: doctor.hospital?.operatingHours as any,
+      defaultSlotDuration: doctor.hospital?.defaultSlotDuration,
+      breakTimes: doctor.hospital?.breakTimes as any,
+      holidays: doctor.hospital?.holidays as any,
+      is24x7: doctor.hospital?.is24x7,
+    };
+    const doctorConfig: DoctorScheduleConfig = {
+      workingHours: doctor.workingHours as any,
+      slotDuration: doctor.slotDuration,
+      maxPatientsPerDay: doctor.maxPatientsPerDay,
+      breakTimes: doctor.breakTimes as any,
+    };
+    return { doctor, hospitalConfig, doctorConfig };
+  }
+
+  private async getBookedTimesForDate(doctorId: string, date: Date): Promise<string[]> {
+    const dayStart = new Date(date); dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(date); dayEnd.setHours(23, 59, 59, 999);
+
+    const appointments = await prisma.appointment.findMany({
+      where: {
+        doctorId,
+        scheduledAt: { gte: dayStart, lte: dayEnd },
+        status: { notIn: ['CANCELLED', 'NO_SHOW'] },
+      },
+      select: { scheduledAt: true },
+    });
+
+    return appointments.map(a => {
+      const d = new Date(a.scheduledAt);
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    });
+  }
+
+  async getAvailableSlots(doctorId: string, dateStr: string) {
+    const { doctor, hospitalConfig, doctorConfig } = await this.loadScheduleConfigs(doctorId);
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) throw new AppError('Invalid date', 400);
+
+    const bookedTimes = await this.getBookedTimesForDate(doctorId, date);
+    const result = generateSlots(date, hospitalConfig, doctorConfig, bookedTimes);
+
+    return {
+      slots: result.available,
+      booked: result.booked,
+      allSlots: result.allSlots,
+      slotDuration: result.slotDuration,
+      isHoliday: result.isHoliday,
+      isClosed: result.isClosed,
+      maxPatientsPerDay: result.maxPatientsPerDay,
+      capacityReached: result.capacityReached,
+      doctor: {
+        id: doctor.id,
+        name: `Dr. ${doctor.firstName} ${doctor.lastName}`,
+        specialization: doctor.specialization,
+      },
+      hospital: doctor.hospital ? { id: doctor.hospital.id, name: doctor.hospital.name } : null,
+      date: dateStr,
+    };
   }
 }
 

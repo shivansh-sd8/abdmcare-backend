@@ -21,6 +21,8 @@ interface UpdatePatientRequest {
   firstName?: string;
   middleName?: string;
   lastName?: string;
+  gender?: string;
+  dob?: string;
   mobile?: string;
   email?: string;
   address?: any;
@@ -44,11 +46,15 @@ export class PatientService {
           OR: [
             { mobile: data.mobile },
             ...(data.email ? [{ email: data.email }] : []),
+            ...(data.abhaId ? [{ abhaId: data.abhaId }] : []),
           ],
         },
       });
 
       if (existingPatient) {
+        if (data.abhaId && existingPatient.abhaId === data.abhaId) {
+          throw new AppError('Patient with this ABHA ID already exists', 400);
+        }
         throw new AppError('Patient with this mobile or email already exists', 400);
       }
 
@@ -190,17 +196,20 @@ export class PatientService {
         throw new AppError('Patient not found', 404);
       }
 
+      const updateData: any = {};
+      if (data.firstName !== undefined)        updateData.firstName = data.firstName;
+      if (data.lastName !== undefined)         updateData.lastName = data.lastName;
+      if (data.gender !== undefined)           updateData.gender = data.gender;
+      if (data.dob !== undefined)              updateData.dob = new Date(data.dob);
+      if (data.mobile !== undefined)           updateData.mobile = data.mobile;
+      if (data.email !== undefined)            updateData.email = data.email || null;
+      if (data.bloodGroup !== undefined)       updateData.bloodGroup = data.bloodGroup || null;
+      if (data.address !== undefined)          updateData.address = data.address;
+      if (data.emergencyContact !== undefined) updateData.emergencyContact = data.emergencyContact;
+
       const updatedPatient = await prisma.patient.update({
         where: { id },
-        data: {
-          firstName: data.firstName,
-          lastName: data.lastName,
-          mobile: data.mobile,
-          email: data.email,
-          address: data.address,
-          bloodGroup: data.bloodGroup,
-          emergencyContact: data.emergencyContact,
-        },
+        data: updateData,
         include: {
           abhaRecord: true,
         },

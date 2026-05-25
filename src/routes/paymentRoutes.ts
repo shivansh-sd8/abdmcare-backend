@@ -15,6 +15,13 @@ router.get(
   paymentController.getPaymentStats
 );
 
+// Consolidated billing view - all pending bills across OPD, IPD, payments
+router.get(
+  '/consolidated',
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
+  paymentController.getConsolidatedBilling
+);
+
 // Create payment - RECEPTIONIST, BILLING_STAFF, ADMIN, SUPER_ADMIN
 router.post(
   '/',

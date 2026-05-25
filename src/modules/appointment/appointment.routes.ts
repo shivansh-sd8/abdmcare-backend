@@ -28,9 +28,16 @@ router.post(
       'SURGERY_CONSULTATION',
       'SECOND_OPINION'
     ]).withMessage('Valid appointment type is required'),
+    body('reason').trim().isLength({ min: 5 }).withMessage('Reason for visit is required (min 5 characters)'),
   ],
   validate,
   appointmentController.createAppointment
+);
+
+router.get(
+  '/slots',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  appointmentController.getAvailableSlots
 );
 
 router.get(

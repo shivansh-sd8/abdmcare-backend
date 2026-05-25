@@ -18,6 +18,13 @@ class EhrController {
     const result = await ehrService.getPatientEHR(patientId, currentUser);
     ResponseHandler.success(res, 'Patient EHR timeline retrieved', result);
   });
+
+  getPatientProfile = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
+    const currentUser = (req as any).user;
+    const { patientId } = req.params;
+    const result = await ehrService.getPatientProfile(patientId, currentUser);
+    ResponseHandler.success(res, 'Patient profile retrieved', result);
+  });
 }
 
 export default new EhrController();

@@ -48,7 +48,7 @@ export class PatientController {
     async (req: Request, res: Response, _next: NextFunction) => {
       const query = {
         search: req.query.search as string,
-        abhaLinked: req.query.abhaLinked === 'true',
+        abhaLinked: req.query.abhaLinked !== undefined ? req.query.abhaLinked === 'true' : undefined,
         gender: req.query.gender as string,
         page: parseInt(req.query.page as string) || 1,
         limit: parseInt(req.query.limit as string) || 10,
