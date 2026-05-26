@@ -27,7 +27,8 @@ export class HiuController {
   getPatientHealthRecords = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { patientId } = req.params;
-      const result = await this.hiuService.getPatientHealthRecords(patientId);
+      const currentUser = (req as any).user;
+      const result = await this.hiuService.getPatientHealthRecords(patientId, currentUser);
       ResponseHandler.success(res, 'Health records fetched successfully', result.data);
     }
   );

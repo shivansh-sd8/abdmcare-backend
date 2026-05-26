@@ -1,12 +1,12 @@
 import rateLimit from 'express-rate-limit';
-import { config } from '../config/index';
 
 export const generalLimiter = rateLimit({
-  windowMs: config.rateLimit.windowMs,
-  max: config.rateLimit.maxRequests,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 300,
   message: 'Too many requests from this IP, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.path === '/health',
 });
 
 export const createLimiter = (windowMs: number, max: number) => {

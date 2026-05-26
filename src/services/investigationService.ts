@@ -57,11 +57,15 @@ class InvestigationService {
     testType?: string;
     page?: number;
     limit?: number;
-  }) {
+  }, currentUser?: any) {
     const { hospitalId, patientId, doctorId, status, testType, page = 1, limit = 10 } = filters;
 
+    const effectiveHospitalId = currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId
+      ? currentUser.hospitalId
+      : hospitalId;
+
     const where: any = {};
-    if (hospitalId) where.hospitalId = hospitalId;
+    if (effectiveHospitalId) where.hospitalId = effectiveHospitalId;
     if (patientId) where.patientId = patientId;
     if (doctorId) where.doctorId = doctorId;
     if (status) where.status = status;
@@ -248,9 +252,13 @@ class InvestigationService {
     return updated;
   }
 
-  async getInvestigationStats(hospitalId?: string, doctorId?: string) {
+  async getInvestigationStats(hospitalId?: string, doctorId?: string, currentUser?: any) {
+    const effectiveHospitalId = currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId
+      ? currentUser.hospitalId
+      : hospitalId;
+
     const where: any = {};
-    if (hospitalId) where.hospitalId = hospitalId;
+    if (effectiveHospitalId) where.hospitalId = effectiveHospitalId;
     if (doctorId) where.doctorId = doctorId;
 
     const [total, ordered, inProgress, completed, today] = await Promise.all([

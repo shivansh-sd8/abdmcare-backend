@@ -64,15 +64,18 @@ class PrescriptionService {
     hospitalId?: string;
     page?: number;
     limit?: number;
-  }) {
+  }, currentUser?: any) {
     const { patientId, doctorId, encounterId, hospitalId, page = 1, limit = 10 } = filters;
+
+    const effectiveHospitalId = currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId
+      ? currentUser.hospitalId
+      : hospitalId;
 
     const where: any = {};
     if (patientId)  where.patientId  = patientId;
     if (doctorId)   where.doctorId   = doctorId;
     if (encounterId) where.encounterId = encounterId;
-    // Filter by hospital via the patient relation (Prescription has no hospitalId column)
-    if (hospitalId) where.patient = { hospitalId };
+    if (effectiveHospitalId) where.patient = { hospitalId: effectiveHospitalId };
 
     const [prescriptions, total] = await Promise.all([
       prisma.prescription.findMany({

@@ -3,29 +3,39 @@ import hipController from './hip.controller';
 import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
 import { authenticate, authorize } from '../../common/middleware/auth';
+import { verifyAbdmCallback } from '../../common/middleware/verifyAbdmCallback';
+import { auditLog } from '../../common/middleware/audit';
 
 const router = Router();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ABDM V3 CALLBACKS (no local auth — ABDM verifies via token)
+// ABDM V3 CALLBACKS (verified via ABDM JWT from /v3/certs JWKS)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Scan & Share
-router.post('/patient/share', hipController.handleProfileShare);
+router.post('/patient/share', verifyAbdmCallback, hipController.handleProfileShare);
 
 // User Initiated Linking callbacks (ABDM → HIP)
-router.post('/patient/care-context/discover', hipController.discoverCareContexts);
-router.post('/link/care-context/init', hipController.linkCareContexts);
-router.post('/link/care-context/confirm', hipController.confirmLinkCareContexts);
+router.post('/patient/care-context/discover', verifyAbdmCallback, hipController.discoverCareContexts);
+router.post('/link/care-context/init', verifyAbdmCallback, hipController.linkCareContexts);
+router.post('/link/care-context/confirm', verifyAbdmCallback, hipController.confirmLinkCareContexts);
 
 // Data Transfer callbacks (ABDM → HIP)
-router.post('/consent/notify', hipController.handleConsentHipNotify);
-router.post('/health-information/request', hipController.handleHealthInformationRequest);
+router.post('/consent/notify', verifyAbdmCallback, hipController.handleConsentHipNotify);
+router.post('/health-information/request', verifyAbdmCallback, hipController.handleHealthInformationRequest);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL APIs (auth required) — M2 HIP-initiated actions
 // ─────────────────────────────────────────────────────────────────────────────
 router.use(authenticate);
+router.use(auditLog('HIP'));
+
+// M1: HFR / HIP Registration
+router.post(
+  '/register',
+  authorize('SUPER_ADMIN', 'ADMIN'),
+  hipController.registerHipService
+);
 
 // M1: Facility QR data & received shares
 router.get(

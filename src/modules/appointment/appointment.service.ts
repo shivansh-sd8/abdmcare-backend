@@ -228,22 +228,23 @@ export class AppointmentService {
   }, currentUser?: any) {
     try {
       const page = query.page || 1;
-      const limit = query.limit || 10;
+      const limit = Math.min(query.limit || 100, 500);
       const skip = (page - 1) * limit;
 
       const where: any = {};
 
-      // Filter by hospital for non-super-admin users
       if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
         where.hospitalId = currentUser.hospitalId;
       }
 
-      if (query.patientId) {
-        where.patientId = query.patientId;
+      if (query.doctorId && currentUser?.role === 'DOCTOR') {
+        where.doctorId = currentUser.id;
+      } else if (query.doctorId) {
+        where.doctorId = query.doctorId;
       }
 
-      if (query.doctorId) {
-        where.doctorId = query.doctorId;
+      if (query.patientId) {
+        where.patientId = query.patientId;
       }
 
       if (query.status) {
@@ -251,9 +252,10 @@ export class AppointmentService {
       }
 
       if (query.date) {
-        const startDate = new Date(query.date);
-        const endDate = new Date(query.date);
-        endDate.setHours(23, 59, 59, 999);
+        // Parse YYYY-MM-DD parts explicitly to avoid UTC vs local timezone shift
+        const [y, m, d] = query.date.split('-').map(Number);
+        const startDate = new Date(y, m - 1, d, 0, 0, 0, 0);
+        const endDate = new Date(y, m - 1, d, 23, 59, 59, 999);
 
         where.scheduledAt = {
           gte: startDate,
@@ -269,7 +271,7 @@ export class AppointmentService {
             doctor: true,
           },
           orderBy: {
-            scheduledAt: 'asc',
+            scheduledAt: 'desc',
           },
           skip,
           take: limit,
@@ -296,7 +298,7 @@ export class AppointmentService {
     }
   }
 
-  async cancelAppointment(id: string, reason?: string) {
+  async cancelAppointment(id: string, reason?: string, currentUser?: any) {
     try {
       const appointment = await prisma.appointment.findUnique({
         where: { id },
@@ -304,6 +306,12 @@ export class AppointmentService {
 
       if (!appointment) {
         throw new AppError('Appointment not found', 404);
+      }
+
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (appointment.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Appointment belongs to a different hospital', 403);
+        }
       }
 
       const updatedAppointment = await prisma.appointment.update({
@@ -336,7 +344,7 @@ export class AppointmentService {
     }
   }
 
-  async checkInAppointment(id: string, _currentUser?: any) {
+  async checkInAppointment(id: string, currentUser?: any) {
     try {
       const appointment = await prisma.appointment.findUnique({
         where: { id },
@@ -352,6 +360,12 @@ export class AppointmentService {
 
       if (!appointment) {
         throw new AppError('Appointment not found', 404);
+      }
+
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (appointment.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Appointment belongs to a different hospital', 403);
+        }
       }
 
       if (appointment.checkedInAt) {
@@ -380,7 +394,7 @@ export class AppointmentService {
           chiefComplaint: appointment.notes?.split('\n---\n')[0] || 'OPD Visit',
           notes: appointment.notes?.includes('\n---\n') ? appointment.notes.split('\n---\n').slice(1).join('\n') : undefined,
           visitDate: new Date(),
-          status: 'IN_PROGRESS',
+          status: 'CONSULTING',
         },
       });
 
@@ -424,7 +438,7 @@ export class AppointmentService {
 
       // Create Care Context for ABHA (if patient has ABHA)
       if (appointment.patient.abhaRecord) {
-        await prisma.careContext.create({
+        const careContext = await prisma.careContext.create({
           data: {
             careContextId: `CC-${Date.now()}`,
             patientId: appointment.patientId,
@@ -433,6 +447,43 @@ export class AppointmentService {
             referenceNumber: encounter.encounterId,
             hipId: process.env.ABDM_HIP_ID || 'default-hip-id',
           },
+        });
+
+        // Fire-and-forget: initiate ABDM HIP linking for this care context
+        const abhaRecord = appointment.patient.abhaRecord;
+        const patient = appointment.patient;
+        setImmediate(async () => {
+          try {
+            const hipService = (await import('../hip/hip.service')).default;
+
+            await hipService.generateLinkToken({
+              abhaNumber: abhaRecord.abhaNumber,
+              abhaAddress: abhaRecord.abhaAddress || '',
+              name: `${patient.firstName} ${patient.lastName}`,
+              gender: patient.gender || 'U',
+              yearOfBirth: patient.dob ? new Date(patient.dob).getFullYear() : 2000,
+            });
+
+            await hipService.hipInitiatedLink({
+              abhaNumber: abhaRecord.abhaNumber,
+              abhaAddress: abhaRecord.abhaAddress || '',
+              patient: [{
+                referenceNumber: patient.id,
+                display: `${patient.firstName} ${patient.lastName}`,
+                careContexts: [{
+                  referenceNumber: careContext.careContextId,
+                  display: careContext.display,
+                }],
+              }],
+            });
+
+            logger.info('HIP linking initiated for care context', {
+              careContextId: careContext.careContextId,
+              abhaNumber: abhaRecord.abhaNumber,
+            });
+          } catch (err: any) {
+            logger.warn('HIP linking failed (non-blocking)', { error: err.message });
+          }
         });
       }
 
@@ -595,8 +646,12 @@ export class AppointmentService {
     });
   }
 
-  async getAvailableSlots(doctorId: string, dateStr: string) {
+  async getAvailableSlots(doctorId: string, dateStr: string, currentUser?: any) {
     const { doctor, hospitalConfig, doctorConfig } = await this.loadScheduleConfigs(doctorId);
+
+    if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId && doctor.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Doctor belongs to a different hospital', 403);
+    }
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) throw new AppError('Invalid date', 400);
 

@@ -350,7 +350,7 @@ class PaymentService {
 
     // 2. IPD Admissions — ward charges + actual linked round encounter charges
     allAdmissions.forEach((a: any) => {
-      const wardRate = a.dailyCharges || a.ward?.dailyCharges || 0;
+      const wardRate = parseFloat(a.dailyCharges || a.ward?.dailyCharges || '0');
       const days = a.dischargedAt
         ? Math.max(1, Math.ceil((new Date(a.dischargedAt).getTime() - new Date(a.admittedAt).getTime()) / 86400000))
         : Math.max(1, Math.ceil((Date.now() - new Date(a.admittedAt).getTime()) / 86400000));
@@ -370,11 +370,11 @@ class PaymentService {
           });
       }
 
-      const grossTotal = a.totalAmount || (wardCharges + roundConsultation + roundLab + roundMedicine + roundScan);
-      const discount = a.discountAmount || 0;
+      const grossTotal = parseFloat(a.totalAmount || '0') || (wardCharges + roundConsultation + roundLab + roundMedicine + roundScan);
+      const discount = parseFloat(a.discountAmount || '0');
       const total = Math.max(0, grossTotal - discount);
-      const advancePaid = a.advancePaid || 0;
-      const dischargePaid = a.paymentCollected || 0;
+      const advancePaid = parseFloat(a.advancePaid || '0');
+      const dischargePaid = parseFloat(a.paymentCollected || '0');
       const totalReceived = advancePaid + dischargePaid;
       allBills.push({
         id: a.id, type: 'IPD', patient: a.patient, ward: a.ward, bed: a.bed,
@@ -441,9 +441,10 @@ class PaymentService {
     pendingPaymentRecords.forEach((p: any) => {
       const isReceipt = p.admissionId && admissionIds.has(p.admissionId);
       if (!isReceipt) {
+        const amt = parseFloat(p.amount || '0');
         pendingBills.push({
           id: p.id, type: 'PAYMENT', patient: p.patient, date: p.createdAt,
-          total: p.amount, paid: 0, outstanding: p.amount,
+          total: amt, paid: 0, outstanding: amt,
           description: p.description, status: 'PENDING',
         });
       }
@@ -504,10 +505,10 @@ class PaymentService {
     // Revenue = Payment rows (receipts) — single source of truth for collected money
     const todayCollections = completedPayments
       .filter((p: any) => p.paidAt && new Date(p.paidAt) >= todayStart)
-      .reduce((s: number, p: any) => s + (p.amount || 0), 0);
+      .reduce((s: number, p: any) => s + parseFloat(p.amount || '0'), 0);
     const monthRevenue = completedPayments
       .filter((p: any) => p.paidAt && new Date(p.paidAt) >= monthStart)
-      .reduce((s: number, p: any) => s + (p.amount || 0), 0);
+      .reduce((s: number, p: any) => s + parseFloat(p.amount || '0'), 0);
 
     return {
       stats: {
@@ -552,8 +553,8 @@ class PaymentService {
     ]);
 
     return {
-      totalRevenue: totalRevenue._sum.amount || 0,
-      todayRevenue: todayRevenue._sum.amount || 0,
+      totalRevenue: Number(totalRevenue._sum.amount || 0),
+      todayRevenue: Number(todayRevenue._sum.amount || 0),
       pendingPayments,
       paidPayments,
     };

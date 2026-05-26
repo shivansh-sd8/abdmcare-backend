@@ -18,7 +18,19 @@ interface CreateVitalsDTO {
 }
 
 class VitalsService {
-  async createVitals(data: CreateVitalsDTO) {
+  async createVitals(data: CreateVitalsDTO, currentUser?: any) {
+    // Hospital isolation: verify patient belongs to the user's hospital
+    if (data.patientId && currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      const patient = await prisma.patient.findUnique({
+        where: { id: data.patientId },
+        select: { hospitalId: true },
+      });
+      if (!patient) throw new AppError('Patient not found', 404);
+      if (patient.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Access denied: Patient belongs to a different hospital', 403);
+      }
+    }
+
     // Calculate BMI if height and weight are provided
     let bmi = data.bmi;
     if (data.height && data.weight && !bmi) {
@@ -33,7 +45,7 @@ class VitalsService {
       const activeEnc = await prisma.encounter.findFirst({
         where: {
           patientId: data.patientId,
-          status: { in: ['IN_PROGRESS', 'SCHEDULED'] },
+          status: { in: ['CONSULTING', 'CHECKED_IN', 'SCHEDULED'] },
         },
         orderBy: { visitDate: 'desc' },
         select: { id: true },
@@ -75,18 +87,24 @@ class VitalsService {
   async getAllVitals(filters: {
     patientId?: string;
     encounterId?: string;
+    hospitalId?: string;
     startDate?: Date;
     endDate?: Date;
     page?: number;
     limit?: number;
-  }) {
-    const { patientId, encounterId, startDate, endDate, page = 1, limit = 10 } = filters;
+  }, currentUser?: any) {
+    const { patientId, encounterId, hospitalId, startDate, endDate, page = 1, limit = 10 } = filters;
+
+    const effectiveHospitalId = currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId
+      ? currentUser.hospitalId
+      : hospitalId;
     const pageNum  = parseInt(String(page),  10) || 1;
     const limitNum = parseInt(String(limit), 10) || 10;
 
     const where: any = {};
     if (patientId) where.patientId = patientId;
     if (encounterId) where.encounterId = encounterId;
+    if (effectiveHospitalId) where.patient = { hospitalId: effectiveHospitalId };
 
     if (startDate || endDate) {
       where.recordedAt = {};

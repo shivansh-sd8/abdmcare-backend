@@ -16,7 +16,7 @@ class EncounterController {
   getDoctorEncounters = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { doctorId } = req.params;
-      const { status, doctorId: queryDoctorId } = req.query;
+      const { status, doctorId: queryDoctorId, patientId, limit } = req.query;
       const currentUser = (req as any).user;
       
       // Use doctorId from params or query, or fall back to current user's doctorId
@@ -25,7 +25,9 @@ class EncounterController {
       const result = await encounterService.getDoctorEncounters(
         targetDoctorId,
         status as string,
-        currentUser
+        currentUser,
+        patientId as string,
+        limit ? parseInt(limit as string) : undefined
       );
       ResponseHandler.success(res, 'Encounters fetched successfully', result.data);
     }

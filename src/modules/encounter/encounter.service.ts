@@ -191,13 +191,12 @@ class EncounterService {
     }
   }
 
-  async getDoctorEncounters(doctorId: string, status?: string, currentUser?: any) {
+  async getDoctorEncounters(doctorId: string, status?: string, currentUser?: any, patientId?: string, limit?: number) {
     try {
       let targetDoctorId = doctorId;
 
       // If doctorId looks like a user ID (UUID format), try to find the doctor record
       if (doctorId && currentUser?.role === 'DOCTOR') {
-        // Check if this is a user ID by trying to find a doctor with this userId
         const doctor = await prisma.doctor.findFirst({
           where: {
             OR: [
@@ -212,15 +211,26 @@ class EncounterService {
         }
       }
 
-      const where: any = { doctorId: targetDoctorId };
+      const where: any = {};
+
+      // Only filter by doctor if no patientId is provided (patient history doesn't need doctor filter)
+      if (targetDoctorId && !patientId) {
+        where.doctorId = targetDoctorId;
+      }
+
+      // Filter by patientId — critical for preventing cross-patient data leaks
+      if (patientId) {
+        where.patientId = patientId;
+      }
 
       if (status) {
         where.status = status;
       }
 
-      // Hospital isolation
+      // Hospital isolation — non-SUPER_ADMIN users only see their hospital's data
       if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
         where.patient = {
+          ...(where.patient || {}),
           hospitalId: currentUser.hospitalId,
         };
       }
@@ -247,6 +257,7 @@ class EncounterService {
         orderBy: {
           visitDate: 'desc',
         },
+        ...(limit ? { take: limit } : {}),
       });
 
       return {
@@ -773,10 +784,13 @@ class EncounterService {
   }
 
   async applyDiscount(id: string, data: { amount: number; reason?: string; approvedBy: string }, currentUser?: any) {
-    const encounter = await prisma.encounter.findUnique({ where: { id } });
+    const encounter = await prisma.encounter.findUnique({
+      where: { id },
+      include: { patient: { select: { hospitalId: true } } },
+    });
     if (!encounter) throw new AppError('Encounter not found', 404);
-    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && (encounter as any).patient?.hospitalId !== currentUser.hospitalId) {
-      // Lightweight check; full hospital isolation done via encounter lookup
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && encounter.patient?.hospitalId !== currentUser.hospitalId) {
+      throw new AppError('Access denied: Encounter belongs to a different hospital', 403);
     }
     if (data.amount < 0) throw new AppError('Discount amount must be non-negative', 400);
 

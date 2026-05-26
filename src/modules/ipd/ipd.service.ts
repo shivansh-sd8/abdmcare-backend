@@ -1,5 +1,7 @@
 import prisma from '../../common/config/database';
 import smsService from '../../common/utils/smsService';
+import documentService from '../document/document.service';
+import logger from '../../common/config/logger';
 
 function generateAdmissionNumber(): string {
   const now = new Date();
@@ -182,6 +184,16 @@ export class IPDService {
     advanceTransactionRef?: string;
     notes?: string;
   }) {
+    // Verify patient belongs to this hospital
+    const patient = await prisma.patient.findUnique({
+      where: { id: data.patientId },
+      select: { hospitalId: true },
+    });
+    if (!patient) throw new Error('Patient not found');
+    if (patient.hospitalId !== hospitalId) {
+      throw new Error('Access denied: Patient belongs to a different hospital');
+    }
+
     // Prevent duplicate active admissions for the same patient (ADMITTED or DISCHARGE_READY)
     const existingActive = await prisma.admission.findFirst({
       where: { patientId: data.patientId, hospitalId, status: { in: ['ADMITTED', 'DISCHARGE_READY'] } },
@@ -477,7 +489,7 @@ export class IPDService {
     const days          = Math.max(1, Math.ceil(
       (dischargedAt.getTime() - admission.admittedAt.getTime()) / (1000 * 60 * 60 * 24),
     ));
-    const wardCharges   = days * admission.dailyCharges;
+    const wardCharges   = days * Number(admission.dailyCharges);
 
     // Aggregate lab/medicine charges from IPD round encounters + admission-linked items ONLY
     // Do NOT re-include OPD encounter charges if OPD was already billed/paid
@@ -537,7 +549,7 @@ export class IPDService {
     const afterDiscount = Math.max(0, computedTotal - discount);
     const totalAmount   = data.totalAmount ?? afterDiscount;
     const collected     = data.paymentCollected ?? 0;
-    const alreadyPaid   = admission.advancePaid;
+    const alreadyPaid   = Number(admission.advancePaid);
     const totalReceived = collected + alreadyPaid;
     const paymentStatus = totalReceived >= totalAmount ? 'PAID'
                         : totalReceived > 0            ? 'PARTIAL'
@@ -602,17 +614,60 @@ export class IPDService {
       });
     }
 
-    // SMS notification
-    if (admission.patient?.mobile) {
-      smsService.sendDischargeNotification({
-        mobile:          admission.patient.mobile,
-        patientName:     `${admission.patient.firstName} ${admission.patient.lastName}`,
-        hospitalName:    'MediSync Hospital',
-        admissionNumber: admission.admissionNumber,
-      }).catch(() => {/* silent */});
+    // Fire-and-forget: generate discharge summary document + SMS with download link
+    try {
+      const hospitalRecord = await prisma.hospital.findUnique({
+        where: { id: hospitalId },
+        select: { name: true },
+      });
+      const hospitalName = hospitalRecord?.name || 'MediSync Hospital';
+      const patientName = `${admission.patient?.firstName || ''} ${admission.patient?.lastName || ''}`.trim();
+      const baseUrl = process.env.APP_BASE_URL || 'http://localhost:5000';
+
+      // Generate discharge summary data and store as document
+      this.getDischargeSummary(admissionId, hospitalId)
+        .then(async (summaryData) => {
+          const summaryJson = Buffer.from(JSON.stringify(summaryData), 'utf-8');
+
+          const doc = await documentService.generateDocument({
+            patientId:   admission.patientId,
+            admissionId,
+            type:        'DISCHARGE_SUMMARY',
+            hospitalId,
+            generatedBy: 'system',
+            content:     summaryJson,
+            fileName:    `discharge_summary_${admission.admissionNumber}.pdf`,
+          });
+
+          // Send SMS with time-limited download link
+          if (admission.patient?.mobile) {
+            const token = documentService.generateDownloadToken(doc.id, 60 * 24);
+            const downloadUrl = `${baseUrl}/api/documents/public/${token}`;
+
+            await smsService.sendSMS({
+              to: admission.patient.mobile,
+              message: `Dear ${patientName}, you have been discharged from ${hospitalName} (Admission: ${admission.admissionNumber}). Download your discharge summary: ${downloadUrl} (valid 24hrs). Thank you. - MediSync`,
+            });
+          }
+        })
+        .catch((docErr) => {
+          logger.error('Failed to generate discharge document or send SMS', { error: docErr.message, admissionId });
+        });
+
+      // Fallback: still send basic discharge SMS even if document generation is slow
+      if (admission.patient?.mobile) {
+        smsService.sendDischargeNotification({
+          mobile:          admission.patient.mobile,
+          patientName,
+          hospitalName,
+          admissionNumber: admission.admissionNumber,
+        }).catch(() => {/* silent */});
+      }
+    } catch (smsDocErr) {
+      logger.error('Discharge SMS/document block failed', { error: (smsDocErr as any).message, admissionId });
     }
 
-    return { ...updated, days, wardCharges, labCharges, medicineCharges, totalAmount, balance: Math.max(0, totalAmount - totalReceived) };
+    return { ...updated, days, wardCharges, consultationFee, labCharges, medicineCharges, totalAmount, balance: Math.max(0, totalAmount - totalReceived) };
   }
 
   // ── Apply Discount (ADMIN/SUPER_ADMIN only) ─────────────────────────────
@@ -655,7 +710,7 @@ export class IPDService {
     if (admission.paymentStatus === 'PAID') throw new Error('All payments have already been collected for this admission');
     if (data.amount <= 0) throw new Error('Amount must be greater than zero');
 
-    const newAdvance = (admission.advancePaid || 0) + data.amount;
+    const newAdvance = (Number(admission.advancePaid) || 0) + data.amount;
 
     await prisma.admission.update({
       where: { id: admissionId },
@@ -703,7 +758,7 @@ export class IPDService {
     const endDate     = admission.dischargedAt ?? now;
     const days        = Math.max(1, Math.ceil(
       (endDate.getTime() - admission.admittedAt.getTime()) / (1000 * 60 * 60 * 24)));
-    const wardCharges = days * admission.dailyCharges;
+    const wardCharges = days * Number(admission.dailyCharges);
 
     // IPD daily-round encounter IDs
     const roundEncounters = await prisma.encounter.findMany({
@@ -821,7 +876,7 @@ export class IPDService {
       discountReason:   (admission as any).discountReason || null,
       totalAfterDiscount: Math.max(0, total - ((admission as any).discountAmount || 0)),
       advancePaid:      admission.advancePaid,
-      balance:          Math.max(0, total - ((admission as any).discountAmount || 0) - admission.advancePaid),
+      balance:          Math.max(0, total - ((admission as any).discountAmount || 0) - Number(admission.advancePaid)),
       status:           (admission as any).status,
       labItems:         labInvestigations,
       extraLabOrders,

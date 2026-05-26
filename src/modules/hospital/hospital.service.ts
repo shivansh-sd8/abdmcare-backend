@@ -83,6 +83,8 @@ interface UpdateHospitalData {
   plan?: any;
   status?: any;
   isActive?: boolean;
+  hipId?: string;
+  hiuId?: string;
 }
 
 export class HospitalService {

@@ -3,10 +3,12 @@ import investigationController from '../controllers/investigationController';
 import { body, query } from 'express-validator';
 import { validate } from '../common/middleware/validation';
 import { authenticate, authorize } from '../common/middleware/auth';
+import { auditLog } from '../common/middleware/audit';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(auditLog('INVESTIGATION'));
 
 router.post(
   '/',
@@ -28,7 +30,7 @@ router.get(
 
 router.get(
   '/',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'LAB_TECHNICIAN', 'RADIOLOGIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'LAB_TECHNICIAN'),
   [
     query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
     query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100'),
@@ -39,13 +41,13 @@ router.get(
 
 router.get(
   '/:id',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'LAB_TECHNICIAN', 'RADIOLOGIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'LAB_TECHNICIAN'),
   investigationController.getInvestigationById
 );
 
 router.put(
   '/:id/status',
-  authorize('DOCTOR', 'LAB_TECHNICIAN', 'RADIOLOGIST', 'ADMIN', 'SUPER_ADMIN'),
+  authorize('DOCTOR', 'LAB_TECHNICIAN', 'ADMIN', 'SUPER_ADMIN'),
   [
     body('status').isIn(['ORDERED', 'SAMPLE_COLLECTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']).withMessage('Valid status is required'),
   ],

@@ -74,10 +74,15 @@ class AuditLogService {
     endDate?: Date;
     page?: number;
     limit?: number;
-  }) {
+  }, currentUser?: any) {
     const { userId, module, action, startDate, endDate, page = 1, limit = 50 } = filters;
 
     const where: any = {};
+
+    // Hospital isolation: non-SUPER_ADMIN only see logs from users in their hospital
+    if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
+      where.user = { hospitalId: currentUser.hospitalId };
+    }
 
     if (userId) where.userId = userId;
     if (module) where.module = module;
@@ -120,20 +125,29 @@ class AuditLogService {
     };
   }
 
-  async getUserActivity(userId: string, limit = 20) {
+  async getUserActivity(userId: string, limit = 20, currentUser?: any) {
+    const where: any = { userId };
+
+    if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
+      where.user = { hospitalId: currentUser.hospitalId };
+    }
+
     return prisma.auditLog.findMany({
-      where: { userId },
+      where,
       orderBy: { timestamp: 'desc' },
       take: limit,
     });
   }
 
-  async getEntityHistory(resourceType: string, resourceId: string) {
+  async getEntityHistory(resourceType: string, resourceId: string, currentUser?: any) {
+    const where: any = { resourceType, resourceId };
+
+    if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
+      where.user = { hospitalId: currentUser.hospitalId };
+    }
+
     return prisma.auditLog.findMany({
-      where: {
-        resourceType,
-        resourceId,
-      },
+      where,
       include: {
         user: {
           select: {

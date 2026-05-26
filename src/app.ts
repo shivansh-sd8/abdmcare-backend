@@ -4,9 +4,12 @@ import cors from 'cors';
 import compression from 'compression';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
+import swaggerUi from 'swagger-ui-express';
 import { config } from './common/config/index';
+import { swaggerSpec } from './common/config/swagger';
 import { errorHandler, notFoundHandler } from './common/middleware/errorHandler';
-// import { generalLimiter } from './common/middleware/rateLimiter';
+import { generalLimiter } from './common/middleware/rateLimiter';
+import { requestIdMiddleware } from './common/middleware/requestId';
 import logger from './common/config/logger';
 
 const app: Application = express();
@@ -60,8 +63,8 @@ if (config.app.env === 'development') {
   );
 }
 
-// Rate limiter temporarily disabled for development
-// app.use(generalLimiter);
+app.use(requestIdMiddleware);
+app.use(generalLimiter);
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -80,14 +83,35 @@ app.get('/', (_req, res) => {
   });
 });
 
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  customCss: '.swagger-ui .topbar { display: none }',
+  customSiteTitle: 'MediSync ABDM API Docs',
+}));
+app.get('/api/docs.json', (_req, res) => res.json(swaggerSpec));
+
 import routes from './routes';
 app.use('/api/v1', routes);
 
 // ── ABDM V3 callbacks (ABDM gateway calls these — no /api/v1 prefix) ─────
 import hipCallbackRoutes from './modules/hip/hip.routes';
 import hiuCallbackRoutes from './modules/hiu/hiu.routes';
+import {
+  consentV3Routes,
+  hiuConsentV3Routes,
+  linkV3Routes,
+  patientsV3Routes,
+  hipTokenV3Routes,
+} from './modules/abdm-callbacks/v3-callbacks.routes';
+
 app.use('/api/v3/hip', hipCallbackRoutes);
 app.use('/api/v3/hiu', hiuCallbackRoutes);
+
+// Top-level V3 callback paths that ABDM expects outside /hip and /hiu
+app.use('/api/v3/consent/request', consentV3Routes);
+app.use('/api/v3/consent/request', hiuConsentV3Routes);
+app.use('/api/v3/link', linkV3Routes);
+app.use('/api/v3/patients', patientsV3Routes);
+app.use('/api/v3/hip/token', hipTokenV3Routes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

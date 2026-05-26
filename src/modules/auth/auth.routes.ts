@@ -4,14 +4,40 @@ import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
 import { authenticate, authorize } from '../../common/middleware/auth';
 import { auditLog } from '../../common/middleware/audit';
+import { loginLimiter } from '../../common/middleware/rateLimiter';
 
 const router = Router();
 const authController = new AuthController();
 
 router.use(auditLog('AUTH'));
 
+/**
+ * @openapi
+ * /auth/login:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Login with email and password
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               password: { type: string }
+ *     responses:
+ *       200:
+ *         description: Login successful — returns JWT token and user info
+ *       401:
+ *         description: Invalid credentials
+ *       429:
+ *         description: Too many login attempts
+ */
 router.post(
   '/login',
+  loginLimiter,
   [
     body('email').isEmail().withMessage('Valid email is required'),
     body('password').notEmpty().withMessage('Password is required'),
@@ -33,7 +59,7 @@ const registerValidation = [
     .notEmpty().withMessage('Role is required')
     .custom((value) => {
       // Only allow specific roles - SUPER_ADMIN validation will be done in controller
-      const allowedRoles = ['SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST', 'BILLING_STAFF', 'RADIOLOGIST'];
+      const allowedRoles = ['SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'];
       if (!allowedRoles.includes(value)) {
         throw new Error(`Invalid role. Allowed roles: ${allowedRoles.join(', ')}`);
       }
@@ -41,7 +67,34 @@ const registerValidation = [
     }),
 ];
 
-// Super Admin Signup - Public route with secret key
+/**
+ * @openapi
+ * /auth/super-admin-signup:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Register the first Super Admin account
+ *     description: Public route protected by a server-side secret key. Used for initial platform setup.
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password, firstName, lastName, username, secretKey]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               password: { type: string, minLength: 8 }
+ *               firstName: { type: string }
+ *               lastName: { type: string }
+ *               username: { type: string, minLength: 3 }
+ *               secretKey: { type: string }
+ *     responses:
+ *       201:
+ *         description: Super Admin created successfully
+ *       400:
+ *         description: Validation error or invalid secret key
+ */
 router.post(
   '/super-admin-signup',
   [
@@ -58,14 +111,43 @@ router.post(
   authController.superAdminSignup
 );
 
-// Regular user registration - requires authentication + SUPER_ADMIN or ADMIN role
+/**
+ * @openapi
+ * /auth/register:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Register a new staff user
+ *     description: Requires SUPER_ADMIN or ADMIN role. Creates a user with the specified role and hospital assignment.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password, firstName, lastName, username, phone, role]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               password: { type: string, minLength: 6 }
+ *               firstName: { type: string }
+ *               lastName: { type: string }
+ *               username: { type: string, minLength: 3 }
+ *               phone: { type: string }
+ *               role:
+ *                 type: string
+ *                 enum: [ADMIN, DOCTOR, NURSE, RECEPTIONIST, LAB_TECHNICIAN, PHARMACIST]
+ *     responses:
+ *       201:
+ *         description: User registered successfully
+ *       400:
+ *         description: Validation error
+ *       403:
+ *         description: Insufficient permissions
+ */
 router.post('/register', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), registerValidation, validate, authController.register);
 router.post('/signup', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), registerValidation, validate, authController.register);
 
 router.post(
   '/refresh',
-  [body('refreshToken').notEmpty().withMessage('Refresh token is required')],
-  validate,
   authController.refreshToken
 );
 

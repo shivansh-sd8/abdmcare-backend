@@ -17,6 +17,8 @@ import hipRoutes from '../modules/hip/hip.routes';
 import hiuRoutes from '../modules/hiu/hiu.routes';
 import ehrRoutes from '../modules/ehr/ehr.routes';
 import ipdRoutes from '../modules/ipd/ipd.routes';
+import abdmDiagnosticsRoutes from './abdmDiagnosticsRoutes';
+import documentRoutes from '../modules/document/document.routes';
 
 const router = Router();
 
@@ -38,5 +40,7 @@ router.use('/hip', hipRoutes);
 router.use('/hiu', hiuRoutes);
 router.use('/ehr', ehrRoutes);
 router.use('/ipd', ipdRoutes);
+router.use('/abdm/diagnostics', abdmDiagnosticsRoutes);
+router.use('/documents', documentRoutes);
 
 export default router;

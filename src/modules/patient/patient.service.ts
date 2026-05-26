@@ -186,7 +186,7 @@ export class PatientService {
     }
   }
 
-  async updatePatient(id: string, data: UpdatePatientRequest) {
+  async updatePatient(id: string, data: UpdatePatientRequest, currentUser?: any) {
     try {
       const patient = await prisma.patient.findUnique({
         where: { id },
@@ -194,6 +194,12 @@ export class PatientService {
 
       if (!patient) {
         throw new AppError('Patient not found', 404);
+      }
+
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (patient.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Patient belongs to a different hospital', 403);
+        }
       }
 
       const updateData: any = {};

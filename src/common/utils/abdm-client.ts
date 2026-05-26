@@ -361,6 +361,31 @@ export class AbdmClient {
     logger.info(`ABDM V3 HIP service registered: ${params.facilityId}`);
   }
 
+  async addBridgeHiuService(params: {
+    facilityId: string;
+    facilityName: string;
+    bridgeId: string;
+    hiuName: string;
+    active?: boolean;
+  }): Promise<void> {
+    const token = await this.ensureValidToken();
+    await this.axiosInstance.post(
+      `${abdmConfig.facilityUrl}${abdmConfig.endpoints.facility.addUpdateServices}`,
+      {
+        facilityId: params.facilityId,
+        facilityName: params.facilityName,
+        HRP: [{
+          bridgeId: params.bridgeId,
+          hipName: params.hiuName,
+          type: 'HIU',
+          active: params.active ?? true,
+        }],
+      },
+      { headers: this.gatewayHeaders(token) }
+    );
+    logger.info(`ABDM V3 HIU service registered: ${params.facilityId}`);
+  }
+
   // ── Generic helpers for legacy M2/M3 services (absolute URLs) ───────────
 
   async post<T = any>(url: string, data?: any): Promise<T> {

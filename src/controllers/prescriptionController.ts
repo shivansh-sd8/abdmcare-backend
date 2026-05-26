@@ -10,8 +10,7 @@ class PrescriptionController {
   });
 
   getAllPrescriptions = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const user = (req as any).user;
-    // Destructure doctorId from query so it doesn't pass through (User.id ≠ Doctor.id)
+    const currentUser = (req as any).user;
     const { page, limit, patientId, encounterId, doctorId: _ignored, ...rest } = req.query as any;
     const filters: any = {
       ...rest,
@@ -21,12 +20,7 @@ class PrescriptionController {
     if (patientId)   filters.patientId   = patientId;
     if (encounterId) filters.encounterId = encounterId;
 
-    // Scope to hospital for all non-SUPER_ADMIN users
-    if (user.role !== 'SUPER_ADMIN' && user.hospitalId) {
-      filters.hospitalId = user.hospitalId;
-    }
-
-    const result = await prescriptionService.getAllPrescriptions(filters);
+    const result = await prescriptionService.getAllPrescriptions(filters, currentUser);
     ResponseHandler.success(res, 'Prescriptions retrieved successfully', result);
   });
 

@@ -55,7 +55,8 @@ export class AppointmentController {
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
       const { reason } = req.body;
-      const result = await this.appointmentService.cancelAppointment(id, reason);
+      const currentUser = (req as any).user;
+      const result = await this.appointmentService.cancelAppointment(id, reason, currentUser);
       ResponseHandler.success(res, result.message, result.data);
     }
   );
@@ -84,7 +85,8 @@ export class AppointmentController {
         ResponseHandler.error(res, 'doctorId and date are required', 400);
         return;
       }
-      const result = await this.appointmentService.getAvailableSlots(doctorId, date);
+      const currentUser = (req as any).user;
+      const result = await this.appointmentService.getAvailableSlots(doctorId, date, currentUser);
       ResponseHandler.success(res, 'Available slots fetched successfully', result);
     }
   );

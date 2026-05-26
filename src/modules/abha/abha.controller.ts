@@ -162,6 +162,85 @@ export class AbhaController {
     res.json({ success: true, data });
   });
 
+  // ── Forgot ABHA / Enrolment Number Retrieval ──────────────────────────────
+
+  forgotAbhaRequestOtp = asyncHandler(async (req: Request, res: Response) => {
+    const { abhaAddress, authMethod } = req.body;
+    const data = await abhaService.forgotAbhaRequestOtp(abhaAddress, authMethod);
+    res.json({ success: true, data });
+  });
+
+  forgotAbhaVerify = asyncHandler(async (req: Request, res: Response) => {
+    const { txnId, otp } = req.body;
+    const data = await abhaService.forgotAbhaVerify(txnId, otp);
+    res.json({ success: true, data });
+  });
+
+  // ── Email Verification ───────────────────────────────────────────────────
+
+  requestEmailVerification = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.requestEmailVerification(getXToken(req));
+    res.json({ success: true, data });
+  });
+
+  // ── Password Set / Update ────────────────────────────────────────────────
+
+  setAbhaPassword = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.setAbhaPassword(getXToken(req), req.body.password);
+    res.json({ success: true, data });
+  });
+
+  updateAbhaPassword = asyncHandler(async (req: Request, res: Response) => {
+    const { oldPassword, newPassword } = req.body;
+    const data = await abhaService.updateAbhaPassword(getXToken(req), oldPassword, newPassword);
+    res.json({ success: true, data });
+  });
+
+  // ── Re-KYC ──────────────────────────────────────────────────────────────
+
+  requestReKyc = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.requestReKyc(getXToken(req), req.body.authMethod);
+    res.json({ success: true, data });
+  });
+
+  // ── Refresh Token ────────────────────────────────────────────────────────
+
+  refreshAbhaToken = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.refreshAbhaToken(req.body.refreshToken);
+    res.json({ success: true, data });
+  });
+
+  // ── Delete ABHA ──────────────────────────────────────────────────────────
+
+  deleteAbhaRequestOtp = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.deleteAbhaRequestOtp(getXToken(req));
+    res.json({ success: true, data });
+  });
+
+  deleteAbhaConfirm = asyncHandler(async (req: Request, res: Response) => {
+    const { txnId, otp } = req.body;
+    const data = await abhaService.deleteAbhaConfirm(getXToken(req), txnId, otp);
+    res.json({ success: true, data });
+  });
+
+  // ── Deactivate / Reactivate ABHA ────────────────────────────────────────
+
+  deactivateAbha = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.deactivateAbha(getXToken(req), req.body.reason);
+    res.json({ success: true, data });
+  });
+
+  reactivateAbhaRequestOtp = asyncHandler(async (req: Request, res: Response) => {
+    const data = await abhaService.reactivateAbhaRequestOtp(req.body.abhaNumber);
+    res.json({ success: true, data });
+  });
+
+  reactivateAbhaConfirm = asyncHandler(async (req: Request, res: Response) => {
+    const { txnId, otp } = req.body;
+    const data = await abhaService.reactivateAbhaConfirm(txnId, otp);
+    res.json({ success: true, data });
+  });
+
   // ── Find ABHA ──────────────────────────────────────────────────────────────
 
   findAbhaByMobile = asyncHandler(async (req: Request, res: Response) => {
@@ -202,7 +281,8 @@ export class AbhaController {
 
   linkToPatient = asyncHandler(async (req: Request, res: Response) => {
     const { abhaNumber, patientId, abhaAddress } = req.body;
-    const data = await abhaService.linkToPatient(abhaNumber, patientId, abhaAddress);
+    const currentUser = (req as any).user;
+    const data = await abhaService.linkToPatient(abhaNumber, patientId, abhaAddress, currentUser);
     res.json({ success: true, data });
   });
 

@@ -3,14 +3,13 @@ import consentController from './consent.controller';
 import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
 import { authenticate, authorize } from '../../common/middleware/auth';
+import { auditLog } from '../../common/middleware/audit';
 
 const router = Router();
 
-// ABDM Gateway callback (no auth)
-router.post('/v0.5/consents/hip/notify', consentController.handleConsentNotification);
-
 // Internal APIs (auth required)
 router.use(authenticate);
+router.use(auditLog('CONSENT'));
 
 router.post(
   '/request',

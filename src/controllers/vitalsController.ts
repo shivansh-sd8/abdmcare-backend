@@ -10,12 +10,14 @@ class VitalsController {
       ...req.body,
       recordedBy: user.id,
     };
-    const vitals = await vitalsService.createVitals(data);
+    const vitals = await vitalsService.createVitals(data, user);
     ResponseHandler.created(res, 'Vitals recorded successfully', vitals);
   });
 
   getAllVitals = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const result = await vitalsService.getAllVitals(req.query);
+    const currentUser = (req as any).user;
+    const filters: any = { ...req.query };
+    const result = await vitalsService.getAllVitals(filters, currentUser);
     ResponseHandler.success(res, 'Vitals retrieved successfully', result);
   });
 

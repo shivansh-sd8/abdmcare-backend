@@ -20,12 +20,17 @@ export const authenticate = async (
 ): Promise<void> => {
   try {
     const authHeader = req.headers.authorization;
+    let token: string | undefined;
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw new AppError('No token provided', 401);
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7);
+    } else if (req.cookies?.token) {
+      token = req.cookies.token;
     }
 
-    const token = authHeader.substring(7);
+    if (!token) {
+      throw new AppError('No token provided', 401);
+    }
 
     const decoded = jwt.verify(token, config.jwt.secret) as JwtPayload;
 

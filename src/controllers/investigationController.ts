@@ -16,7 +16,7 @@ class InvestigationController {
   });
 
   getAllInvestigations = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const user = (req as any).user;
+    const currentUser = (req as any).user;
     const { page, limit, ...rest } = req.query as any;
     const filters: any = {
       ...rest,
@@ -24,12 +24,7 @@ class InvestigationController {
       limit: limit ? parseInt(limit, 10) : 10,
     };
 
-    // All non-SUPER_ADMIN users see only their hospital's data
-    if (user.role !== 'SUPER_ADMIN' && user.hospitalId) {
-      filters.hospitalId = user.hospitalId;
-    }
-
-    const result = await investigationService.getAllInvestigations(filters);
+    const result = await investigationService.getAllInvestigations(filters, currentUser);
     ResponseHandler.success(res, 'Investigations retrieved successfully', result);
   });
 
@@ -70,7 +65,7 @@ class InvestigationController {
       doctorId = doctor?.id;
     }
 
-    const stats = await investigationService.getInvestigationStats(hospitalId, doctorId);
+    const stats = await investigationService.getInvestigationStats(hospitalId, doctorId, user);
     ResponseHandler.success(res, 'Investigation stats retrieved successfully', stats);
   });
 }

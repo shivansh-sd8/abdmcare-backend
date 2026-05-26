@@ -3,10 +3,12 @@ import prescriptionController from '../controllers/prescriptionController';
 import { body, query } from 'express-validator';
 import { validate } from '../common/middleware/validation';
 import { authenticate, authorize } from '../common/middleware/auth';
+import { auditLog } from '../common/middleware/audit';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(auditLog('PRESCRIPTION'));
 
 router.post(
   '/',

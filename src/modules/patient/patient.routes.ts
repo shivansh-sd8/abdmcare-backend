@@ -3,11 +3,40 @@ import patientController from './patient.controller';
 import { body, query } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
 import { authenticate, authorize } from '../../common/middleware/auth';
+import { auditLog } from '../../common/middleware/audit';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(auditLog('PATIENT'));
 
+/**
+ * @openapi
+ * /patients:
+ *   post:
+ *     tags: [Patients]
+ *     summary: Register a new patient
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [firstName, lastName, gender, dob, mobile]
+ *             properties:
+ *               firstName: { type: string }
+ *               lastName: { type: string }
+ *               gender: { type: string, enum: [MALE, FEMALE, OTHER] }
+ *               dob: { type: string, format: date }
+ *               mobile: { type: string }
+ *               email: { type: string, format: email }
+ *               bloodGroup: { type: string, enum: [A+, A-, B+, B-, AB+, AB-, O+, O-] }
+ *     responses:
+ *       201:
+ *         description: Patient registered, returns patient object with UHID
+ *       400:
+ *         description: Validation error
+ */
 router.post(
   '/',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
@@ -30,6 +59,27 @@ router.get(
   patientController.getPatientStats
 );
 
+/**
+ * @openapi
+ * /patients/search:
+ *   get:
+ *     tags: [Patients]
+ *     summary: Search and list patients
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         schema: { type: string }
+ *         description: Search by name, UHID, or mobile
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+ *     responses:
+ *       200:
+ *         description: Paginated patient list
+ */
 router.get(
   '/search',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
@@ -41,6 +91,24 @@ router.get(
   patientController.searchPatients
 );
 
+/**
+ * @openapi
+ * /patients/{id}:
+ *   get:
+ *     tags: [Patients]
+ *     summary: Get patient by ID
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Patient UUID
+ *     responses:
+ *       200:
+ *         description: Patient details with ABHA record, encounters, and admissions
+ *       404:
+ *         description: Patient not found
+ */
 router.get(
   '/:id',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'),

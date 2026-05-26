@@ -23,6 +23,7 @@ function validateEnv(): void {
   const required = [
     'ABDM_CLIENT_ID', 'ABDM_CLIENT_SECRET',
     'ABDM_CALLBACK_URL', 'HIP_ID', 'HIP_NAME',
+    'HIU_ID', 'HIU_NAME',
   ];
   const missing = required.filter(k => !process.env[k]);
   if (missing.length) {
@@ -46,12 +47,15 @@ async function runSetup(): Promise<void> {
   const clientId = process.env.ABDM_CLIENT_ID!;
   const hipId = process.env.HIP_ID!;
   const hipName = process.env.HIP_NAME!;
+  const hiuId = process.env.HIU_ID!;
+  const hiuName = process.env.HIU_NAME!;
 
   console.log('Config:');
   console.log(`  Gateway   : ${abdmConfig.gatewayUrl}`);
   console.log(`  Callback  : ${callbackUrl}`);
   console.log(`  Client ID : ${clientId}`);
-  console.log(`  HIP ID    : ${hipId}\n`);
+  console.log(`  HIP ID    : ${hipId}`);
+  console.log(`  HIU ID    : ${hiuId}\n`);
 
   // ── Step 1: Authenticate ──────────────────────────────────────────────────
   console.log('Step 1 — Obtaining V3 session token…');
@@ -95,8 +99,27 @@ async function runSetup(): Promise<void> {
     console.warn('     Use the ABDM sandbox portal to manually register if this fails.\n');
   }
 
-  // ── Step 5: Verify bridge services ───────────────────────────────────────
-  console.log('Step 5 — Verifying registered bridge services…');
+  // ── Step 5: Register HIU service ─────────────────────────────────────────
+  console.log(`Step 5 — Registering HIU service (${hiuId})…`);
+  console.log(`  POST ${abdmConfig.facilityUrl}${abdmConfig.endpoints.facility.addUpdateServices}`);
+  try {
+    await abdmClient.addBridgeHiuService({
+      facilityId: hiuId,
+      facilityName: hiuName,
+      bridgeId: clientId,
+      hiuName,
+      active: true,
+    });
+    console.log('  ✅ HIU service registered\n');
+  } catch (err: any) {
+    const status = err?.response?.status;
+    const msg = JSON.stringify(err?.response?.data || err?.message);
+    console.warn(`  ⚠️  HIU registration returned ${status}: ${msg}`);
+    console.warn('     Use the ABDM sandbox portal to manually register if this fails.\n');
+  }
+
+  // ── Step 6: Verify bridge services ───────────────────────────────────────
+  console.log('Step 6 — Verifying registered bridge services…');
   console.log(`  GET ${abdmConfig.gatewayUrl}${abdmConfig.endpoints.bridge.getServices}`);
   try {
     const services = await abdmClient.getBridgeServices();

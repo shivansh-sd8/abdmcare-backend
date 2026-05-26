@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import encounterController from './encounter.controller';
 import { authenticate, authorize } from '../../common/middleware/auth';
+import { auditLog } from '../../common/middleware/audit';
 
 const router = Router();
+
+router.use(auditLog('ENCOUNTER'));
 
 // Get all encounters (with query params)
 router.get(
@@ -24,7 +27,7 @@ router.get(
 router.get(
   '/:id/full',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   encounterController.getEncounterFull
 );
 
@@ -32,7 +35,7 @@ router.get(
 router.get(
   '/:id',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   encounterController.getEncounterById
 );
 
@@ -56,7 +59,7 @@ router.post(
 router.patch(
   '/:id/collect-payment',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
   encounterController.collectPayment
 );
 

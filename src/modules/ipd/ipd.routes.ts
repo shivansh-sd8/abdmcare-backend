@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate, authorize } from '../../common/middleware/auth';
+import { auditLog } from '../../common/middleware/audit';
 import {
   listWards, createWard, updateWard,
   createBed, updateBedStatus,
@@ -12,6 +13,7 @@ import {
 const router = Router();
 
 router.use(authenticate);
+router.use(auditLog('IPD'));
 
 // Ward management (ADMIN sets up wards + daily charges)
 router.get('/wards',               authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), listWards);
@@ -42,10 +44,10 @@ router.post('/admissions/:admissionId/rounds',             authorize('SUPER_ADMI
 router.patch('/admissions/:admissionId/discount',          authorize('SUPER_ADMIN', 'ADMIN'), applyDiscount);
 
 // Collect partial payment during stay
-router.patch('/admissions/:admissionId/collect-payment',   authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'), collectPayment);
+router.patch('/admissions/:admissionId/collect-payment',   authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'), collectPayment);
 
 // Bill preview (before discharge)
-router.get('/admissions/:admissionId/bill',                authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST', 'BILLING_STAFF'), getAdmissionBill);
+router.get('/admissions/:admissionId/bill',                authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'), getAdmissionBill);
 
 // Discharge summary data (for PDF generation)
 router.get('/admissions/:admissionId/discharge-summary',   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'), getDischargeSummary);

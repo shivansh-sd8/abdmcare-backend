@@ -3,10 +3,12 @@ import vitalsController from '../controllers/vitalsController';
 import { body, query } from 'express-validator';
 import { validate } from '../common/middleware/validation';
 import { authenticate, authorize } from '../common/middleware/auth';
+import { auditLog } from '../common/middleware/audit';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(auditLog('VITALS'));
 
 router.post(
   '/',
@@ -31,7 +33,7 @@ router.get(
 
 router.get(
   '/patient/:patientId/latest',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   vitalsController.getLatestVitals
 );
 

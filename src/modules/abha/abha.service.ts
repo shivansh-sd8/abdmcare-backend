@@ -627,10 +627,14 @@ export class AbhaService {
   // SECTION 10 — PATIENT LINKING (local DB)
   // ===========================================================================
 
-  async linkToPatient(abhaNumber: string, patientId: string, abhaAddress?: string) {
+  async linkToPatient(abhaNumber: string, patientId: string, abhaAddress?: string, currentUser?: any) {
     try {
       const patient = await prisma.patient.findUnique({ where: { id: patientId } });
       if (!patient) throw new AppError('Patient not found', 404);
+
+      if (currentUser?.hospitalId && patient.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Access denied: patient belongs to a different hospital', 403);
+      }
 
       const normalized = abhaNumber.replace(/-/g, '');
       await prisma.$transaction([
@@ -677,7 +681,248 @@ export class AbhaService {
   }
 
   // ===========================================================================
-  // SECTION 11 — NEW vs RETURNING PATIENT LOOKUP
+  // SECTION 11 — FORGOT ABHA / RETRIEVAL OF ENROLMENT NUMBER
+  // ===========================================================================
+
+  /**
+   * Request OTP for forgot ABHA flow
+   * Uses login OTP endpoint with scope for forgot flow
+   */
+  async forgotAbhaRequestOtp(abhaAddress: string, authMethod: string) {
+    try {
+      const encAddress = await abdmClient.encrypt(abhaAddress);
+      const otpSystem = authMethod === 'aadhaar' ? 'aadhaar' : 'abdm';
+      const res = await abdmClient.abhaPost(E.profile.loginRequestOtp, {
+        scope: ['abha-login', 'forgot-abha'],
+        loginHint: 'abha-address',
+        loginId: encAddress,
+        otpSystem,
+      });
+      return { txnId: res.txnId, message: res.message || 'OTP sent for ABHA retrieval' };
+    } catch (e) { toAppError(e, 'Failed to request OTP for forgot ABHA'); }
+  }
+
+  /**
+   * Verify OTP and retrieve enrolment number
+   */
+  async forgotAbhaVerify(txnId: string, otp: string) {
+    try {
+      const encOtp = await abdmClient.encrypt(otp);
+      const res = await abdmClient.abhaPost(E.profile.loginVerify, {
+        scope: ['abha-login', 'forgot-abha'],
+        authData: {
+          authMethods: ['otp'],
+          otp: { txnId, otpValue: encOtp },
+        },
+      });
+      return {
+        txnId: res.txnId,
+        ABHANumber: res.ABHANumber,
+        enrolmentNumber: res.enrolmentNumber || res.ABHANumber,
+        accounts: res.accounts || [],
+        message: res.message,
+      };
+    } catch (e) { toAppError(e, 'Failed to verify OTP for forgot ABHA'); }
+  }
+
+  // ===========================================================================
+  // SECTION 12 — EMAIL VERIFICATION
+  // ===========================================================================
+
+  /**
+   * Request email verification link
+   * POST /v3/profile/account/request/emailVerificationLink
+   */
+  async requestEmailVerification(xToken: string) {
+    try {
+      const res = await abdmClient.abhaPost(E.profile.requestEmailVerification, {}, xToken);
+      return { message: res.message || 'Email verification link sent', txnId: res.txnId };
+    } catch (e) { toAppError(e, 'Failed to request email verification'); }
+  }
+
+  // ===========================================================================
+  // SECTION 13 — PASSWORD SET / UPDATE
+  // ===========================================================================
+
+  /**
+   * Set ABHA password (first time)
+   * POST /v3/profile/account/verify with scope PASSWORD_SET
+   */
+  async setAbhaPassword(xToken: string, password: string) {
+    try {
+      const encPassword = await abdmClient.encrypt(password);
+      const res = await abdmClient.abhaPost(E.profile.verify, {
+        scope: ['password-set'],
+        authData: {
+          authMethods: ['password'],
+          password: { passwordValue: encPassword },
+        },
+      }, xToken);
+      return { message: res.message || 'Password set successfully', authResult: res.authResult };
+    } catch (e) { toAppError(e, 'Failed to set ABHA password'); }
+  }
+
+  /**
+   * Update ABHA password
+   * POST /v3/profile/account/verify with old + new password
+   */
+  async updateAbhaPassword(xToken: string, oldPassword: string, newPassword: string) {
+    try {
+      const encOldPassword = await abdmClient.encrypt(oldPassword);
+      const encNewPassword = await abdmClient.encrypt(newPassword);
+      const res = await abdmClient.abhaPost(E.profile.verify, {
+        scope: ['password-update'],
+        authData: {
+          authMethods: ['password'],
+          password: {
+            oldPasswordValue: encOldPassword,
+            newPasswordValue: encNewPassword,
+          },
+        },
+      }, xToken);
+      return { message: res.message || 'Password updated successfully', authResult: res.authResult };
+    } catch (e) { toAppError(e, 'Failed to update ABHA password'); }
+  }
+
+  // ===========================================================================
+  // SECTION 14 — RE-KYC
+  // ===========================================================================
+
+  /**
+   * Initiate re-KYC via profile OTP
+   * Sends OTP to the linked Aadhaar or mobile for re-verification
+   */
+  async requestReKyc(xToken: string, authMethod: string) {
+    try {
+      const otpSystem = authMethod === 'aadhaar' ? 'aadhaar' : 'abdm';
+      const loginHint = authMethod === 'aadhaar' ? 'aadhaar' : 'mobile';
+      const res = await abdmClient.abhaPost(E.profile.requestOtp, {
+        scope: ['re-kyc'],
+        loginHint,
+        loginId: '',
+        otpSystem,
+      }, xToken);
+      return { txnId: res.txnId, message: res.message || 'OTP sent for Re-KYC' };
+    } catch (e) { toAppError(e, 'Failed to initiate Re-KYC'); }
+  }
+
+  // ===========================================================================
+  // SECTION 15 — ABHA REFRESH TOKEN
+  // ===========================================================================
+
+  /**
+   * Refresh ABHA session token
+   * POST /v3/profile/account/request/token
+   */
+  async refreshAbhaToken(refreshToken: string) {
+    try {
+      const res = await abdmClient.abhaPost(E.profile.refreshToken, {
+        refreshToken,
+      });
+      return {
+        token: res.token,
+        refreshToken: res.refreshToken,
+        expiresIn: res.expiresIn,
+      };
+    } catch (e) { toAppError(e, 'Failed to refresh ABHA token'); }
+  }
+
+  // ===========================================================================
+  // SECTION 16 — DELETE ABHA
+  // ===========================================================================
+
+  /**
+   * Request OTP for ABHA account deletion
+   */
+  async deleteAbhaRequestOtp(xToken: string) {
+    try {
+      const res = await abdmClient.abhaPost(E.profile.requestOtp, {
+        scope: ['profile-delete'],
+        loginHint: 'aadhaar',
+        loginId: '',
+        otpSystem: 'aadhaar',
+      }, xToken);
+      return { txnId: res.txnId, message: res.message || 'OTP sent for account deletion' };
+    } catch (e) { toAppError(e, 'Failed to request OTP for ABHA deletion'); }
+  }
+
+  /**
+   * Confirm ABHA deletion after OTP verification
+   */
+  async deleteAbhaConfirm(xToken: string, txnId: string, otp: string) {
+    try {
+      const encOtp = await abdmClient.encrypt(otp);
+      const res = await abdmClient.abhaPost(E.profile.verify, {
+        scope: ['profile-delete'],
+        authData: {
+          authMethods: ['otp'],
+          otp: { txnId, otpValue: encOtp },
+        },
+      }, xToken);
+      return { message: res.message || 'ABHA account deleted successfully', authResult: res.authResult };
+    } catch (e) { toAppError(e, 'Failed to confirm ABHA deletion'); }
+  }
+
+  // ===========================================================================
+  // SECTION 17 — DEACTIVATE / REACTIVATE ABHA
+  // ===========================================================================
+
+  /**
+   * Deactivate ABHA account
+   * Requires valid X-token; account is suspended
+   */
+  async deactivateAbha(xToken: string, reason?: string) {
+    try {
+      const res = await abdmClient.abhaPost(E.profile.verify, {
+        scope: ['profile-deactivate'],
+        authData: {
+          authMethods: ['otp'],
+          ...(reason && { reason }),
+        },
+      }, xToken);
+      return { message: res.message || 'ABHA account deactivated', authResult: res.authResult };
+    } catch (e) { toAppError(e, 'Failed to deactivate ABHA'); }
+  }
+
+  /**
+   * Request OTP for reactivation (uses login flow since account is inactive)
+   */
+  async reactivateAbhaRequestOtp(abhaNumber: string) {
+    try {
+      const encAbha = await abdmClient.encrypt(abhaNumber);
+      const res = await abdmClient.abhaPost(E.profile.loginRequestOtp, {
+        scope: ['abha-login', 'profile-reactivate'],
+        loginHint: 'abha-number',
+        loginId: encAbha,
+        otpSystem: 'aadhaar',
+      });
+      return { txnId: res.txnId, message: res.message || 'OTP sent for reactivation' };
+    } catch (e) { toAppError(e, 'Failed to request OTP for reactivation'); }
+  }
+
+  /**
+   * Confirm reactivation after OTP verification
+   */
+  async reactivateAbhaConfirm(txnId: string, otp: string) {
+    try {
+      const encOtp = await abdmClient.encrypt(otp);
+      const res = await abdmClient.abhaPost(E.profile.loginVerify, {
+        scope: ['abha-login', 'profile-reactivate'],
+        authData: {
+          authMethods: ['otp'],
+          otp: { txnId, otpValue: encOtp },
+        },
+      });
+      return {
+        token: res.token,
+        refreshToken: res.refreshToken,
+        message: res.message || 'ABHA account reactivated',
+      };
+    } catch (e) { toAppError(e, 'Failed to confirm ABHA reactivation'); }
+  }
+
+  // ===========================================================================
+  // SECTION 18 — NEW vs RETURNING PATIENT LOOKUP
   // ===========================================================================
 
   async lookupPatientByAbha(identifier: string) {

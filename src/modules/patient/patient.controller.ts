@@ -39,7 +39,8 @@ export class PatientController {
   updatePatient = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.patientService.updatePatient(id, req.body);
+      const currentUser = (req as any).user;
+      const result = await this.patientService.updatePatient(id, req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data);
     }
   );

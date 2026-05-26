@@ -3,18 +3,21 @@ import hiuController from './hiu.controller';
 import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
 import { authenticate, authorize } from '../../common/middleware/auth';
+import { verifyAbdmCallback } from '../../common/middleware/verifyAbdmCallback';
+import { auditLog } from '../../common/middleware/audit';
 
 const router = Router();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ABDM V3 CALLBACKS (no local auth — ABDM calls these)
+// ABDM V3 CALLBACKS (verified via ABDM JWT from /v3/certs JWKS)
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/data/notification', hiuController.receiveHealthInformation);
+router.post('/data/notification', verifyAbdmCallback, hiuController.receiveHealthInformation);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL APIs (auth required)
 // ─────────────────────────────────────────────────────────────────────────────
 router.use(authenticate);
+router.use(auditLog('HIU'));
 
 router.post(
   '/request',

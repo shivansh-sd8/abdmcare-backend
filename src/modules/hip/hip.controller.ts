@@ -5,6 +5,7 @@ import { asyncHandler } from '../../common/middleware/errorHandler';
 import abdmClient from '../../common/utils/abdm-client';
 import { abdmConfig } from '../../common/config/abdm';
 import logger from '../../common/config/logger';
+import prisma from '../../common/config/database';
 
 export class HipController {
   private hipService: HipService;
@@ -118,11 +119,33 @@ export class HipController {
     res.status(202).json(result);
   });
 
+  // ── M1: HFR / HIP Registration ──────────────────────────────────────────
+  registerHipService = asyncHandler(async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    const result = await this.hipService.registerHipService(currentUser.hospitalId);
+    ResponseHandler.success(res, 'HIP service registered with ABDM', result);
+  });
+
   // ── M1: Facility QR & Received Shares ──────────────────────────────────────
-  getFacilityQrData = asyncHandler(async (_req: Request, res: Response) => {
+  getFacilityQrData = asyncHandler(async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    let hipId = abdmConfig.hip.id;
+    let hipName = abdmConfig.hip.name;
+
+    if (currentUser?.hospitalId) {
+      const hospital = await prisma.hospital.findUnique({
+        where: { id: currentUser.hospitalId },
+        select: { hipId: true, name: true },
+      });
+      if (hospital?.hipId) {
+        hipId = hospital.hipId;
+        hipName = hospital.name;
+      }
+    }
+
     const data = {
-      hipId: abdmConfig.hip.id,
-      hipName: abdmConfig.hip.name,
+      hipId,
+      hipName,
       callbackUrl: abdmConfig.callbackUrl,
       scanAndShareUrl: `${abdmConfig.callbackUrl}/api/v3/hip/patient/share`,
       counter: Date.now().toString(36),
@@ -130,8 +153,9 @@ export class HipController {
     ResponseHandler.success(res, 'Facility QR data', data);
   });
 
-  getReceivedShares = asyncHandler(async (_req: Request, res: Response) => {
-    const shares = await this.hipService.getReceivedShares();
+  getReceivedShares = asyncHandler(async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    const shares = await this.hipService.getReceivedShares(currentUser?.hospitalId);
     ResponseHandler.success(res, 'Received profile shares', shares);
   });
 

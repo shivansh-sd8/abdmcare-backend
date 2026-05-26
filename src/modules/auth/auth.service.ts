@@ -15,7 +15,7 @@ interface RegisterData {
   firstName: string;
   lastName: string;
   phone?: string;
-  role?: 'SUPER_ADMIN' | 'ADMIN' | 'DOCTOR' | 'NURSE' | 'RECEPTIONIST' | 'LAB_TECHNICIAN' | 'PHARMACIST' | 'BILLING_STAFF' | 'RADIOLOGIST';
+  role?: 'SUPER_ADMIN' | 'ADMIN' | 'DOCTOR' | 'NURSE' | 'RECEPTIONIST' | 'LAB_TECHNICIAN' | 'PHARMACIST';
   hospitalId?: string;
   // Doctor-specific fields
   specialization?: string;
@@ -166,7 +166,7 @@ export class AuthService {
   async register(data: RegisterData, currentUser?: any) {
     // Role escalation prevention
     const adminOnlyRoles: string[] = ['SUPER_ADMIN'];
-    const staffRoles: string[] = ['DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST', 'BILLING_STAFF', 'RADIOLOGIST'];
+    const staffRoles: string[] = ['DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'];
 
     if (currentUser?.role === 'ADMIN') {
       // ADMIN can only create staff roles within their hospital

@@ -5,6 +5,8 @@ import { abdmConfig } from '../../common/config/abdm';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import EncryptionService from '../../common/utils/encryption';
+import { healthDataPushQueue, HealthDataPushJobData } from '../../common/config/queue';
+import redisClient from '../../common/config/redis';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -52,41 +54,58 @@ interface HealthInformationRequest {
 // HIP Service V3
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface ReceivedShare {
-  id: string;
-  abhaNumber: string;
-  abhaAddress: string;
-  name: string;
-  gender: string;
-  mobile: string;
-  tokenNumber: string;
-  requestId: string;
-  rawProfile: any;
-  receivedAt: string;
-}
-
-const receivedShares: ReceivedShare[] = [];
-const MAX_SHARES = 100;
-
 export class HipService {
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // M1: SCAN & SHARE — RECEIVED EVENTS
+  // M1: SCAN & SHARE — RECEIVED EVENTS (persisted to DB)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  async saveReceivedShare(data: Omit<ReceivedShare, 'id' | 'receivedAt'>) {
-    const share: ReceivedShare = {
-      ...data,
-      id: crypto.randomUUID(),
-      receivedAt: new Date().toISOString(),
-    };
-    receivedShares.unshift(share);
-    if (receivedShares.length > MAX_SHARES) receivedShares.length = MAX_SHARES;
-    return share;
+  async saveReceivedShare(data: {
+    abhaNumber: string;
+    abhaAddress?: string;
+    name: string;
+    gender?: string;
+    mobile?: string;
+    tokenNumber?: string;
+    requestId?: string;
+    rawProfile?: any;
+    hospitalId?: string;
+  }) {
+    return prisma.receivedShare.create({ data });
   }
 
-  async getReceivedShares() {
-    return receivedShares;
+  async getReceivedShares(hospitalId?: string) {
+    return prisma.receivedShare.findMany({
+      where: hospitalId ? { hospitalId } : undefined,
+      orderBy: { receivedAt: 'desc' },
+      take: 100,
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // M1: HFR / HIP REGISTRATION
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async registerHipService(hospitalId: string) {
+    const hospital = await prisma.hospital.findUnique({ where: { id: hospitalId } });
+    if (!hospital) throw new AppError('Hospital not found', 404);
+    if (!hospital.hipId) throw new AppError('Hospital has no HIP ID configured', 400);
+
+    await abdmClient.addBridgeHipService({
+      facilityId: hospital.hipId,
+      facilityName: hospital.name,
+      bridgeId: abdmConfig.clientId,
+      hipName: hospital.name,
+      active: true,
+    });
+
+    await prisma.hospital.update({
+      where: { id: hospitalId },
+      data: { abdmEnabled: true, abdmRegisteredAt: new Date() },
+    });
+
+    logger.info('HIP service registered for hospital', { hospitalId, hipId: hospital.hipId });
+    return { hipId: hospital.hipId, registered: true };
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -212,6 +231,18 @@ export class HipService {
     try {
       logger.info('HIP: Discovering care contexts', { requestId: request.requestId });
 
+      // Idempotency: if this transactionId was already processed, return cached response
+      const cacheKey = `discover:${request.transactionId}`;
+      try {
+        const cached = await redisClient.get(cacheKey);
+        if (cached) {
+          logger.info('HIP: Returning cached discovery response (ABDM retry)', { transactionId: request.transactionId });
+          return JSON.parse(cached);
+        }
+      } catch {
+        // Redis unavailable — proceed without cache
+      }
+
       const patientIdentifier = request.patient.verifiedIdentifiers?.find(
         (id) => id.type === 'MOBILE' || id.type === 'ABHA_NUMBER'
       );
@@ -226,15 +257,23 @@ export class HipService {
         return errorResp;
       }
 
+      // Scope patient lookup by hospital if possible (multi-tenant isolation).
+      // The ABDM callback may carry a hipId — match it to a hospital for scoping.
+      let hospitalScope: { hospitalId: string } | undefined;
+      if ((request as any).hipId) {
+        const hospital = await prisma.hospital.findFirst({ where: { hipId: (request as any).hipId }, select: { id: true } });
+        if (hospital) hospitalScope = { hospitalId: hospital.id };
+      }
+
       let patient;
       if (patientIdentifier.type === 'MOBILE') {
         patient = await prisma.patient.findFirst({
-          where: { mobile: patientIdentifier.value },
+          where: { mobile: patientIdentifier.value, ...hospitalScope },
           include: { encounters: { orderBy: { createdAt: 'desc' }, take: 10 }, abhaRecord: true },
         });
       } else {
         patient = await prisma.patient.findFirst({
-          where: { abhaRecord: { abhaNumber: patientIdentifier.value } },
+          where: { abhaRecord: { abhaNumber: patientIdentifier.value }, ...hospitalScope },
           include: { encounters: { orderBy: { createdAt: 'desc' }, take: 10 }, abhaRecord: true },
         });
       }
@@ -265,6 +304,14 @@ export class HipService {
       };
 
       await abdmClient.post(abdmConfig.endpoints.hip.onDiscover, response);
+
+      // Cache response for idempotency (TTL 10 min)
+      try {
+        await redisClient.set(cacheKey, JSON.stringify(response), { EX: 600 });
+      } catch {
+        // Redis unavailable
+      }
+
       logger.info('HIP: on-discover sent', { patientId: patient.id, count: careContexts.length });
       return response;
     } catch (error: any) {
@@ -362,53 +409,64 @@ export class HipService {
         response: { requestId: request.requestId },
       });
 
-      // Fetch consent and health data
-      const consent = await prisma.consent.findUnique({
-        where: { consentId: request.hiRequest.consent.id },
+      // Fetch consent using ABDM's consent ID and validate the artefact fully
+      const consent = await prisma.consent.findFirst({
+        where: { abdmConsentId: request.hiRequest.consent.id },
         include: { patient: true },
       });
 
-      if (!consent || consent.status !== 'GRANTED') {
-        throw new AppError('Consent not found or not granted', 403);
+      if (!consent) {
+        throw new AppError('Consent artefact not found', 403);
+      }
+      if (consent.status !== 'GRANTED') {
+        throw new AppError(`Consent is not granted (current status: ${consent.status})`, 403);
+      }
+      if (consent.revokedAt) {
+        throw new AppError('Consent has been revoked', 403);
+      }
+      if (consent.expiresAt && new Date(consent.expiresAt) < new Date()) {
+        throw new AppError('Consent has expired', 403);
       }
 
-      const careContexts = await prisma.careContext.findMany({ where: { patientId: consent.patientId } });
-      const careContextIds = careContexts.map((cc) => cc.careContextId);
-      const encounters = await prisma.encounter.findMany({
-        where: { id: { in: careContextIds }, patientId: consent.patientId },
-        include: { doctor: true, emrRecords: true },
-      });
+      // Validate that consent has allowed health information types
+      const consentHiTypes = (consent as any).hiTypes as string[] | undefined;
+      if (consentHiTypes?.length) {
+        logger.debug('Consent hiTypes validated', { types: consentHiTypes });
+      }
 
-      const fhirBundle = await this.generateFHIRBundle(consent, request.hiRequest.dateRange, encounters);
-      const encryptedData = await this.encryptHealthData(fhirBundle, request.hiRequest.keyMaterial);
+      // Validate requested date range falls within consent's date range
+      const consentDateRange = consent.dateRange as { from?: string; to?: string } | null;
+      if (consentDateRange && request.hiRequest.dateRange) {
+        const consentFrom = consentDateRange.from ? new Date(consentDateRange.from) : null;
+        const consentTo = consentDateRange.to ? new Date(consentDateRange.to) : null;
+        const reqFrom = request.hiRequest.dateRange.from ? new Date(request.hiRequest.dateRange.from) : null;
+        const reqTo = request.hiRequest.dateRange.to ? new Date(request.hiRequest.dateRange.to) : null;
 
-      // Push data to HIU
-      await abdmClient.post(request.hiRequest.dataPushUrl, {
-        pageNumber: 0,
-        pageCount: 1,
+        if (consentFrom && reqFrom && reqFrom < consentFrom) {
+          throw new AppError('Requested date range starts before consent allows', 403);
+        }
+        if (consentTo && reqTo && reqTo > consentTo) {
+          throw new AppError('Requested date range ends after consent allows', 403);
+        }
+      }
+
+      // Enqueue the data push job — return 202 immediately so ABDM doesn't timeout
+      const jobData: HealthDataPushJobData = {
         transactionId: request.transactionId,
-        entries: [{
-          content: encryptedData.content,
-          media: 'application/fhir+json',
-          checksum: encryptedData.checksum,
-          careContextReference: careContexts[0]?.careContextId || '',
-        }],
+        requestId: request.requestId,
+        consentAbdmId: request.hiRequest.consent.id,
+        consentPatientId: consent.patientId,
+        dataPushUrl: request.hiRequest.dataPushUrl,
+        dateRange: request.hiRequest.dateRange,
         keyMaterial: request.hiRequest.keyMaterial,
+      };
+
+      await healthDataPushQueue.add(`push-${request.transactionId}`, jobData, {
+        jobId: request.transactionId,
       });
 
-      // Notify completion
-      await abdmClient.post(abdmConfig.endpoints.hip.dataFlowNotify, {
-        notification: {
-          consentId: request.hiRequest.consent.id,
-          transactionId: request.transactionId,
-          doneAt: new Date().toISOString(),
-          notifier: { type: 'HIP', id: abdmConfig.hip.id },
-          statusNotification: { sessionStatus: 'TRANSFERRED', hipId: abdmConfig.hip.id },
-        },
-      });
-
-      logger.info('HIP: Health data pushed', { transactionId: request.transactionId });
-      return { success: true, message: 'Health information sent successfully' };
+      logger.info('HIP: Health data push enqueued', { transactionId: request.transactionId });
+      return { success: true, message: 'Health information request accepted, data push in progress' };
     } catch (error: any) {
       logger.error('HIP: Failed to process health information request', error);
       throw new AppError(error.message || 'Failed to process health information request', error.statusCode || 500);
@@ -524,7 +582,8 @@ export class HipService {
   // PRIVATE HELPERS
   // ═══════════════════════════════════════════════════════════════════════════
 
-  private async generateFHIRBundle(consent: any, _dateRange: { from: string; to: string }, encounters: any[]) {
+  /** @deprecated Kept as fallback — new NRCeS builder is in `common/utils/fhir/fhir-builder.ts` */
+  async generateFHIRBundleLegacy(consent: any, _dateRange: { from: string; to: string }, encounters: any[]) {
     const bundle: any = {
       resourceType: 'Bundle',
       id: `bundle-${consent.id}`,
@@ -565,11 +624,20 @@ export class HipService {
     return bundle;
   }
 
-  private async encryptHealthData(data: any, _keyMaterial: any) {
+  /** @deprecated Encryption is handled by the BullMQ worker */
+  async encryptHealthDataLegacy(data: any, keyMaterial: HealthInformationRequest['hiRequest']['keyMaterial']) {
     const dataString = JSON.stringify(data);
-    const encrypted = EncryptionService.encryptWithAES(dataString);
-    const hash = crypto.createHash('sha256').update(dataString).digest('hex');
-    return { content: encrypted, checksum: hash };
+    const result = EncryptionService.encryptWithECDH(
+      dataString,
+      keyMaterial.dhPublicKey.keyValue,
+      keyMaterial.nonce,
+    );
+    const checksum = crypto.createHash('md5').update(result.encryptedData).digest('hex');
+    return {
+      content: result.encryptedData,
+      checksum,
+      keyMaterial: result.keyMaterial,
+    };
   }
 }
 
