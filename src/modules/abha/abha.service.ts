@@ -38,8 +38,17 @@ function toAppError(error: any, fallback: string, fallbackStatus = 500): never {
     throw new AppError('ABDM gateway authentication failed. Please verify your sandbox credentials (ABDM_CLIENT_ID / ABDM_CLIENT_SECRET) are valid and not expired.', 502);
   }
   const respData = error?.response?.data;
+  const status = error?.response?.status || fallbackStatus;
   let msg = fallback;
-  if (respData) {
+
+  // CloudFront/WAF block returns HTML — detect and give a clean message
+  if (typeof respData === 'string' && respData.includes('cloudfront')) {
+    msg = 'ABDM gateway is temporarily unreachable (blocked by CloudFront). Please try again later.';
+    logger.error(fallback, { message: msg, status, endpoint: error?.config?.url });
+    throw new AppError(msg, 503);
+  }
+
+  if (respData && typeof respData === 'object') {
     if (respData.error?.message) msg = respData.error.message;
     else if (respData.message) msg = respData.message;
     else if (respData.details) msg = respData.details;
@@ -50,8 +59,10 @@ function toAppError(error: any, fallback: string, fallbackStatus = 500): never {
         .join('; ');
       if (fieldErrors) msg = fieldErrors;
     }
+  } else if (typeof respData === 'string' && respData.includes('<HTML')) {
+    msg = `ABDM gateway returned an error page (HTTP ${status}). The service may be temporarily unavailable.`;
   }
-  const status = error?.response?.status || fallbackStatus;
+
   logger.error(fallback, { message: msg, status, endpoint: error?.config?.url });
   throw new AppError(msg, status);
 }
