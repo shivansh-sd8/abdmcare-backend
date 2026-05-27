@@ -14,6 +14,9 @@ import logger from './common/config/logger';
 
 const app: Application = express();
 
+// Trust the first proxy (Nginx) so express-rate-limit reads real client IP from X-Forwarded-For
+app.set('trust proxy', 1);
+
 app.use(helmet());
 
 // CORS Configuration
