@@ -3,6 +3,7 @@ import axios from 'axios';
 import crypto from 'crypto';
 import logger from '../config/logger';
 import { abdmConfig } from '../config/abdm';
+import redisClient from '../config/redis';
 
 interface JWK {
   kid: string;
@@ -19,6 +20,7 @@ interface JWKSCache {
 }
 
 const JWKS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const CLOCK_SKEW_SECONDS = 60;
 let jwksCache: JWKSCache | null = null;
 
 async function fetchJWKS(): Promise<Map<string, JWK>> {
@@ -91,17 +93,59 @@ function verifyJwt(token: string, publicKey: crypto.KeyObject): any {
 
   const payload = JSON.parse(base64UrlDecode(payloadB64).toString('utf-8'));
 
-  if (payload.exp && Date.now() / 1000 > payload.exp) {
+  const now = Date.now() / 1000;
+
+  if (payload.exp && now > payload.exp + CLOCK_SKEW_SECONDS) {
     throw new Error('JWT has expired');
   }
 
+  if (payload.nbf && now < payload.nbf - CLOCK_SKEW_SECONDS) {
+    throw new Error('JWT not yet valid (nbf)');
+  }
+
+  // Validate issuer — accept known ABDM issuers
+  if (payload.iss) {
+    const trustedIssuers = [abdmConfig.cmId, 'sbx', 'abdm', 'nha', 'ABDM-Gateway'];
+    if (!trustedIssuers.some((ti) => payload.iss.includes(ti))) {
+      throw new Error(`JWT issuer not trusted: ${payload.iss}`);
+    }
+  }
+
+  // Validate audience — accept our HIP or HIU IDs
+  if (payload.aud) {
+    const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    const acceptableAuds = [abdmConfig.hip.id, abdmConfig.hiu.id, abdmConfig.cmId].filter(Boolean);
+    if (acceptableAuds.length > 0) {
+      const hasMatch = auds.some((a: string) => acceptableAuds.includes(a));
+      if (!hasMatch) {
+        throw new Error(`JWT audience mismatch: ${JSON.stringify(payload.aud)}`);
+      }
+    }
+  }
+
   return payload;
+}
+
+async function checkJtiReplay(jti: string, exp: number): Promise<boolean> {
+  try {
+    const jtiKey = `abdm-jti:${jti}`;
+    const exists = await redisClient.get(jtiKey);
+    if (exists) return true;
+    const ttl = Math.max(1, Math.ceil(exp - Date.now() / 1000) + CLOCK_SKEW_SECONDS);
+    await redisClient.set(jtiKey, '1', { EX: ttl });
+    return false;
+  } catch {
+    // Redis unavailable — skip replay check, allow through
+    return false;
+  }
 }
 
 /**
  * Middleware to verify ABDM gateway JWT on inbound callbacks.
  * Fetches JWKS from ABDM /v3/certs, caches by kid, and verifies the
  * Authorization: Bearer <jwt> header on every callback request.
+ *
+ * Validates: signature, exp (with 60s skew), nbf, iss, aud, jti replay.
  *
  * In development mode with no ABDM credentials configured, this is
  * permissive (logs a warning but allows the request through) to enable
@@ -110,7 +154,7 @@ function verifyJwt(token: string, publicKey: crypto.KeyObject): any {
 export function verifyAbdmCallback(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
 
-  if (!abdmConfig.clientId) {
+  if (!abdmConfig.clientId && process.env.NODE_ENV !== 'production') {
     logger.warn('ABDM callback verification skipped: no ABDM_CLIENT_ID configured (dev mode)');
     next();
     return;
@@ -145,11 +189,22 @@ export function verifyAbdmCallback(req: Request, res: Response, next: NextFuncti
       const publicKey = jwkToPublicKey(jwk);
       const payload = verifyJwt(token, publicKey);
 
+      // Replay protection via jti
+      if (payload.jti && payload.exp) {
+        const isReplay = await checkJtiReplay(payload.jti, payload.exp);
+        if (isReplay) {
+          logger.warn('ABDM callback JWT replay detected', { jti: payload.jti, path: req.path });
+          res.status(401).json({ error: 'JWT replay detected' });
+          return;
+        }
+      }
+
       (req as any).abdmJwtPayload = payload;
       logger.debug('ABDM callback JWT verified', {
         path: req.path,
         sub: payload.sub,
         iss: payload.iss,
+        aud: payload.aud,
       });
       next();
     } catch (err: any) {

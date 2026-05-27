@@ -86,8 +86,24 @@ export class HipController {
   });
 
   smsNotify = asyncHandler(async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
     const { phoneNo, hipName, hipId } = req.body;
-    const result = await this.hipService.smsNotify(phoneNo, hipName || abdmConfig.hip.name, hipId || abdmConfig.hip.id);
+
+    let resolvedHipId = hipId || abdmConfig.hip.id;
+    let resolvedHipName = hipName || abdmConfig.hip.name;
+
+    if (currentUser?.hospitalId) {
+      const hospital = await prisma.hospital.findUnique({
+        where: { id: currentUser.hospitalId },
+        select: { hipId: true, name: true },
+      });
+      if (hospital?.hipId) {
+        resolvedHipId = hospital.hipId;
+        resolvedHipName = hospital.name;
+      }
+    }
+
+    const result = await this.hipService.smsNotify(phoneNo, resolvedHipName, resolvedHipId);
     ResponseHandler.success(res, 'SMS notification sent', result);
   });
 

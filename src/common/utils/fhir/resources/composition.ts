@@ -40,6 +40,11 @@ export function buildComposition(input: CompositionInput): { uuid: string; resou
     subject: input.patientRef,
     date: input.date,
     author: [input.practitionerRef],
+    attester: [{
+      mode: 'professional',
+      time: new Date().toISOString(),
+      party: input.practitionerRef,
+    }],
     title: input.title,
     custodian: input.organizationRef,
     ...(input.encounterRef && { encounter: input.encounterRef }),

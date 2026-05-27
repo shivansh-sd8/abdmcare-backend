@@ -188,9 +188,17 @@ export class HiuService {
         }
       }
 
-      // Clean up the keypair after use
-      if (abdmConsentId) {
+      // Clean up the keypair only after the last page (or if no pagination info is present)
+      const pageNumber = data.pageNumber ?? data.hiRequest?.pageNumber;
+      const pageCount = data.pageCount ?? data.hiRequest?.pageCount;
+      const isLastPage =
+        pageNumber == null || pageCount == null || pageNumber >= pageCount - 1;
+
+      if (abdmConsentId && isLastPage) {
         await prisma.consentKeyPair.deleteMany({ where: { consentId: abdmConsentId } });
+        logger.info('HIU: Keypair deleted (last page)', { abdmConsentId, pageNumber, pageCount });
+      } else if (abdmConsentId) {
+        logger.info('HIU: Keypair retained for next page', { abdmConsentId, pageNumber, pageCount });
       }
 
       // Find the patient linked to this consent and persist parsed records

@@ -7,6 +7,7 @@ import { buildObservations } from './resources/observation';
 import { buildConditions } from './resources/condition';
 import { buildMedicationRequests } from './resources/medication-request';
 import { buildDiagnosticReports } from './resources/diagnostic-report';
+import { buildAllergyIntolerances } from './resources/allergy-intolerance';
 import { buildOPConsultBundle } from './profiles/op-consult-record';
 import { buildDischargeSummaryBundle } from './profiles/discharge-summary-record';
 import { buildPrescriptionBundle } from './profiles/prescription-record';
@@ -65,6 +66,7 @@ export interface FHIRBundleInput {
     finalDiagnosis?: string | null;
     provisionalDiagnosis?: string | null;
     notes?: string | null;
+    allergies?: string | null;
     followUpDate?: Date | null;
     visitDate: Date;
     createdAt: Date;
@@ -186,10 +188,19 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     encounterRef,
   );
 
-  const diagnosticResults = buildDiagnosticReports(
+  const diagnosticResult = buildDiagnosticReports(
     input.investigations || [],
     patientRef,
     practitionerRef,
+    encounterRef,
+  );
+
+  // Merge lab/analyte observations from diagnostic reports into allObservations
+  allObservations.push(...diagnosticResult.observations);
+
+  const allergyResults = buildAllergyIntolerances(
+    input.encounter.allergies,
+    patientRef,
     encounterRef,
   );
 
@@ -202,7 +213,8 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
   const observationEntries: BundleEntry[] = allObservations.map(o => ({ fullUrl: urnUUID(o.uuid), resource: o.resource }));
   const conditionEntries: BundleEntry[] = conditionResults.map(c => ({ fullUrl: urnUUID(c.uuid), resource: c.resource }));
   const medicationEntries: BundleEntry[] = medicationResults.map(m => ({ fullUrl: urnUUID(m.uuid), resource: m.resource }));
-  const diagnosticEntries: BundleEntry[] = diagnosticResults.map(d => ({ fullUrl: urnUUID(d.uuid), resource: d.resource }));
+  const diagnosticEntries: BundleEntry[] = diagnosticResult.reports.map(d => ({ fullUrl: urnUUID(d.uuid), resource: d.resource }));
+  const allergyEntries: BundleEntry[] = allergyResults.map(a => ({ fullUrl: urnUUID(a.uuid), resource: a.resource }));
 
   const commonPayload = {
     ...input,
@@ -214,6 +226,7 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     conditionEntries,
     medicationEntries,
     diagnosticEntries,
+    allergyEntries,
     patientUUID: patientResult.uuid,
     practitionerUUID: practitionerResult.uuid,
     organizationUUID: organizationResult.uuid,
@@ -221,7 +234,8 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     observationUUIDs: allObservations.map(o => o.uuid),
     conditionUUIDs: conditionResults.map(c => c.uuid),
     medicationUUIDs: medicationResults.map(m => m.uuid),
-    diagnosticUUIDs: diagnosticResults.map(d => d.uuid),
+    diagnosticUUIDs: diagnosticResult.reports.map(d => d.uuid),
+    allergyUUIDs: allergyResults.map(a => a.uuid),
   };
 
   const profile = selectProfile(input);

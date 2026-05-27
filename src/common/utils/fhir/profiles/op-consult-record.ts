@@ -11,6 +11,7 @@ export function buildOPConsultBundle(input: FHIRBundleInput & {
   conditionEntries: BundleEntry[];
   medicationEntries: BundleEntry[];
   diagnosticEntries: BundleEntry[];
+  allergyEntries: BundleEntry[];
   patientUUID: string;
   practitionerUUID: string;
   organizationUUID: string;
@@ -19,6 +20,7 @@ export function buildOPConsultBundle(input: FHIRBundleInput & {
   conditionUUIDs: string[];
   medicationUUIDs: string[];
   diagnosticUUIDs: string[];
+  allergyUUIDs: string[];
 }): { resourceType: string; id: string; meta: any; identifier: any; type: string; timestamp: string; entry: BundleEntry[] } {
   const patientRef: FHIRReference = { reference: urnUUID(input.patientUUID), display: `${input.patient.firstName} ${input.patient.lastName}` };
   const practitionerRef: FHIRReference = { reference: urnUUID(input.practitionerUUID), display: `Dr. ${input.doctor.firstName} ${input.doctor.lastName}` };
@@ -37,6 +39,11 @@ export function buildOPConsultBundle(input: FHIRBundleInput & {
 
   if (input.encounter.physicalExamination) {
     sections.push(makeTextSection('Physical Examination', SECTION_CODES.physicalExamination, input.encounter.physicalExamination));
+  }
+
+  if (input.allergyUUIDs.length > 0) {
+    sections.push(makeRefSection('Allergies', SECTION_CODES.allergies,
+      input.allergyUUIDs.map(u => ({ uuid: u }))));
   }
 
   if (input.observationUUIDs.length > 0) {
@@ -81,8 +88,8 @@ export function buildOPConsultBundle(input: FHIRBundleInput & {
   return {
     resourceType: 'Bundle',
     id: bundleId,
-    meta: { lastUpdated: new Date().toISOString() },
-    identifier: { system: 'https://ndhm.in/bundle', value: bundleId },
+    meta: { lastUpdated: new Date().toISOString(), profile: [NRCES_PROFILES.OPConsultRecord] },
+    identifier: { system: 'https://www.ndhm.gov.in/bundle', value: bundleId },
     type: 'document',
     timestamp: new Date().toISOString(),
     entry: [
@@ -95,6 +102,7 @@ export function buildOPConsultBundle(input: FHIRBundleInput & {
       ...input.conditionEntries,
       ...input.medicationEntries,
       ...input.diagnosticEntries,
+      ...input.allergyEntries,
     ],
   };
 }

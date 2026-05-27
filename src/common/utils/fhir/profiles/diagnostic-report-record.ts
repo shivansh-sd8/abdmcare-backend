@@ -8,11 +8,13 @@ export function buildDiagnosticReportBundle(input: FHIRBundleInput & {
   organizationEntry: BundleEntry;
   encounterEntry: BundleEntry;
   diagnosticEntries: BundleEntry[];
+  observationEntries: BundleEntry[];
   patientUUID: string;
   practitionerUUID: string;
   organizationUUID: string;
   encounterUUID: string;
   diagnosticUUIDs: string[];
+  observationUUIDs: string[];
 }): { resourceType: string; id: string; meta: any; identifier: any; type: string; timestamp: string; entry: BundleEntry[] } {
   const patientRef: FHIRReference = { reference: urnUUID(input.patientUUID), display: `${input.patient.firstName} ${input.patient.lastName}` };
   const practitionerRef: FHIRReference = { reference: urnUUID(input.practitionerUUID), display: `Dr. ${input.doctor.firstName} ${input.doctor.lastName}` };
@@ -24,6 +26,11 @@ export function buildDiagnosticReportBundle(input: FHIRBundleInput & {
   if (input.diagnosticUUIDs.length > 0) {
     sections.push(makeRefSection('Diagnostic Reports', SECTION_CODES.investigations,
       input.diagnosticUUIDs.map(u => ({ uuid: u }))));
+  }
+
+  if (input.observationUUIDs.length > 0) {
+    sections.push(makeRefSection('Observations', SECTION_CODES.vitalSigns,
+      input.observationUUIDs.map(u => ({ uuid: u }))));
   }
 
   const compositionResult = buildComposition({
@@ -41,8 +48,8 @@ export function buildDiagnosticReportBundle(input: FHIRBundleInput & {
   return {
     resourceType: 'Bundle',
     id: bundleId,
-    meta: { lastUpdated: new Date().toISOString() },
-    identifier: { system: 'https://ndhm.in/bundle', value: bundleId },
+    meta: { lastUpdated: new Date().toISOString(), profile: [NRCES_PROFILES.DiagnosticReportRecord] },
+    identifier: { system: 'https://www.ndhm.gov.in/bundle', value: bundleId },
     type: 'document',
     timestamp: new Date().toISOString(),
     entry: [
@@ -52,6 +59,7 @@ export function buildDiagnosticReportBundle(input: FHIRBundleInput & {
       input.organizationEntry,
       input.encounterEntry,
       ...input.diagnosticEntries,
+      ...input.observationEntries,
     ],
   };
 }

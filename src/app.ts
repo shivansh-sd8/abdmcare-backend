@@ -103,6 +103,19 @@ import {
   hipTokenV3Routes,
 } from './modules/abdm-callbacks/v3-callbacks.routes';
 
+// Structured inbound callback logging for all ABDM /api/v3 routes
+app.use('/api/v3', (req, _res, next) => {
+  logger.info('[ABDM-INBOUND]', {
+    method: req.method,
+    path: req.originalUrl,
+    requestId: req.headers['request-id'] || req.headers['x-request-id'] || (req as any).requestId,
+    timestamp: req.headers['timestamp'],
+    bodyKeys: req.body ? Object.keys(req.body) : [],
+    ip: req.ip,
+  });
+  next();
+});
+
 app.use('/api/v3/hip', hipCallbackRoutes);
 app.use('/api/v3/hiu', hiuCallbackRoutes);
 

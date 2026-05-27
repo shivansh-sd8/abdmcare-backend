@@ -41,6 +41,11 @@ export class AbdmClient {
   // ── Interceptors ────────────────────────────────────────────────────────────
 
   private setupInterceptors(): void {
+    this.axiosInstance.interceptors.request.use((config) => {
+      (config as any)._startTime = Date.now();
+      return config;
+    });
+
     this.axiosInstance.interceptors.response.use(
       (response) => {
         this.logTransaction(response.config, response);
@@ -73,6 +78,9 @@ export class AbdmClient {
       let requestPayload = {};
       try { requestPayload = typeof config.data === 'string' ? JSON.parse(config.data) : config.data || {}; } catch { requestPayload = {}; }
 
+      const startTime = (config as any)?._startTime;
+      const duration = startTime ? Date.now() - startTime : null;
+
       await prisma.abdmTransaction.create({
         data: {
           transactionId: crypto.randomUUID(),
@@ -84,7 +92,7 @@ export class AbdmClient {
           statusCode: response?.status ?? error?.response?.status ?? null,
           success: !!response && response.status >= 200 && response.status < 300,
           errorMessage: error?.message || null,
-          duration: null,
+          duration,
         },
       });
     } catch (err: any) {

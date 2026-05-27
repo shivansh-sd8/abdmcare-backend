@@ -33,6 +33,8 @@ router.get('/stats', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentControl
 
 router.get('/patient/:patientId', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getPatientConsents);
 
+router.get('/:id/status', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getConsentStatus);
+
 router.get('/:id/artefact', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.fetchConsentArtefact);
 
 router.post('/:id/revoke', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.revokeConsent);

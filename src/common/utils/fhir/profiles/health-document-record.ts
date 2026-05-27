@@ -81,8 +81,8 @@ export function buildHealthDocumentBundle(input: FHIRBundleInput & {
   return {
     resourceType: 'Bundle',
     id: bundleId,
-    meta: { lastUpdated: new Date().toISOString() },
-    identifier: { system: 'https://ndhm.in/bundle', value: bundleId },
+    meta: { lastUpdated: new Date().toISOString(), profile: [NRCES_PROFILES.HealthDocumentRecord] },
+    identifier: { system: 'https://www.ndhm.gov.in/bundle', value: bundleId },
     type: 'document',
     timestamp: new Date().toISOString(),
     entry: [

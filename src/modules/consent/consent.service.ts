@@ -70,7 +70,7 @@ export class ConsentService {
         },
       };
 
-      await abdmClient.post(abdmConfig.endpoints.consent.init, requestPayload);
+      const abdmResponse = await abdmClient.post(abdmConfig.endpoints.consent.init, requestPayload);
 
       const consent = await prisma.consent.create({
         data: {
@@ -85,7 +85,15 @@ export class ConsentService {
         },
       });
 
-      logger.info('Consent request created', { consentId: consent.consentId });
+      const abdmRequestId = abdmResponse?.data?.consentRequest?.id || abdmResponse?.data?.requestId;
+      if (abdmRequestId) {
+        await prisma.consent.update({
+          where: { id: consent.id },
+          data: { abdmRequestId },
+        });
+      }
+
+      logger.info('Consent request created', { consentId: consent.consentId, abdmRequestId });
       return { success: true, data: consent, message: 'Consent request created successfully' };
     } catch (error: any) {
       logger.error('Failed to create consent request', error);
@@ -114,17 +122,24 @@ export class ConsentService {
    */
   async handleConsentNotification(notification: ConsentNotification) {
     try {
+      const consentRequestId = notification.notification.consentRequestId;
       logger.info('Processing consent notification', {
-        consentRequestId: notification.notification.consentRequestId,
+        consentRequestId,
         status: notification.notification.status,
       });
 
-      const consent = await prisma.consent.findFirst({
-        where: { consentId: notification.notification.consentRequestId },
+      // Look up by abdmRequestId first (ABDM-assigned ID), then fall back to local consentId
+      let consent = await prisma.consent.findFirst({
+        where: { abdmRequestId: consentRequestId },
       });
+      if (!consent) {
+        consent = await prisma.consent.findFirst({
+          where: { consentId: consentRequestId },
+        });
+      }
 
       if (!consent) {
-        logger.warn('Consent not found for notification', { consentRequestId: notification.notification.consentRequestId });
+        logger.warn('Consent not found for notification', { consentRequestId });
         return;
       }
 
@@ -141,6 +156,8 @@ export class ConsentService {
         data: {
           status: status as any,
           abdmConsentId: notification.notification.consentArtefacts?.[0]?.id,
+          ...(status === 'GRANTED' ? { grantedAt: new Date() } : {}),
+          ...(status === 'REVOKED' ? { revokedAt: new Date() } : {}),
         },
       });
 
@@ -209,6 +226,15 @@ export class ConsentService {
       orderBy: { createdAt: 'desc' },
     });
     return { success: true, data: consents };
+  }
+
+  async getConsentStatusById(consentId: string) {
+    const consent = await prisma.consent.findUnique({
+      where: { id: consentId },
+      select: { id: true, consentId: true, status: true, grantedAt: true, revokedAt: true, createdAt: true, updatedAt: true },
+    });
+    if (!consent) throw new AppError('Consent not found', 404);
+    return { success: true, data: consent };
   }
 
   async getConsentStats(currentUser?: any) {

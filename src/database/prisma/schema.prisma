@@ -839,8 +839,6 @@ enum UserRole {
   RECEPTIONIST
   LAB_TECHNICIAN
   PHARMACIST
-  BILLING_STAFF
-  RADIOLOGIST
 }
 
 enum FacilityType {

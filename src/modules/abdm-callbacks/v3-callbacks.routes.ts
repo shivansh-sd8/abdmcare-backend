@@ -22,7 +22,7 @@ consentV3Routes.post('/hip/notify', verifyAbdmCallback, consentController.handle
 export const hiuConsentV3Routes = Router();
 
 // ABDM sends: POST /api/v3/consent/request/hiu/on-notify (HIU-side — consent grant/deny arrives here)
-hiuConsentV3Routes.post('/on-notify', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
+hiuConsentV3Routes.post('/hiu/on-notify', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
   const payload = req.body;
   logger.info('V3 callback: HIU consent on-notify received', {
     requestId: payload?.requestId,

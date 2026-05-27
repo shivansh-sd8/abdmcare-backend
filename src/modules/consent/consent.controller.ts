@@ -63,6 +63,14 @@ export class ConsentController {
       ResponseHandler.success(res, 'Consent stats fetched successfully', result.data);
     }
   );
+
+  getConsentStatus = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const result = await this.consentService.getConsentStatusById(id);
+      ResponseHandler.success(res, 'Consent status fetched', result.data);
+    }
+  );
 }
 
 export default new ConsentController();
