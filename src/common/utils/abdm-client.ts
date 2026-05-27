@@ -114,7 +114,12 @@ export class AbdmClient {
           endpoint,
           payload,
           {
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'REQUEST-ID': crypto.randomUUID(),
+              'TIMESTAMP': new Date().toISOString(),
+              'X-CM-ID': abdmConfig.cmId || 'sbx',
+            },
             timeout: abdmConfig.timeout,
           }
         );
