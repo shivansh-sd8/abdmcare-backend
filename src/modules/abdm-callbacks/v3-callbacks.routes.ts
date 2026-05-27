@@ -110,25 +110,97 @@ export const hipTokenV3Routes = Router();
 // ABDM sends: POST /api/v3/hip/token/on-generate-token
 hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
   const payload = req.body;
-  const linkRefNumber = payload?.linkRefNumber;
-  const token = payload?.token;
+  // ABDM v3 on-generate-token payload structure:
+  // { requestId, timestamp, resp: { requestId }, linkToken/token, abhaAddress/abhaNumber }
+  const linkToken   = payload?.linkToken || payload?.token;
+  const abhaAddress = payload?.abhaAddress || payload?.resp?.abhaAddress;
+  const abhaNumber  = payload?.abhaNumber  || payload?.resp?.abhaNumber;
+
   logger.info('V3 callback: on-generate-token received', {
-    requestId: payload?.requestId,
-    linkRefNumber,
+    requestId:  payload?.requestId,
+    abhaAddress,
+    hasToken:   !!linkToken,
   });
 
-  // Store the link token against the patient/care context for subsequent hipInitiatedLink
-  if (linkRefNumber && token) {
-    try {
-      await prisma.careContext.updateMany({
-        where: { referenceNumber: linkRefNumber },
-        data: { linkToken: token },
-      });
-      logger.info('V3 callback: link token stored', { linkRefNumber });
-    } catch (err: any) {
-      logger.warn('on-generate-token: failed to store token', { error: err.message });
-    }
+  if (!linkToken) {
+    logger.warn('on-generate-token: no link token in payload', { keys: Object.keys(payload || {}) });
+    res.status(202).json({ message: 'No token found' });
+    return;
   }
 
-  res.status(202).json({ message: 'Token received' });
+  // Find patient by abhaAddress / abhaNumber
+  const abhaDigits = (abhaAddress || '').replace(/@.*$/, '').replace(/-/g, '')
+    || (abhaNumber || '').replace(/-/g, '');
+
+  const patient = await prisma.patient.findFirst({
+    where: {
+      OR: [
+        ...(abhaAddress ? [{ abhaAddress }] : []),
+        ...(abhaNumber  ? [{ abhaNumber }]  : []),
+        ...(abhaDigits  ? [{ abhaId: { contains: abhaDigits.replace(/(\d{2})(\d{4})(\d{4})(\d{4})/, '$1-$2-$3-$4') } }] : []),
+        { abhaRecord: { OR: [
+          ...(abhaAddress ? [{ abhaAddress }] : []),
+          ...(abhaNumber  ? [{ abhaNumber }]  : []),
+        ]}},
+      ],
+    },
+    include: { abhaRecord: true },
+  });
+
+  if (!patient) {
+    logger.warn('on-generate-token: patient not found', { abhaAddress, abhaNumber });
+    res.status(202).json({ message: 'Patient not found' });
+    return;
+  }
+
+  // Store linkToken on all PENDING care contexts for this patient
+  await prisma.careContext.updateMany({
+    where: { patientId: patient.id, linkStatus: 'PENDING' },
+    data: { linkToken },
+  });
+  logger.info('on-generate-token: stored link token on care contexts', { patientId: patient.id });
+
+  // Automatically trigger hipInitiatedLink with the received token
+  setImmediate(async () => {
+    try {
+      const contexts = await prisma.careContext.findMany({
+        where: { patientId: patient.id, linkToken, linkStatus: 'PENDING' },
+      });
+
+      if (!contexts.length) {
+        logger.info('on-generate-token: no PENDING contexts to link', { patientId: patient.id });
+        return;
+      }
+
+      const hipService = (await import('../hip/hip.service')).default;
+      const patientRef = patient.uhid || patient.id;
+      const patientName = `${patient.firstName} ${patient.lastName}`.trim();
+      const resolvedAbhaNumber = patient.abhaRecord?.abhaNumber || patient.abhaNumber
+        || (patient.abhaId || '').replace(/-/g, '');
+      const resolvedAbhaAddress = patient.abhaRecord?.abhaAddress || patient.abhaAddress
+        || abhaAddress || `${(patient.abhaId || '').replace(/-/g, '')}@sbx`;
+
+      await hipService.hipInitiatedLink({
+        abhaNumber:  resolvedAbhaNumber,
+        abhaAddress: resolvedAbhaAddress,
+        patient: [{
+          referenceNumber: patientRef,
+          display: patientName,
+          careContexts: contexts.map(cc => ({
+            referenceNumber: cc.careContextId,
+            display: cc.display,
+          })),
+        }],
+      });
+
+      logger.info('on-generate-token: hipInitiatedLink submitted', {
+        patientId: patient.id,
+        count: contexts.length,
+      });
+    } catch (e: any) {
+      logger.warn('on-generate-token: hipInitiatedLink failed', { message: e?.message });
+    }
+  });
+
+  res.status(202).json({ message: 'Token received, linking initiated' });
 }));

@@ -182,6 +182,15 @@ export class HipController {
     const result = await this.hipService.addCareContexts(patientId, careContexts);
     ResponseHandler.success(res, result.message, result.data, 201);
   });
+
+  getCareContexts = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
+    const { patientId } = req.params;
+    const contexts = await prisma.careContext.findMany({
+      where: { patientId },
+      orderBy: { createdAt: 'desc' },
+    });
+    ResponseHandler.success(res, 'Care contexts retrieved', contexts);
+  });
 }
 
 export default new HipController();

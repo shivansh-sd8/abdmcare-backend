@@ -131,6 +131,15 @@ export class AbdmClient {
             timeout: abdmConfig.timeout,
           }
         );
+        // ABDM sandbox sometimes returns HTTP 200 with an error body instead of 4xx
+        if ((response.data as any).error || !(response.data as any).accessToken) {
+          const errMsg = (response.data as any).error?.message
+            || (response.data as any).error?.code
+            || 'No accessToken in response';
+          logger.error(`[ABDM-AUTH] Got HTTP 200 but no token from ${endpoint}`, { body: JSON.stringify(response.data).substring(0, 200) });
+          throw new Error(`ABDM auth error: ${errMsg}`);
+        }
+
         this.accessToken = response.data.accessToken;
         this.tokenExpiryTime = Date.now() + (response.data.expiresIn || 1800) * 1000 - 60_000;
         logger.info(`[ABDM-AUTH] SUCCESS via ${endpoint}`, {

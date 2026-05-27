@@ -484,12 +484,27 @@ export class HipService {
         include: { abhaRecord: true },
       });
 
-      if (!patient || !patient.abhaRecord) {
-        throw new AppError('Patient or ABHA record not found', 404);
+      if (!patient) {
+        throw new AppError('Patient not found', 404);
       }
 
+      // Patient needs some ABHA identifier to link care contexts
+      const hasAbha = patient.abhaRecord || patient.abhaId || patient.abhaNumber || patient.abhaAddress;
+      if (!hasAbha) {
+        throw new AppError('Patient has no ABHA — please create ABHA first before linking care contexts', 404);
+      }
+
+      // Upsert: skip encounters that already have a care context
       const createdContexts = [];
       for (const context of careContexts) {
+        const existing = await prisma.careContext.findFirst({
+          where: { encounterId: context.encounterId },
+        });
+        if (existing) {
+          logger.info('HIP: Care context already exists, skipping', { encounterId: context.encounterId });
+          createdContexts.push(existing);
+          continue;
+        }
         const careContext = await prisma.careContext.create({
           data: {
             careContextId: `CC-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -502,8 +517,41 @@ export class HipService {
         createdContexts.push(careContext);
       }
 
-      logger.info('HIP: Care contexts added', { patientId, count: createdContexts.length });
-      return { success: true, data: createdContexts, message: 'Care contexts added successfully' };
+      logger.info('HIP: Care contexts added locally', { patientId, count: createdContexts.length });
+
+      // Resolve ABHA identifiers for ABDM linking
+      // abhaId is stored as "91-4376-3363-3759" → strip dashes for number/address
+      const rawAbhaId   = patient.abhaId || '';
+      const abhaDigits  = rawAbhaId.replace(/-/g, ''); // "91437633633759"
+      const abhaNumber  = patient.abhaRecord?.abhaNumber  || patient.abhaNumber  || abhaDigits;
+      const abhaAddress = patient.abhaRecord?.abhaAddress || patient.abhaAddress
+        || (abhaDigits ? `${abhaDigits}@sbx` : '');
+      const patientName = `${patient.firstName} ${patient.lastName}`.trim();
+      const gender      = patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'U';
+      const yearOfBirth = patient.dob ? new Date(patient.dob).getFullYear() : 0;
+
+      // Step 2: Fire-and-forget async generate-token call to ABDM.
+      // ABDM returns 202 and later POSTs to /api/v3/hip/token/on-generate-token.
+      // That callback will call hipInitiatedLink and mark contexts as LINKED.
+      setImmediate(async () => {
+        try {
+          logger.info('HIP: [async] Calling generate-token for ABDM linking', { abhaAddress, patientId });
+          await this.generateLinkToken({ abhaNumber, abhaAddress, name: patientName, gender, yearOfBirth });
+          logger.info('HIP: [async] generate-token sent — awaiting ABDM callback', { abhaAddress });
+        } catch (e: any) {
+          logger.warn('HIP: [async] generate-token failed', {
+            message: e?.message,
+            status: e?.response?.status,
+            abdmError: JSON.stringify(e?.response?.data)?.substring(0, 300),
+          });
+        }
+      });
+
+      return {
+        success: true,
+        data: createdContexts,
+        message: `${createdContexts.length} care context(s) registered — awaiting ABDM confirmation (linkStatus will change to LINKED when ABDM confirms)`,
+      };
     } catch (error: any) {
       logger.error('HIP: Failed to add care contexts', error);
       throw new AppError(error.message || 'Failed to add care contexts', error.statusCode || 500);

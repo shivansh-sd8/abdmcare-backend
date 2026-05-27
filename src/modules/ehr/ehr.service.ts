@@ -449,6 +449,9 @@ class EhrService {
         where: { patientId },
         include: {
           doctor: { select: { id: true, firstName: true, lastName: true, specialization: true } },
+          careContext: {
+            select: { careContextId: true, display: true, linkStatus: true, hipId: true, createdAt: true },
+          },
         },
         orderBy: { visitDate: 'desc' },
       }),

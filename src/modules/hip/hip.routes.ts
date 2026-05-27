@@ -88,6 +88,12 @@ router.post(
   hipController.smsNotify
 );
 
+router.get(
+  '/patients/:patientId/care-contexts',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  hipController.getCareContexts
+);
+
 router.post(
   '/patients/:patientId/care-contexts',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),

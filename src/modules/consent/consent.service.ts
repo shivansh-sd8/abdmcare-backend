@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import prisma from '../../common/config/database';
 import abdmClient from '../../common/utils/abdm-client';
 import { abdmConfig } from '../../common/config/abdm';
@@ -40,21 +41,58 @@ export class ConsentService {
       logger.info('Creating consent request', { patientAbhaId: data.patientAbhaId });
 
       const patient = await prisma.patient.findFirst({
-        where: { abhaRecord: { abhaNumber: data.patientAbhaId } },
+        where: {
+          OR: [
+            { abhaId: data.patientAbhaId },
+            { abhaNumber: data.patientAbhaId },
+            { abhaAddress: data.patientAbhaId },
+            { abhaRecord: { abhaNumber: data.patientAbhaId } },
+            { abhaRecord: { abhaAddress: data.patientAbhaId } },
+          ],
+        },
         include: { abhaRecord: true },
       });
 
-      if (!patient || !patient.abhaRecord) throw new AppError('Patient with ABHA ID not found', 404);
+      if (!patient) throw new AppError('Patient with ABHA ID not found', 404);
+
+      // Resolve the canonical ABHA address/number to use in the ABDM payload
+      const resolvedAbhaId = patient.abhaRecord?.abhaAddress
+        || patient.abhaRecord?.abhaNumber
+        || patient.abhaAddress
+        || patient.abhaNumber
+        || patient.abhaId
+        || data.patientAbhaId;
 
       const consentRequestId = `CR-${Date.now()}`;
+      // Store the UUID we send to ABDM — their on-notify callback echoes it back as consentRequestId
+      const abdmOutboundRequestId = crypto.randomUUID();
+
+      // Maps frontend value → { ABDM code, ABDM text, Prisma enum }
+      const PURPOSE_MAP: Record<string, { code: string; text: string; prisma: ConsentPurpose }> = {
+        CAREMGT: { code: 'CAREMGT', text: 'Care Management',                        prisma: ConsentPurpose.CARE_MANAGEMENT },
+        BTG:     { code: 'BTG',     text: 'Break the Glass',                         prisma: ConsentPurpose.BREAK_THE_GLASS },
+        PUBHLTH: { code: 'PUBHLTH', text: 'Public Health',                           prisma: ConsentPurpose.PUBLIC_HEALTH },
+        HPAYMT:  { code: 'HPAYMT',  text: 'Healthcare Payment',                      prisma: ConsentPurpose.CARE_MANAGEMENT },
+        DSRCH:   { code: 'DSRCH',   text: 'Disease Specific Healthcare Research',    prisma: ConsentPurpose.DISEASE_SPECIFIC_HEALTHCARE_RESEARCH },
+        PATRQT:  { code: 'PATRQT',  text: 'Self Requested',                          prisma: ConsentPurpose.CARE_MANAGEMENT },
+      };
+      const purpose = PURPOSE_MAP[data.purpose] || PURPOSE_MAP['CAREMGT'];
+
+      // ABDM V3: dateRange must be present/past — cap "to" at now if it's in the future
+      const fromDt = new Date(data.dateRangeFrom).toISOString();
+      const toDtRaw = new Date(data.dateRangeTo + 'T23:59:59');
+      const toDt = toDtRaw > new Date() ? new Date().toISOString() : toDtRaw.toISOString();
+
       const requestPayload = {
+        requestId: abdmOutboundRequestId,
+        timestamp: new Date().toISOString(),
         consent: {
           purpose: {
-            text: data.purpose,
-            code: 'CAREMGT',
+            text: purpose.text,
+            code: purpose.code,
             refUri: 'http://terminology.hl7.org/ValueSet/v3-PurposeOfUse',
           },
-          patient: { id: data.patientAbhaId },
+          patient: { id: resolvedAbhaId },
           hiu: { id: abdmConfig.hiu.id },
           requester: {
             name: data.requesterName,
@@ -63,7 +101,7 @@ export class ConsentService {
           hiTypes: data.hiTypes,
           permission: {
             accessMode: 'VIEW',
-            dateRange: { from: data.dateRangeFrom, to: data.dateRangeTo },
+            dateRange: { from: fromDt, to: toDt },
             dataEraseAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
             frequency: { unit: 'HOUR', value: 1, repeats: 0 },
           },
@@ -77,27 +115,41 @@ export class ConsentService {
           consentId: consentRequestId,
           patientId: patient.id,
           status: 'REQUESTED',
-          purpose: data.purpose as ConsentPurpose,
+          purpose: purpose.prisma,
           hiTypes: data.hiTypes,
-          dateRange: { from: data.dateRangeFrom, to: data.dateRangeTo },
+          dateRange: { from: fromDt, to: toDt },
           requesterName: data.requesterName,
           requesterId: data.requesterId,
+          // Store outbound requestId immediately — ABDM echoes it in the on-notify callback
+          abdmRequestId: abdmOutboundRequestId,
         },
       });
 
-      const abdmRequestId = abdmResponse?.data?.consentRequest?.id || abdmResponse?.data?.requestId;
-      if (abdmRequestId) {
+      // Also check if ABDM returned an ID synchronously (some versions do)
+      const abdmSyncId = abdmResponse?.data?.consentRequest?.id || abdmResponse?.data?.requestId;
+      if (abdmSyncId && abdmSyncId !== abdmOutboundRequestId) {
         await prisma.consent.update({
           where: { id: consent.id },
-          data: { abdmRequestId },
+          data: { abdmRequestId: abdmSyncId },
         });
       }
 
-      logger.info('Consent request created', { consentId: consent.consentId, abdmRequestId });
+      logger.info('Consent request created', { consentId: consent.consentId, abdmRequestId: abdmOutboundRequestId });
       return { success: true, data: consent, message: 'Consent request created successfully' };
     } catch (error: any) {
-      logger.error('Failed to create consent request', error);
-      throw new AppError(error.message || 'Failed to create consent request', error.statusCode || 500);
+      const abdmRaw = error?.response?.data;
+      // ABDM returns errors as an array: [{"error":{"code":"...","message":"..."}}]
+      const abdmError = Array.isArray(abdmRaw) ? abdmRaw[0] : abdmRaw;
+      logger.error('Failed to create consent request', {
+        message: error?.message,
+        status: error?.response?.status,
+        abdmError: JSON.stringify(abdmRaw)?.substring(0, 500),
+      });
+      const userMessage = abdmError?.error?.message
+        || abdmError?.message
+        || error.message
+        || 'Failed to create consent request';
+      throw new AppError(userMessage, error?.response?.status || error.statusCode || 500);
     }
   }
 
