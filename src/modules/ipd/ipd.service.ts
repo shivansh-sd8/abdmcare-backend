@@ -81,6 +81,43 @@ export class IPDService {
     return prisma.bed.update({ where: { id: bedId }, data: { status: status as any } });
   }
 
+  // ── Delete operations (only if not occupied) ────────────────────────────
+
+  async deleteBed(bedId: string, hospitalId: string) {
+    const bed = await prisma.bed.findFirst({
+      where: { id: bedId, ward: { hospitalId } },
+    });
+    if (!bed) throw new Error('Bed not found');
+    if (bed.status === 'OCCUPIED') throw new Error('Cannot delete an occupied bed');
+
+    const activeAdmission = await prisma.admission.findFirst({
+      where: { bedId, status: { in: ['ADMITTED', 'DISCHARGE_READY'] } },
+    });
+    if (activeAdmission) throw new Error('Cannot delete bed with active admission');
+
+    return prisma.bed.delete({ where: { id: bedId } });
+  }
+
+  async deleteWard(wardId: string, hospitalId: string) {
+    const ward = await prisma.ward.findFirst({
+      where: { id: wardId, hospitalId },
+      include: { beds: { select: { id: true, status: true } } },
+    });
+    if (!ward) throw new Error('Ward not found');
+
+    const occupiedBeds = (ward as any).beds.filter((b: any) => b.status === 'OCCUPIED');
+    if (occupiedBeds.length > 0) throw new Error('Cannot delete ward with occupied beds');
+
+    const activeAdmissions = await prisma.admission.count({
+      where: { wardId, status: { in: ['ADMITTED', 'DISCHARGE_READY'] } },
+    });
+    if (activeAdmissions > 0) throw new Error('Cannot delete ward with active admissions');
+
+    // Delete all beds first, then the ward
+    await prisma.bed.deleteMany({ where: { wardId } });
+    return prisma.ward.delete({ where: { id: wardId } });
+  }
+
   // ── Admission operations ─────────────────────────────────────────────────
 
   async listAdmissions(hospitalId: string, filters: {
@@ -1054,6 +1091,7 @@ export class IPDService {
       const totalBeds     = ward.beds.length || ward.totalBeds;
       const occupiedBeds  = ward.beds.filter((b: any) => b.status === 'OCCUPIED').length;
       const availableBeds = ward.beds.filter((b: any) => b.status === 'AVAILABLE').length;
+      const maintenanceBeds = ward.beds.filter((b: any) => b.status === 'UNDER_MAINTENANCE').length;
       const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
 
       return {
@@ -1065,16 +1103,283 @@ export class IPDService {
         totalBeds,
         occupiedBeds,
         availableBeds,
+        maintenanceBeds,
         occupancyRate,
         beds: ward.beds.map((b: any) => ({
-          id:             b.id,
-          bedNumber:      b.bedNumber,
-          status:         b.status,
-          currentPatient: b.admissions[0]?.patient ?? null,
-          admittedAt:     b.admissions[0]?.admittedAt ?? null,
+          id:              b.id,
+          bedNumber:       b.bedNumber,
+          status:          b.status,
+          bedType:         b.bedType,
+          hasOxygen:       b.hasOxygen,
+          hasVentilator:   b.hasVentilator,
+          hasMonitor:      b.hasMonitor,
+          hasSuction:      b.hasSuction,
+          cleaningStatus:  b.cleaningStatus,
+          lastCleanedAt:   b.lastCleanedAt,
+          maintenanceNote: b.maintenanceNote,
+          maintenanceFrom: b.maintenanceFrom,
+          maintenanceTo:   b.maintenanceTo,
+          currentPatient:  b.admissions[0]?.patient ?? null,
+          admittedAt:      b.admissions[0]?.admittedAt ?? null,
         })),
       };
     });
+  }
+
+  // ── Bulk Bed Creation ───────────────────────────────────────────────────────
+
+  async bulkCreateBeds(wardId: string, hospitalId: string, data: {
+    prefix: string;
+    startNumber: number;
+    count: number;
+    bedType?: string;
+    hasOxygen?: boolean;
+    hasVentilator?: boolean;
+    hasMonitor?: boolean;
+    hasSuction?: boolean;
+  }) {
+    const ward = await prisma.ward.findFirst({ where: { id: wardId, hospitalId } });
+    if (!ward) throw new Error('Ward not found');
+    if (data.count <= 0 || data.count > 100) throw new Error('Count must be between 1 and 100');
+
+    const beds = [];
+    for (let i = 0; i < data.count; i++) {
+      const num = data.startNumber + i;
+      const bedNumber = `${data.prefix}${String(num).padStart(3, '0')}`;
+      beds.push({
+        bedNumber,
+        wardId,
+        status: 'AVAILABLE' as any,
+        bedType: (data.bedType as any) || 'STANDARD',
+        hasOxygen: data.hasOxygen || false,
+        hasVentilator: data.hasVentilator || false,
+        hasMonitor: data.hasMonitor || false,
+        hasSuction: data.hasSuction || false,
+      });
+    }
+
+    const result = await prisma.bed.createMany({ data: beds, skipDuplicates: true });
+    logger.info(`Bulk created ${result.count} beds in ward ${ward.name} (${hospitalId})`);
+    return { created: result.count, wardId, wardName: ward.name };
+  }
+
+  // ── Update Bed Details ──────────────────────────────────────────────────────
+
+  async updateBedDetails(bedId: string, hospitalId: string, data: {
+    bedType?: string;
+    hasOxygen?: boolean;
+    hasVentilator?: boolean;
+    hasMonitor?: boolean;
+    hasSuction?: boolean;
+    cleaningStatus?: string;
+    lastCleanedBy?: string;
+    maintenanceNote?: string;
+    maintenanceFrom?: string;
+    maintenanceTo?: string;
+  }) {
+    const bed = await prisma.bed.findFirst({
+      where: { id: bedId, ward: { hospitalId } },
+    });
+    if (!bed) throw new Error('Bed not found');
+
+    const update: any = {};
+    if (data.bedType !== undefined) update.bedType = data.bedType;
+    if (data.hasOxygen !== undefined) update.hasOxygen = data.hasOxygen;
+    if (data.hasVentilator !== undefined) update.hasVentilator = data.hasVentilator;
+    if (data.hasMonitor !== undefined) update.hasMonitor = data.hasMonitor;
+    if (data.hasSuction !== undefined) update.hasSuction = data.hasSuction;
+
+    if (data.cleaningStatus !== undefined) {
+      update.cleaningStatus = data.cleaningStatus;
+      if (data.cleaningStatus === 'CLEAN') {
+        update.lastCleanedAt = new Date();
+        update.lastCleanedBy = data.lastCleanedBy || null;
+      }
+    }
+
+    if (data.maintenanceNote !== undefined) update.maintenanceNote = data.maintenanceNote;
+    if (data.maintenanceFrom !== undefined) {
+      update.maintenanceFrom = new Date(data.maintenanceFrom);
+      update.status = 'UNDER_MAINTENANCE';
+    }
+    if (data.maintenanceTo !== undefined) update.maintenanceTo = new Date(data.maintenanceTo);
+
+    // Clear maintenance when dates are removed
+    if (data.maintenanceFrom === null) {
+      update.maintenanceFrom = null;
+      update.maintenanceTo = null;
+      update.maintenanceNote = null;
+      if (bed.status === 'UNDER_MAINTENANCE') update.status = 'AVAILABLE';
+    }
+
+    return prisma.bed.update({ where: { id: bedId }, data: update });
+  }
+
+  // ── Bed Transfer ────────────────────────────────────────────────────────────
+
+  async transferBed(hospitalId: string, data: {
+    admissionId: string;
+    toWardId: string;
+    toBedId?: string;
+    reason?: string;
+    transferredBy?: string;
+  }) {
+    const admission = await prisma.admission.findFirst({
+      where: { id: data.admissionId, hospitalId, status: 'ADMITTED' },
+      include: { ward: true, bed: true },
+    });
+    if (!admission) throw new Error('Active admission not found');
+
+    const toWard = await prisma.ward.findFirst({ where: { id: data.toWardId, hospitalId } });
+    if (!toWard) throw new Error('Destination ward not found');
+
+    // Validate destination bed
+    if (data.toBedId) {
+      const toBed = await prisma.bed.findFirst({
+        where: { id: data.toBedId, wardId: data.toWardId, status: 'AVAILABLE' },
+      });
+      if (!toBed) throw new Error('Destination bed not available');
+    }
+
+    // Create transfer record
+    const transfer = await (prisma as any).bedTransfer.create({
+      data: {
+        admissionId:    data.admissionId,
+        fromWardId:     admission.wardId,
+        fromBedId:      admission.bedId,
+        toWardId:       data.toWardId,
+        toBedId:        data.toBedId || null,
+        reason:         data.reason,
+        transferredBy:  data.transferredBy,
+        newDailyCharges: toWard.dailyCharges,
+        hospitalId,
+      },
+    });
+
+    // Release old bed
+    if (admission.bedId) {
+      await prisma.bed.update({
+        where: { id: admission.bedId },
+        data: { status: 'NEEDS_CLEANING', cleaningStatus: 'NEEDS_CLEANING' } as any,
+      });
+    }
+
+    // Occupy new bed
+    if (data.toBedId) {
+      await prisma.bed.update({
+        where: { id: data.toBedId },
+        data: { status: 'OCCUPIED' },
+      });
+    }
+
+    // Update admission record
+    await prisma.admission.update({
+      where: { id: data.admissionId },
+      data: {
+        wardId:       data.toWardId,
+        bedId:        data.toBedId || null,
+        dailyCharges: toWard.dailyCharges,
+      },
+    });
+
+    logger.info(`Bed transfer: admission ${admission.admissionNumber} from ward ${admission.wardId} to ${data.toWardId}`);
+    return transfer;
+  }
+
+  // ── Transfer History ────────────────────────────────────────────────────────
+
+  async getTransferHistory(admissionId: string, hospitalId: string) {
+    return (prisma as any).bedTransfer.findMany({
+      where: { admissionId, hospitalId },
+      include: {
+        fromWard: { select: { name: true, type: true } },
+        fromBed:  { select: { bedNumber: true } },
+        toWard:   { select: { name: true, type: true } },
+        toBed:    { select: { bedNumber: true } },
+      },
+      orderBy: { transferredAt: 'desc' },
+    });
+  }
+
+  // ── Bed Analytics ───────────────────────────────────────────────────────────
+
+  async getBedAnalytics(hospitalId: string) {
+    const wards = await prisma.ward.findMany({
+      where: { hospitalId, isActive: true },
+      include: {
+        beds: true,
+        admissions: { where: { status: 'ADMITTED' } },
+      },
+    });
+
+    // Overall stats
+    let totalBeds = 0;
+    let occupiedBeds = 0;
+    let availableBeds = 0;
+    let maintenanceBeds = 0;
+    let reservedBeds = 0;
+    let needsCleaning = 0;
+
+    const wardStats = wards.map((ward) => {
+      const wb = ward.beds.length;
+      const occ = ward.beds.filter((b: any) => b.status === 'OCCUPIED').length;
+      const avail = ward.beds.filter((b: any) => b.status === 'AVAILABLE').length;
+      const maint = ward.beds.filter((b: any) => b.status === 'UNDER_MAINTENANCE').length;
+      const res = ward.beds.filter((b: any) => b.status === 'RESERVED').length;
+      const cleaning = ward.beds.filter((b: any) => b.cleaningStatus === 'NEEDS_CLEANING' || b.cleaningStatus === 'IN_PROGRESS').length;
+
+      totalBeds += wb;
+      occupiedBeds += occ;
+      availableBeds += avail;
+      maintenanceBeds += maint;
+      reservedBeds += res;
+      needsCleaning += cleaning;
+
+      return {
+        wardId:    ward.id,
+        wardName:  ward.name,
+        wardType:  ward.type,
+        totalBeds: wb,
+        occupiedBeds: occ,
+        availableBeds: avail,
+        maintenanceBeds: maint,
+        reservedBeds: res,
+        needsCleaning: cleaning,
+        occupancyRate: wb > 0 ? Math.round((occ / wb) * 100) : 0,
+        dailyCharges: ward.dailyCharges,
+      };
+    });
+
+    // Recent transfers count (last 7 days)
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const recentTransfers = await (prisma as any).bedTransfer.count({
+      where: { hospitalId, transferredAt: { gte: weekAgo } },
+    });
+
+    // Discharges last 7 days (for bed turnover)
+    const recentDischarges = await prisma.admission.count({
+      where: { hospitalId, status: 'DISCHARGED', dischargedAt: { gte: weekAgo } },
+    });
+
+    const overallOccupancy = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
+    const turnoverRate = totalBeds > 0 ? Number((recentDischarges / totalBeds).toFixed(2)) : 0;
+
+    return {
+      summary: {
+        totalBeds,
+        occupiedBeds,
+        availableBeds,
+        maintenanceBeds,
+        reservedBeds,
+        needsCleaning,
+        overallOccupancy,
+        recentTransfers,
+        recentDischarges,
+        turnoverRate,
+      },
+      wardStats,
+    };
   }
 }
 

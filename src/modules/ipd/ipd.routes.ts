@@ -8,6 +8,8 @@ import {
   getWardOverview,
   getAdmissionRounds, createAdmissionRound, markDischargeReady, getAdmissionBill,
   getDischargeSummary, applyDiscount, collectPayment,
+  deleteBed, deleteWard,
+  bulkCreateBeds, updateBedDetails, transferBed, getTransferHistory, getBedAnalytics,
 } from './ipd.controller';
 
 const router = Router();
@@ -23,6 +25,8 @@ router.put('/wards/:wardId',       authorize('SUPER_ADMIN', 'ADMIN'), updateWard
 // Bed management
 router.post('/wards/:wardId/beds', authorize('SUPER_ADMIN', 'ADMIN', 'NURSE'), createBed);
 router.put('/beds/:bedId/status',  authorize('SUPER_ADMIN', 'ADMIN', 'NURSE'), updateBedStatus);
+router.delete('/beds/:bedId',      authorize('SUPER_ADMIN', 'ADMIN'), deleteBed);
+router.delete('/wards/:wardId',    authorize('SUPER_ADMIN', 'ADMIN'), deleteWard);
 
 // Admissions — who can admit: RECEPTIONIST (finalises) or DOCTOR/ADMIN
 router.get('/admissions',                                  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), listAdmissions);
@@ -54,5 +58,12 @@ router.get('/admissions/:admissionId/discharge-summary',   authorize('SUPER_ADMI
 
 // Ward overview / ward manager
 router.get('/overview', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), getWardOverview);
+
+// Bed management (admin)
+router.post('/wards/:wardId/beds/bulk',         authorize('SUPER_ADMIN', 'ADMIN'), bulkCreateBeds);
+router.put('/beds/:bedId/details',              authorize('SUPER_ADMIN', 'ADMIN', 'NURSE'), updateBedDetails);
+router.post('/beds/transfer',                   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'), transferBed);
+router.get('/admissions/:admissionId/transfers', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), getTransferHistory);
+router.get('/analytics/beds',                   authorize('SUPER_ADMIN', 'ADMIN'), getBedAnalytics);
 
 export default router;

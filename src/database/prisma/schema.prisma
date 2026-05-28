@@ -700,6 +700,8 @@ model Hospital {
   wards        Ward[]
   admissions   Admission[]
   documents    Document[]
+  medicines    Medicine[]
+  inventoryBatches InventoryBatch[]
   consentsRequested Consent[] @relation("RequesterHospital")
   
   createdAt   DateTime @default(now())
@@ -1037,6 +1039,8 @@ model Ward {
   beds        Bed[]
   admissions  Admission[]
   users       User[]
+  transfersFrom BedTransfer[] @relation("TransferFromWard")
+  transfersTo   BedTransfer[] @relation("TransferToWard")
 
   isActive    Boolean   @default(true)
   createdAt   DateTime  @default(now())
@@ -1052,8 +1056,27 @@ model Bed {
   wardId     String
   ward       Ward      @relation(fields: [wardId], references: [id])
   status     BedStatus @default(AVAILABLE)
+
+  // Bed features
+  bedType         BedType        @default(STANDARD)
+  hasOxygen       Boolean        @default(false)
+  hasVentilator   Boolean        @default(false)
+  hasMonitor      Boolean        @default(false)
+  hasSuction      Boolean        @default(false)
+
+  // Housekeeping
+  cleaningStatus  CleaningStatus @default(CLEAN)
+  lastCleanedAt   DateTime?
+  lastCleanedBy   String?
+
+  // Maintenance
+  maintenanceNote  String?
+  maintenanceFrom  DateTime?
+  maintenanceTo    DateTime?
   
   admissions Admission[]
+  transfersFrom BedTransfer[] @relation("TransferFromBed")
+  transfersTo   BedTransfer[] @relation("TransferToBed")
 
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -1117,6 +1140,7 @@ model Admission {
 
   payments         Payment[]
   rounds           Encounter[]     @relation("IPDRounds")
+  transfers        BedTransfer[]
 
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
@@ -1126,6 +1150,184 @@ model Admission {
   @@index([wardId])
   @@index([status])
   @@map("admissions")
+}
+
+// ─── Pharmacy / Stock Management ────────────────────────────────────────────
+
+enum MedicineCategory {
+  TABLET
+  CAPSULE
+  SYRUP
+  INJECTION
+  OINTMENT
+  DROPS
+  INHALER
+  POWDER
+  SURGICAL
+  CONSUMABLE
+  OTHER
+}
+
+enum StockMovementType {
+  IN
+  OUT
+  ADJUSTMENT
+  RETURN
+  EXPIRED
+}
+
+model Medicine {
+  id              String           @id @default(uuid())
+
+  name            String
+  genericName     String?
+  brand           String?
+  manufacturer    String?
+
+  category        MedicineCategory @default(TABLET)
+  formulation     String?
+  strength        String?
+  unit            String           @default("pcs")
+
+  hsnCode         String?
+  gstPercent      Decimal          @default(0) @db.Decimal(5, 2)
+  mrp             Decimal          @default(0) @db.Decimal(10, 2)
+  sellingPrice    Decimal          @default(0) @db.Decimal(10, 2)
+
+  reorderLevel    Int              @default(10)
+
+  schedule        String?
+  storageCondition String?
+
+  isActive        Boolean          @default(true)
+  hospitalId      String
+  hospital        Hospital         @relation(fields: [hospitalId], references: [id])
+
+  batches         InventoryBatch[]
+  stockMovements  StockMovement[]
+
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@unique([name, hospitalId])
+  @@index([hospitalId])
+  @@index([genericName])
+  @@index([category])
+  @@map("medicines")
+}
+
+model InventoryBatch {
+  id                String    @id @default(uuid())
+
+  medicineId        String
+  medicine          Medicine  @relation(fields: [medicineId], references: [id])
+
+  hospitalId        String
+  hospital          Hospital  @relation(fields: [hospitalId], references: [id])
+
+  batchNumber       String
+  expiryDate        DateTime
+
+  quantityReceived  Int
+  quantityAvailable Int
+
+  costPrice         Decimal   @db.Decimal(10, 2)
+  sellingPrice      Decimal   @db.Decimal(10, 2)
+  mrp               Decimal?  @db.Decimal(10, 2)
+
+  receivedBy        String?
+  receivedAt        DateTime  @default(now())
+
+  stockMovements    StockMovement[]
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([medicineId, batchNumber, hospitalId])
+  @@index([medicineId])
+  @@index([hospitalId])
+  @@index([expiryDate])
+  @@map("inventory_batches")
+}
+
+model StockMovement {
+  id              String            @id @default(uuid())
+
+  medicineId      String
+  medicine        Medicine          @relation(fields: [medicineId], references: [id])
+
+  batchId         String?
+  batch           InventoryBatch?   @relation(fields: [batchId], references: [id])
+
+  hospitalId      String
+
+  type            StockMovementType
+  quantity        Int
+
+  referenceType   String?
+  referenceId     String?
+
+  reason          String?
+  performedBy     String?
+
+  balanceAfter    Int?
+
+  createdAt       DateTime          @default(now())
+
+  @@index([medicineId])
+  @@index([hospitalId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("stock_movements")
+}
+
+// ─── Bed Transfer Audit ─────────────────────────────────────────────────────
+
+enum BedType {
+  STANDARD
+  ICU
+  ELECTRIC
+  PEDIATRIC
+  BARIATRIC
+  ISOLATION
+  BIRTHING
+}
+
+enum CleaningStatus {
+  CLEAN
+  NEEDS_CLEANING
+  IN_PROGRESS
+}
+
+model BedTransfer {
+  id              String    @id @default(uuid())
+
+  admissionId     String
+  admission       Admission @relation(fields: [admissionId], references: [id])
+
+  fromWardId      String
+  fromWard        Ward      @relation("TransferFromWard", fields: [fromWardId], references: [id])
+  fromBedId       String?
+  fromBed         Bed?      @relation("TransferFromBed", fields: [fromBedId], references: [id])
+
+  toWardId        String
+  toWard          Ward      @relation("TransferToWard", fields: [toWardId], references: [id])
+  toBedId         String?
+  toBed           Bed?      @relation("TransferToBed", fields: [toBedId], references: [id])
+
+  reason          String?
+  transferredBy   String?
+  transferredAt   DateTime  @default(now())
+
+  newDailyCharges Decimal?  @db.Decimal(12, 2)
+
+  hospitalId      String
+
+  createdAt       DateTime  @default(now())
+
+  @@index([admissionId])
+  @@index([hospitalId])
+  @@map("bed_transfers")
 }
 
 model ReceivedShare {

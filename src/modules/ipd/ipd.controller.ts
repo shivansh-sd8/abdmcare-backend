@@ -56,6 +56,24 @@ export async function updateBedStatus(req: Request, res: Response) {
   } catch (e) { err(res, e); }
 }
 
+// ── Delete (only non-occupied) ───────────────────────────────────────────────
+
+export async function deleteBed(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    await ipdService.deleteBed(req.params.bedId, hospitalId);
+    ok(res, { deleted: true });
+  } catch (e) { err(res, e); }
+}
+
+export async function deleteWard(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    await ipdService.deleteWard(req.params.wardId, hospitalId);
+    ok(res, { deleted: true });
+  } catch (e) { err(res, e); }
+}
+
 // ── Admissions ───────────────────────────────────────────────────────────────
 
 export async function listAdmissions(req: Request, res: Response) {
@@ -186,6 +204,49 @@ export async function getDischargeSummary(req: Request, res: Response) {
   try {
     const hospitalId = (req as any).user.hospitalId;
     const data = await ipdService.getDischargeSummary(req.params.admissionId, hospitalId);
+    ok(res, data);
+  } catch (e) { err(res, e); }
+}
+
+// ── Bed Management (Admin) ──────────────────────────────────────────────────
+
+export async function bulkCreateBeds(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    const data = await ipdService.bulkCreateBeds(req.params.wardId, hospitalId, req.body);
+    res.status(201).json({ success: true, data });
+  } catch (e) { err(res, e); }
+}
+
+export async function updateBedDetails(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    const data = await ipdService.updateBedDetails(req.params.bedId, hospitalId, req.body);
+    ok(res, data);
+  } catch (e) { err(res, e); }
+}
+
+export async function transferBed(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    const transferredBy = (req as any).user.name || (req as any).user.id;
+    const data = await ipdService.transferBed(hospitalId, { ...req.body, transferredBy });
+    res.status(201).json({ success: true, data });
+  } catch (e) { err(res, e); }
+}
+
+export async function getTransferHistory(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    const data = await ipdService.getTransferHistory(req.params.admissionId, hospitalId);
+    ok(res, data);
+  } catch (e) { err(res, e); }
+}
+
+export async function getBedAnalytics(req: Request, res: Response) {
+  try {
+    const hospitalId = (req as any).user.hospitalId;
+    const data = await ipdService.getBedAnalytics(hospitalId);
     ok(res, data);
   } catch (e) { err(res, e); }
 }

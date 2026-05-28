@@ -1,5 +1,7 @@
 import prisma from '../common/config/database';
 import { AppError } from '../common/middleware/errorHandler';
+import pharmacyService from '../modules/pharmacy/pharmacy.service';
+import logger from '../common/config/logger';
 
 interface Medication {
   name: string;
@@ -183,7 +185,7 @@ class PrescriptionService {
   }
 
   async dispensePrescription(id: string, data: {
-    medicines: Array<{ name: string; price: number; quantity: number }>;
+    medicines: Array<{ name: string; price: number; quantity: number; medicineId?: string }>;
     dispensedBy?: string;
     notes?: string;
   }, currentUser?: any) {
@@ -268,7 +270,27 @@ class PrescriptionService {
       }
     }
 
-    return { ...updated, totalCharges };
+    // Stock deduction for medicines with medicineId (FEFO)
+    const stockResults: Array<{ name: string; medicineId?: string; deducted: number; shortfall: number }> = [];
+    for (const m of data.medicines) {
+      if (m.medicineId) {
+        try {
+          const result = await pharmacyService.deductStockForDispense(
+            currentUser?.hospitalId,
+            data.dispensedBy || currentUser?.id || '',
+            m.medicineId,
+            m.quantity,
+            id,
+          );
+          stockResults.push({ name: m.name, medicineId: m.medicineId, ...result });
+        } catch (stockErr: any) {
+          logger.warn(`Stock deduction failed for ${m.name}: ${stockErr.message}`);
+          stockResults.push({ name: m.name, medicineId: m.medicineId, deducted: 0, shortfall: m.quantity });
+        }
+      }
+    }
+
+    return { ...updated, totalCharges, stockResults };
   }
 
   async deletePrescription(id: string, currentUser?: any) {
