@@ -1,8 +1,29 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
 import crypto from 'crypto';
+import https from 'https';
+import dns from 'dns';
 import { abdmConfig } from '../config/abdm';
 import logger from '../config/logger';
 import prisma from '../config/database';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IPv4-only HTTPS agent for ABDM calls.
+//
+// Why: ABDM's CloudFront distribution for abhasbx.abdm.gov.in has a per-edge
+// WAF rule that blocks the Bangalore (`BLR50-P4`) POP for our DO IP. Forcing
+// IPv4 with `family: 4` causes Node's DNS resolver to land on a different
+// CloudFront edge (`99.86.182.x`, US/EU POP) which is not blocked.
+//
+// We also bump the global DNS result order so that any code path that doesn't
+// use this agent still prefers IPv4 first.
+// ─────────────────────────────────────────────────────────────────────────────
+try { dns.setDefaultResultOrder('ipv4first'); } catch (_) { /* node < 17 */ }
+
+const ipv4HttpsAgent = new https.Agent({
+  family: 4,
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -36,6 +57,7 @@ export class AbdmClient {
     this.axiosInstance = axios.create({
       timeout: abdmConfig.timeout,
       headers: { 'Content-Type': 'application/json' },
+      httpsAgent: ipv4HttpsAgent, // Force IPv4 to bypass per-edge CloudFront WAF on abhasbx
     });
     this.setupInterceptors();
   }
@@ -131,6 +153,7 @@ export class AbdmClient {
               'X-CM-ID': abdmConfig.cmId || 'sbx',
             },
             timeout: abdmConfig.timeout,
+            httpsAgent: ipv4HttpsAgent,
           }
         );
         // ABDM sandbox sometimes returns HTTP 200 with an error body instead of 4xx
@@ -187,7 +210,7 @@ export class AbdmClient {
       const token = await this.ensureValidToken();
       const response = await axios.get<{ publicKey: string; encryptionAlgorithm: string }>(
         certUrl,
-        { headers: this.abhaHeaders(token) }
+        { headers: this.abhaHeaders(token), httpsAgent: ipv4HttpsAgent }
       );
       const raw = response.data.publicKey;
       this.publicKey = raw.includes('BEGIN') ? raw :
