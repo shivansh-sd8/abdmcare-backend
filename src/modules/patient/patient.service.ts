@@ -41,8 +41,19 @@ interface SearchPatientQuery {
 export class PatientService {
   async createPatient(data: CreatePatientRequest, currentUser?: any) {
     try {
+      // Determine the hospital scope for this registration.
+      // SUPER_ADMIN with no hospitalId in body operates globally (hospitalId = null).
+      const hospitalId = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
+        ? currentUser.hospitalId
+        : null;
+
+      // Duplicate check is scoped PER HOSPITAL.
+      // ABHA / mobile are national identifiers and the same person legitimately
+      // exists at multiple hospitals — each as a separate Patient row. We only
+      // block re-registering the same person at the SAME hospital.
       const existingPatient = await prisma.patient.findFirst({
         where: {
+          hospitalId,
           OR: [
             { mobile: data.mobile },
             ...(data.email ? [{ email: data.email }] : []),
@@ -53,17 +64,12 @@ export class PatientService {
 
       if (existingPatient) {
         if (data.abhaId && existingPatient.abhaId === data.abhaId) {
-          throw new AppError('Patient with this ABHA ID already exists', 400);
+          throw new AppError('A patient with this ABHA ID is already registered at this hospital', 400);
         }
-        throw new AppError('Patient with this mobile or email already exists', 400);
+        throw new AppError('A patient with this mobile or email is already registered at this hospital', 400);
       }
 
       const uhid = await this.generateUHID();
-
-      // Set hospitalId from currentUser for non-SUPER_ADMIN users
-      const hospitalId = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
-        ? currentUser.hospitalId
-        : null;
 
       const patient = await prisma.patient.create({
         data: {

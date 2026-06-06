@@ -648,6 +648,11 @@ export class AbhaService {
       }
 
       const normalized = abhaNumber.replace(/-/g, '');
+      // AbhaRecord is a global per-ABHA cache; patientId pointer is informational
+      // (the same ABHA may be linked to multiple Patient rows across hospitals).
+      // The authoritative per-hospital linkage lives on Patient.abhaNumber.
+      // To avoid blowing up the other hospital's AbhaRecord.patientId pointer,
+      // only set patientId on initial create.
       await prisma.$transaction([
         prisma.patient.update({
           where: { id: patientId },
@@ -656,7 +661,7 @@ export class AbhaService {
         prisma.abhaRecord.upsert({
           where: { abhaNumber: normalized },
           create: { abhaNumber: normalized, abhaAddress: abhaAddress || null, patientId, kycStatus: 'PENDING' },
-          update: { patientId, ...(abhaAddress && { abhaAddress }) },
+          update: { ...(abhaAddress && { abhaAddress }) }, // do NOT clobber existing patientId
         }),
       ]);
       return { message: 'ABHA linked to patient successfully' };

@@ -13,16 +13,20 @@ model Patient {
   uhid             String        @unique
   
   // ABDM Identity (Cross-Hospital)
-  abhaId           String?       @unique
+  // NOTE: abhaId / abhaNumber are NOT globally unique. The same person can be
+  // registered as a patient at multiple hospitals (ABHA is the national identity;
+  // the Patient row is hospital-local). Uniqueness is enforced per-hospital via
+  // the composite @@unique declarations at the bottom of this model.
+  abhaId           String?
   abhaAddress      String?
-  abhaNumber       String?       @unique
+  abhaNumber       String?
   
   // Basic Info
   firstName        String
   lastName         String
   gender           Gender
   dob              DateTime?
-  mobile           String        @unique
+  mobile           String
   email            String?
   address          Json
   bloodGroup       String?
@@ -58,11 +62,23 @@ model Patient {
   @@index([mobile])
   @@index([uhid])
   @@index([hospitalId])
+
+  // Per-hospital uniqueness — same ABHA / mobile may exist at different hospitals
+  // (one person, multiple hospital records). NULL hospitalId rows are treated as
+  // distinct by Postgres, which is the desired behavior for legacy data.
+  @@unique([hospitalId, abhaId], map: "patients_hospital_abhaId_unique")
+  @@unique([hospitalId, abhaNumber], map: "patients_hospital_abhaNumber_unique")
+  @@unique([hospitalId, mobile], map: "patients_hospital_mobile_unique")
   @@map("patients")
 }
 
 model AbhaRecord {
   id              String    @id @default(uuid())
+  // Global per-ABHA enrollment / KYC cache. Keep @unique so a single canonical
+  // record exists per national ABHA number. Patient<->ABHA per-hospital linkage
+  // is on Patient.abhaNumber (with @@unique([hospitalId, abhaNumber])); the
+  // patientId pointer below is informational and reflects the latest hospital
+  // that linked this ABHA.
   abhaNumber      String    @unique
   abhaAddress     String?
   patientId       String?   @unique
