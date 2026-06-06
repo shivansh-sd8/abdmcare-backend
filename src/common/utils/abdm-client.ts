@@ -15,9 +15,11 @@ interface AbdmV3SessionResponse {
   tokenType: string;
 }
 
+// ABDM has deprecated v0.5. Using v3 only — confirmed in writing by ABDM support
+// (06/04/2026 & 06/05/2026 sandbox tickets). v0.5 calls from non-whitelisted
+// origin servers are now blocked at CloudFront with HTML 403 responses.
 const SESSION_ENDPOINTS = [
-  'https://dev.abdm.gov.in/gateway/v0.5/sessions',
-  'https://dev.abdm.gov.in/api/hiecm/gateway/v3/sessions',
+  `${process.env.ABDM_SESSIONS_URL || 'https://dev.abdm.gov.in/api/hiecm/gateway/v3/sessions'}`,
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,7 +102,7 @@ export class AbdmClient {
     }
   }
 
-  // ── Auth: Session Token (tries v0.5 first, then V3 fallback) ───────────────
+  // ── Auth: V3 Session Token ───────────────────────────────────────────────
 
   private async authenticate(): Promise<void> {
     const payload = {

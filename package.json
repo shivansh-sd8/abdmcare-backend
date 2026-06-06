@@ -18,6 +18,7 @@
     "prisma:studio": "prisma studio",
     "prisma:seed": "ts-node src/database/seed.ts",
     "seed": "ts-node src/database/seed.ts",
+    "abdm:setup": "ts-node scripts/abdm-sandbox-setup.ts",
     "docker:build": "docker build -t medisync-backend .",
     "docker:run": "docker-compose up"
   },
