@@ -49,6 +49,10 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
 const mask = `${AADHAAR.slice(0, 4)}-XXXX-${AADHAAR.slice(-4)}`;
 
 // ── HTTPS request helper (no axios) ───────────────────────────────────────────
+// Force IPv4 unless explicitly disabled — DO Bangalore IPv6 may not be whitelisted
+// even when its IPv4 is. Set FORCE_IPV4=0 to disable.
+const FORCE_IPV4 = process.env.FORCE_IPV4 !== '0';
+
 function request({ method, url, headers, body }) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -58,15 +62,18 @@ function request({ method, url, headers, body }) {
       path: u.pathname + u.search,
       port: 443,
       headers: { ...headers, 'Content-Length': body ? Buffer.byteLength(body) : 0 },
+      ...(FORCE_IPV4 ? { family: 4 } : {}),
     };
+    let remote = '';
     const req = https.request(opts, (res) => {
+      try { remote = `${res.socket.remoteAddress}:${res.socket.remotePort}`; } catch (_) {}
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
         const raw = Buffer.concat(chunks).toString('utf8');
         let json = null;
         try { json = JSON.parse(raw); } catch (_) { /* HTML or non-JSON */ }
-        resolve({ status: res.statusCode, headers: res.headers, raw, json });
+        resolve({ status: res.statusCode, headers: res.headers, raw, json, remote });
       });
     });
     req.on('error', reject);
@@ -94,7 +101,7 @@ function rsaEncrypt(plaintext, pemBase64) {
 (async () => {
   console.log('\n══════════════════════════════════════════════════════');
   console.log(` ABHA Enrollment — Send Aadhaar OTP for ${mask}`);
-  console.log(' (pure-node probe, no ts-node required)');
+  console.log(' (pure-node probe, no ts-node required, IPv4-forced)');
   console.log('══════════════════════════════════════════════════════\n');
 
   // Step 1
@@ -114,7 +121,7 @@ function rsaEncrypt(plaintext, pemBase64) {
       grantType: 'client_credentials',
     }),
   });
-  console.log(`  Status: ${sess.status}   server: ${sess.headers.server}`);
+  console.log(`  Status: ${sess.status}   server: ${sess.headers.server}   remote: ${sess.remote}`);
   if (sess.status !== 200 || !sess.json?.accessToken) {
     console.error('  ❌ Session failed.\n  Body:', sess.raw.slice(0, 400));
     process.exit(2);
@@ -133,7 +140,7 @@ function rsaEncrypt(plaintext, pemBase64) {
       'TIMESTAMP': ts(),
     },
   });
-  console.log(`  Status: ${cert.status}   server: ${cert.headers.server}   x-cache: ${cert.headers['x-cache'] || '-'}`);
+  console.log(`  Status: ${cert.status}   server: ${cert.headers.server}   remote: ${cert.remote}   x-cache: ${cert.headers['x-cache'] || '-'}`);
   if (cert.status !== 200 || !cert.json?.publicKey) {
     console.error('\n  ❌ Public-key fetch failed.\n  Body (first 400 chars):');
     console.error('  ' + cert.raw.slice(0, 400).replace(/\n/g, '\n  '));
@@ -169,7 +176,7 @@ function rsaEncrypt(plaintext, pemBase64) {
       otpSystem: 'aadhaar',
     }),
   });
-  console.log(`  Status: ${otp.status}   server: ${otp.headers.server}`);
+  console.log(`  Status: ${otp.status}   server: ${otp.headers.server}   remote: ${otp.remote}`);
   if (otp.status !== 200) {
     console.error('\n  ❌ Send-OTP failed.\n  Body (first 400 chars):');
     console.error('  ' + otp.raw.slice(0, 400).replace(/\n/g, '\n  '));
