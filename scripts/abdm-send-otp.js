@@ -32,8 +32,20 @@ try {
 
 const CLIENT_ID = process.env.ABDM_CLIENT_ID;
 const CLIENT_SECRET = process.env.ABDM_CLIENT_SECRET;
-const GATEWAY_URL = process.env.ABDM_GATEWAY_URL || 'https://dev.abdm.gov.in/api/hiecm/gateway/v3';
-const ABHA_URL = process.env.ABDM_ABHA_URL || 'https://abhasbx.abdm.gov.in/abha/api';
+
+// HARD-CODED to V3 sandbox URLs — env values are intentionally ignored here so this
+// diagnostic always probes the canonical endpoints regardless of stale .env settings.
+const GATEWAY_URL = 'https://dev.abdm.gov.in/api/hiecm/gateway/v3';
+const ABHA_URL = 'https://abhasbx.abdm.gov.in/abha/api';
+
+console.log('[CONFIG] GATEWAY_URL =', GATEWAY_URL);
+console.log('[CONFIG] ABHA_URL    =', ABHA_URL);
+if (process.env.ABDM_GATEWAY_URL && process.env.ABDM_GATEWAY_URL !== GATEWAY_URL) {
+  console.log('[CONFIG] ⚠️  .env ABDM_GATEWAY_URL =', process.env.ABDM_GATEWAY_URL, ' (IGNORED — using hard-coded V3)');
+}
+if (process.env.ABDM_ABHA_URL && process.env.ABDM_ABHA_URL !== ABHA_URL) {
+  console.log('[CONFIG] ⚠️  .env ABDM_ABHA_URL =', process.env.ABDM_ABHA_URL, ' (IGNORED — using hard-coded V3)');
+}
 
 const AADHAAR = (process.argv[2] || '').replace(/[\s-]/g, '');
 if (!/^\d{12}$/.test(AADHAAR)) {
