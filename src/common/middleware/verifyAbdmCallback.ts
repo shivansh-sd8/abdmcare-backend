@@ -24,7 +24,9 @@ const CLOCK_SKEW_SECONDS = 60;
 let jwksCache: JWKSCache | null = null;
 
 async function fetchJWKS(): Promise<Map<string, JWK>> {
-  const certsUrl = `${abdmConfig.gatewayUrl}/certs`;
+  // Use the dedicated public JWKS endpoint (/gateway/v0.5/certs). The HIECM
+  // gateway path returns 401, which previously made every callback fail.
+  const certsUrl = abdmConfig.certsUrl;
   try {
     const response = await axios.get(certsUrl, { timeout: 10_000 });
     const keys: JWK[] = response.data?.keys || [];

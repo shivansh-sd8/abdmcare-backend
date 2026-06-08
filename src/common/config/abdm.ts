@@ -8,6 +8,12 @@ const GATEWAY_BASE = process.env.ABDM_GATEWAY_BASE || 'https://dev.abdm.gov.in';
 export const abdmConfig = {
   // ── Base URLs ──────────────────────────────────────────────────────────────
   gatewayUrl: process.env.ABDM_GATEWAY_URL || `${GATEWAY_BASE}/api/hiecm/gateway/v3`,
+  // Public JWKS endpoint used to verify the signature on inbound ABDM callbacks.
+  // NOTE: this lives at /gateway/v0.5/certs (returns 200 with a keys[] JWKS).
+  // The HIECM gateway path (/api/hiecm/gateway/v3/certs) returns 401, which
+  // would make EVERY callback verification fail (401) and leave care contexts
+  // stuck PENDING. Keep this separate from gatewayUrl.
+  certsUrl: process.env.ABDM_CERTS_URL || `${GATEWAY_BASE}/gateway/v0.5/certs`,
   abhaUrl: process.env.ABDM_ABHA_URL || 'https://abhasbx.abdm.gov.in/abha/api',
   phrUrl: process.env.ABDM_PHR_URL || 'https://abhasbx.abdm.gov.in/abha/api/v3/phr/web',
   facilityUrl: process.env.ABDM_FACILITY_URL || 'https://apihspsbx.abdm.gov.in/v4/int',
