@@ -147,6 +147,43 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
   res.status(202).json({ message: 'Acknowledged' });
 }));
 
+// ── Links (deep-linking) callbacks ───────────────────────────────────────────
+// ABDM sends: POST /api/v3/links/context/on-notify  (note the plural "links").
+// This is the CM's acknowledgement for our HIP `link/context/notify` call
+// (deep-linking notification that new care contexts are available). Body shape:
+// { acknowledgement: { status, careContexts? }, error, response: { requestId } }.
+// Previously unrouted → returned 404 to ABDM. We ACK 202; if the CM confirms
+// SUCCESS with care-context references, mark those contexts LINKED.
+export const linksV3Routes = Router();
+
+linksV3Routes.post('/context/on-notify', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
+  const payload = req.body || {};
+  const status = payload?.acknowledgement?.status;
+  logger.info('V3 callback: links/context/on-notify received', {
+    requestId: payload?.response?.requestId || payload?.resp?.requestId,
+    status,
+    error: payload?.error,
+  });
+
+  const careContexts = payload?.acknowledgement?.careContexts || payload?.careContexts;
+  if (status === 'SUCCESS' && Array.isArray(careContexts) && careContexts.length) {
+    for (const cc of careContexts) {
+      const ref = cc?.referenceNumber || cc?.careContextReference;
+      if (!ref) continue;
+      try {
+        await prisma.careContext.updateMany({
+          where: { careContextId: ref },
+          data: { linkStatus: 'LINKED' },
+        });
+      } catch (err: any) {
+        logger.warn('links/context/on-notify: failed to update care context', { ref, error: err.message });
+      }
+    }
+  }
+
+  res.status(202).json({ message: 'Acknowledged' });
+}));
+
 // ── Patients callbacks ───────────────────────────────────────────────────────
 export const patientsV3Routes = Router();
 
