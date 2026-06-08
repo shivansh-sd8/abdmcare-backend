@@ -102,6 +102,7 @@ import {
   consentV3Routes,
   hiuConsentV3Routes,
   linkV3Routes,
+  linksV3Routes,
   patientsV3Routes,
   hipTokenV3Routes,
 } from './modules/abdm-callbacks/v3-callbacks.routes';
@@ -131,6 +132,8 @@ app.use('/api/v3/hiu/consent/request', hiuConsentV3Routes);
 // HIP-side consent notification → /api/v3/consent/request/hip/notify
 app.use('/api/v3/consent/request', consentV3Routes);
 app.use('/api/v3/link', linkV3Routes);
+// CM deep-linking ack → /api/v3/links/context/on-notify (note plural "links")
+app.use('/api/v3/links', linksV3Routes);
 app.use('/api/v3/patients', patientsV3Routes);
 
 // ── Generic role routers (internal authenticated APIs + a few callbacks) ────
