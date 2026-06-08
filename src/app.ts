@@ -119,15 +119,23 @@ app.use('/api/v3', (req, _res, next) => {
   next();
 });
 
-app.use('/api/v3/hip', hipCallbackRoutes);
-app.use('/api/v3/hiu', hiuCallbackRoutes);
-
-// Top-level V3 callback paths that ABDM expects outside /hip and /hiu
+// ── Specific ABDM callback sub-paths FIRST ──────────────────────────────────
+// These callback routers each carry their own verifyAbdmCallback (ABDM JWT)
+// and MUST be matched before the generic /api/v3/hip and /api/v3/hiu routers
+// below, which apply router-level `authenticate` to every unmatched sub-path
+// (an ABDM callback has no app JWT, so reaching them yields a 401 and the
+// notification is silently dropped).
+app.use('/api/v3/hip/token', hipTokenV3Routes);
+// HIU-side consent callbacks → /api/v3/hiu/consent/request/{on-init,on-status,on-notify}
+app.use('/api/v3/hiu/consent/request', hiuConsentV3Routes);
+// HIP-side consent notification → /api/v3/consent/request/hip/notify
 app.use('/api/v3/consent/request', consentV3Routes);
-app.use('/api/v3/consent/request', hiuConsentV3Routes);
 app.use('/api/v3/link', linkV3Routes);
 app.use('/api/v3/patients', patientsV3Routes);
-app.use('/api/v3/hip/token', hipTokenV3Routes);
+
+// ── Generic role routers (internal authenticated APIs + a few callbacks) ────
+app.use('/api/v3/hip', hipCallbackRoutes);
+app.use('/api/v3/hiu', hiuCallbackRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

@@ -18,42 +18,98 @@ export const consentV3Routes = Router();
 // ABDM sends: POST /api/v3/consent/request/hip/notify (HIP-side consent notification)
 consentV3Routes.post('/hip/notify', verifyAbdmCallback, consentController.handleConsentNotification);
 
-// ── HIU Consent callbacks ────────────────────────────────────────────────────
+// ── HIU Consent callbacks (ABDM CM → HIU) ────────────────────────────────────
+// ABDM appends FIXED sub-paths to the registered callback base URL. Per the
+// official M3 Postman collection (and consistent with the working HIP token
+// callback /api/v3/hip/token/on-generate-token) these are:
+//   POST /api/v3/hiu/consent/request/on-init    → consentRequest.id assigned
+//   POST /api/v3/hiu/consent/request/on-status  → status query response
+//   POST /api/v3/hiu/consent/request/on-notify  → consent GRANTED/DENIED/REVOKED/EXPIRED
+// (The previous build listened at /api/v3/consent/request/hiu/on-notify — a path
+//  ABDM never calls — so consent status was stuck on REQUESTED forever.)
 export const hiuConsentV3Routes = Router();
 
-// ABDM sends: POST /api/v3/consent/request/hiu/on-notify (HIU-side — consent grant/deny arrives here)
-hiuConsentV3Routes.post('/hiu/on-notify', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
-  const payload = req.body;
+const HIU_STATUS_MAP: Record<string, string> = {
+  GRANTED: 'GRANTED',
+  DENIED: 'DENIED',
+  EXPIRED: 'EXPIRED',
+  REVOKED: 'REVOKED',
+  REQUESTED: 'REQUESTED',
+};
+
+// on-init: ABDM echoes the REQUEST-ID we sent (response.requestId) and assigns
+// consentRequest.id. Persist that id as abdmRequestId so the later on-notify
+// (which references consentRequestId == consentRequest.id) can be correlated.
+hiuConsentV3Routes.post('/on-init', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
+  const payload = req.body || {};
+  const consentRequestId = payload?.consentRequest?.id;
+  const echoedRequestId = payload?.response?.requestId || payload?.resp?.requestId;
+  logger.info('V3 callback: HIU consent on-init received', { consentRequestId, echoedRequestId, error: payload?.error });
+
+  if (consentRequestId && echoedRequestId) {
+    try {
+      await prisma.consent.updateMany({
+        where: { abdmRequestId: echoedRequestId },
+        data: { abdmRequestId: consentRequestId },
+      });
+    } catch (err: any) {
+      logger.warn('HIU consent on-init: failed to persist consentRequest.id', { error: err.message });
+    }
+  }
+  res.status(202).json({ message: 'Acknowledged' });
+}));
+
+// on-status: response to a consent status query (consentRequest.{id,status}).
+hiuConsentV3Routes.post('/on-status', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
+  const payload = req.body || {};
+  const cr = payload?.consentRequest || {};
+  logger.info('V3 callback: HIU consent on-status received', { id: cr?.id, status: cr?.status });
+
+  if (cr?.id && cr?.status) {
+    const mappedStatus = HIU_STATUS_MAP[cr.status] || cr.status;
+    try {
+      await prisma.consent.updateMany({
+        where: { abdmRequestId: cr.id },
+        data: { status: mappedStatus as any },
+      });
+    } catch (err: any) {
+      logger.warn('HIU consent on-status: update failed', { error: err.message });
+    }
+  }
+  res.status(202).json({ message: 'Acknowledged' });
+}));
+
+// on-notify: the authoritative consent grant/deny/revoke notification.
+// Body: { notification: { consentRequestId, status, consentArtefacts: [{ id }] } }
+hiuConsentV3Routes.post('/on-notify', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
+  const payload = req.body || {};
+  const notification = payload?.notification || {};
+  const consentRequestId = notification.consentRequestId;
+  const mappedStatus = HIU_STATUS_MAP[notification.status] || notification.status;
   logger.info('V3 callback: HIU consent on-notify received', {
     requestId: payload?.requestId,
-    status: payload?.notification?.status,
+    consentRequestId,
+    status: notification.status,
   });
 
-  const notification = payload?.notification;
-  if (notification) {
-    const statusMap: Record<string, string> = {
-      GRANTED: 'GRANTED',
-      DENIED: 'DENIED',
-      EXPIRED: 'EXPIRED',
-      REVOKED: 'REVOKED',
-    };
-    const mappedStatus = statusMap[notification.status] || notification.status;
-
-    for (const artefact of notification.consentArtefacts || []) {
-      try {
-        await prisma.consent.updateMany({
-          where: { abdmRequestId: notification.consentRequestId },
-          data: {
-            status: mappedStatus,
-            abdmConsentId: artefact.id,
-            ...(mappedStatus === 'GRANTED' ? { grantedAt: new Date() } : {}),
-            ...(mappedStatus === 'REVOKED' ? { revokedAt: new Date() } : {}),
-          },
-        });
-      } catch (err: any) {
-        logger.warn('HIU consent on-notify: failed to update consent', { error: err.message });
-      }
+  if (consentRequestId) {
+    const artefacts = notification.consentArtefacts || [];
+    try {
+      await prisma.consent.updateMany({
+        where: { abdmRequestId: consentRequestId },
+        data: {
+          status: mappedStatus,
+          ...(artefacts[0]?.id ? { abdmConsentId: artefacts[0].id } : {}),
+          ...(mappedStatus === 'GRANTED' ? { grantedAt: new Date() } : {}),
+          ...(mappedStatus === 'REVOKED' ? { revokedAt: new Date() } : {}),
+        },
+      });
+      logger.info('HIU consent on-notify: consent updated', { consentRequestId, status: mappedStatus });
+    } catch (err: any) {
+      logger.warn('HIU consent on-notify: failed to update consent', { error: err.message });
     }
+  } else {
+    logger.warn('HIU consent on-notify: missing consentRequestId', { keys: Object.keys(payload || {}) });
   }
 
   res.status(202).json({ message: 'HIU consent notification acknowledged' });

@@ -20,16 +20,6 @@ interface ConsentRequestData {
   requesterId: string;
 }
 
-interface ConsentNotification {
-  requestId: string;
-  timestamp: string;
-  notification: {
-    consentRequestId: string;
-    status: string;
-    consentArtefacts?: Array<{ id: string }>;
-  };
-}
-
 export class ConsentService {
 
   /**
@@ -109,6 +99,13 @@ export class ConsentService {
           },
           patient: { id: resolvedAbhaId },
           hiu: { id: abdmConfig.hiu.id },
+          // Per the official M3 consent/v3/request/init body, hip + careContexts
+          // are explicit (null = "any facility / all linked care contexts"). The
+          // CM resolves the patient's LINKED care contexts itself; sending null
+          // (instead of omitting) matches the spec and avoids the CM treating the
+          // request as facility-scoped with no targets.
+          hip: null,
+          careContexts: null,
           requester: {
             name: data.requesterName,
             identifier: { type: 'REGNO', value: data.requesterId, system: 'https://www.mciindia.org' },
@@ -118,12 +115,23 @@ export class ConsentService {
             accessMode: 'VIEW',
             dateRange: { from: fromDt, to: toDt },
             dataEraseAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-            frequency: { unit: 'HOUR', value: 1, repeats: 0 },
+            // M3 spec uses value: 0 (no per-period cap). value: 1 previously
+            // limited fetches to once per hour.
+            frequency: { unit: 'HOUR', value: 0, repeats: 0 },
           },
         },
       };
 
-      const abdmResponse = await abdmClient.post(abdmConfig.endpoints.consent.init, requestPayload);
+      // Pass our generated requestId as the REQUEST-ID header so ABDM echoes it
+      // back in the on-init callback (response.requestId). That lets us correlate
+      // ABDM's async-assigned consentRequest.id to this local record. Without a
+      // known REQUEST-ID the abdm-client generates a random one per call and the
+      // on-init callback can never be matched.
+      const abdmResponse = await abdmClient.post(
+        abdmConfig.endpoints.consent.init,
+        requestPayload,
+        { 'REQUEST-ID': abdmOutboundRequestId },
+      );
 
       const consent = await prisma.consent.create({
         data: {
@@ -140,8 +148,13 @@ export class ConsentService {
         },
       });
 
-      // Also check if ABDM returned an ID synchronously (some versions do)
-      const abdmSyncId = abdmResponse?.data?.consentRequest?.id || abdmResponse?.data?.requestId;
+      // abdmClient.post() returns response.data DIRECTLY, so the previous
+      // abdmResponse.data.consentRequest.id was always undefined (double .data).
+      // ABDM's consent init returns the assigned consentRequest.id — sometimes
+      // synchronously, sometimes only via the on-init callback. Capture it here
+      // when present so the on-notify callback (which references
+      // consentRequestId == consentRequest.id) can be correlated to this record.
+      const abdmSyncId = abdmResponse?.consentRequest?.id || abdmResponse?.consentRequestId;
       if (abdmSyncId && abdmSyncId !== abdmOutboundRequestId) {
         await prisma.consent.update({
           where: { id: consent.id },
@@ -185,55 +198,94 @@ export class ConsentService {
   }
 
   /**
-   * M3: Handle consent notification from ABDM
+   * HIP-side consent notification from ABDM (CM → HIP).
+   * ABDM calls: POST /api/v3/consent/request/hip/notify
+   *
+   * Per the official M2 collection the body is NESTED and carries the granted
+   * artefact directly (NOT a consentRequestId):
+   *   { notification: { status, consentId, consentDetail: { consentId, patient:{id},
+   *     careContexts:[], hip:{id}, hiTypes:[], permission:{} }, signature } }
+   *
+   * The HIP must (a) record the granted consent artefact so a later
+   * health-information request can be validated, and (b) acknowledge receipt to
+   * ABDM at /consent/v3/request/hip/on-notify with status "ok".
    */
-  async handleConsentNotification(notification: ConsentNotification) {
+  async handleConsentNotification(payload: any) {
+    const statusMap: Record<string, string> = {
+      GRANTED: 'GRANTED',
+      DENIED: 'DENIED',
+      EXPIRED: 'EXPIRED',
+      REVOKED: 'REVOKED',
+    };
+    let abdmConsentId: string | undefined;
+    let echoedRequestId: string | undefined;
     try {
-      const consentRequestId = notification.notification.consentRequestId;
-      logger.info('Processing consent notification', {
-        consentRequestId,
-        status: notification.notification.status,
-      });
+      const notification = payload?.notification || {};
+      const consentDetail = notification.consentDetail || {};
+      abdmConsentId = notification.consentId || consentDetail.consentId;
+      echoedRequestId = payload?.requestId || payload?.response?.requestId;
+      const status = statusMap[notification.status] || notification.status || 'GRANTED';
 
-      // Look up by abdmRequestId first (ABDM-assigned ID), then fall back to local consentId
-      let consent = await prisma.consent.findFirst({
-        where: { abdmRequestId: consentRequestId },
-      });
-      if (!consent) {
-        consent = await prisma.consent.findFirst({
-          where: { consentId: consentRequestId },
-        });
+      logger.info('HIP: consent notification received', { abdmConsentId, status });
+
+      if (abdmConsentId) {
+        // Find a local consent for this artefact, or fall back to the patient's
+        // most recent active consent (HIP-initiated / patient self-linking flows
+        // have no abdmConsentId on file yet).
+        let consent = await prisma.consent.findFirst({ where: { abdmConsentId } });
+        if (!consent) {
+          const patientAddr: string | undefined = consentDetail?.patient?.id;
+          if (patientAddr) {
+            const patient = await prisma.patient.findFirst({
+              where: { OR: [{ abhaAddress: patientAddr }, { abhaRecord: { abhaAddress: patientAddr } }] },
+              select: { id: true },
+            });
+            if (patient) {
+              consent = await prisma.consent.findFirst({
+                where: { patientId: patient.id, status: { in: ['REQUESTED', 'GRANTED'] } as any },
+                orderBy: { createdAt: 'desc' },
+              });
+            }
+          }
+        }
+
+        if (consent) {
+          await prisma.consent.update({
+            where: { id: consent.id },
+            data: {
+              status: status as any,
+              abdmConsentId,
+              ...(status === 'GRANTED' ? { grantedAt: new Date() } : {}),
+              ...(status === 'REVOKED' ? { revokedAt: new Date() } : {}),
+            },
+          });
+          logger.info('HIP: consent notification applied', { consentId: consent.consentId, status });
+        } else {
+          logger.warn('HIP: no local consent matched notification', { abdmConsentId });
+        }
+      } else {
+        logger.warn('HIP: consent notification missing consentId', { keys: Object.keys(payload || {}) });
       }
-
-      if (!consent) {
-        logger.warn('Consent not found for notification', { consentRequestId });
-        return;
-      }
-
-      const statusMap: Record<string, string> = {
-        GRANTED: 'GRANTED',
-        DENIED: 'DENIED',
-        EXPIRED: 'EXPIRED',
-        REVOKED: 'REVOKED',
-      };
-      const status = statusMap[notification.notification.status] || 'REQUESTED';
-
-      await prisma.consent.update({
-        where: { id: consent.id },
-        data: {
-          status: status as any,
-          abdmConsentId: notification.notification.consentArtefacts?.[0]?.id,
-          ...(status === 'GRANTED' ? { grantedAt: new Date() } : {}),
-          ...(status === 'REVOKED' ? { revokedAt: new Date() } : {}),
-        },
-      });
-
-      logger.info('Consent status updated', { consentId: consent.consentId, newStatus: status });
-      return { success: true, message: 'Consent notification processed' };
     } catch (error: any) {
-      logger.error('Failed to process consent notification', error);
-      throw new AppError(error.message || 'Failed to process consent notification', error.statusCode || 500);
+      // Never throw — ABDM only needs a receipt acknowledgement.
+      logger.error('Failed to process HIP consent notification', { message: error?.message });
     }
+
+    // Acknowledge receipt to ABDM (literal status "ok" per M2 spec).
+    try {
+      await abdmClient.post(
+        abdmConfig.endpoints.hip.consentOnNotify,
+        {
+          acknowledgement: { status: 'ok', consentId: abdmConsentId },
+          response: { requestId: echoedRequestId },
+        },
+        { 'X-HIP-ID': abdmConfig.hip.id },
+      );
+    } catch (e: any) {
+      logger.warn('HIP: consent on-notify ack failed', { message: e?.message });
+    }
+
+    return { success: true, message: 'Consent notification processed' };
   }
 
   /**

@@ -16,8 +16,9 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "prisma:seed": "ts-node src/database/seed.ts",
-    "seed": "ts-node src/database/seed.ts",
+    "prisma:seed": "ts-node src/database/seed-abdm.ts",
+    "seed": "ts-node src/database/seed-abdm.ts",
+    "seed:abdm": "ts-node src/database/seed-abdm.ts",
     "abdm:setup": "ts-node scripts/abdm-sandbox-setup.ts",
     "abdm:send-otp": "ts-node scripts/abdm-send-otp.ts",
     "docker:build": "docker build -t medisync-backend .",
@@ -87,7 +88,7 @@
   },
   "prisma": {
     "schema": "src/database/prisma/schema.prisma",
-    "seed": "ts-node src/database/seed.ts"
+    "seed": "ts-node src/database/seed-abdm.ts"
   },
   "engines": {
     "node": ">=20.0.0",
