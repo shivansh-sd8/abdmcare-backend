@@ -183,6 +183,7 @@ hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(asy
       await hipService.hipInitiatedLink({
         abhaNumber:  resolvedAbhaNumber,
         abhaAddress: resolvedAbhaAddress,
+        linkToken,
         patient: [{
           referenceNumber: patientRef,
           display: patientName,
@@ -190,6 +191,12 @@ hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(asy
             referenceNumber: cc.careContextId,
             display: cc.display,
           })),
+          // hiType tells the CM what data these care contexts hold so it can
+          // match them against a consent's requested HI types. OPConsultation
+          // is the broadest type for a generic OPD encounter and is what we
+          // request in consents, so the linked facility shows up at grant time.
+          hiType: 'OPConsultation',
+          count: contexts.length,
         }],
       });
 

@@ -55,13 +55,28 @@ export class ConsentService {
 
       if (!patient) throw new AppError('Patient with ABHA ID not found', 404);
 
-      // Resolve the canonical ABHA address/number to use in the ABDM payload
-      const resolvedAbhaId = patient.abhaRecord?.abhaAddress
-        || patient.abhaRecord?.abhaNumber
-        || patient.abhaAddress
-        || patient.abhaNumber
-        || patient.abhaId
-        || data.patientAbhaId;
+      // ABDM consent init requires the patient's ABHA *address* (PHR address,
+      // e.g. "name@sbx") as consent.patient.id — NOT the 14-digit ABHA number.
+      // Sending the number makes ABDM respond "user not found". So prefer any
+      // identifier that looks like an address (contains "@"); only then fall
+      // back to other identifiers.
+      const candidates = [
+        patient.abhaRecord?.abhaAddress,
+        patient.abhaAddress,
+        data.patientAbhaId,
+        patient.abhaRecord?.abhaNumber,
+        patient.abhaNumber,
+        patient.abhaId,
+      ].filter(Boolean) as string[];
+
+      const abhaAddress = candidates.find((c) => c.includes('@'));
+      if (!abhaAddress) {
+        throw new AppError(
+          'This patient has no ABHA address on file. ABDM consent requires the patient\'s ABHA address (e.g. name@sbx), not the ABHA number. Verify the patient\'s ABHA (ABHA Management → Verify) to capture their address, then retry.',
+          400,
+        );
+      }
+      const resolvedAbhaId = abhaAddress;
 
       const consentRequestId = `CR-${Date.now()}`;
       // Store the UUID we send to ABDM — their on-notify callback echoes it back as consentRequestId
@@ -256,11 +271,34 @@ export class ConsentService {
     try {
       const consent = await prisma.consent.findUnique({ where: { id: consentId } });
       if (!consent) throw new AppError('Consent not found', 404);
-      if (!consent.abdmConsentId) throw new AppError('Cannot revoke without ABDM consent ID', 400);
 
-      await prisma.consent.update({ where: { id: consentId }, data: { status: 'REVOKED' } });
-      logger.info('Consent revoked', { consentId: consent.consentId });
-      return { success: true, message: 'Consent revoked successfully' };
+      // ABDM provides NO HIU-initiated consent-revoke endpoint (the M3 HIU API
+      // set is: init, status, on-notify, fetch, health-info-request, data-flow
+      // notify). Consent revocation is a PATIENT action in the ABHA/PHR app; the
+      // HIU is informed asynchronously via the hiu on-notify callback (status
+      // REVOKED). So "Cancel"/"Revoke" from our side is purely a LOCAL state
+      // change — we stop requesting/using the consent. The old hard requirement
+      // for `abdmConsentId` made this button always fail for still-REQUESTED
+      // consents (which have no artefact id yet).
+      if (consent.status === 'REVOKED') {
+        return { success: true, message: 'Consent already cancelled' };
+      }
+
+      await prisma.consent.update({
+        where: { id: consentId },
+        data: { status: 'REVOKED', revokedAt: new Date() },
+      });
+      logger.info('Consent cancelled/revoked locally', {
+        consentId: consent.consentId,
+        previousStatus: consent.status,
+        hadAbdmConsentId: !!consent.abdmConsentId,
+      });
+      return {
+        success: true,
+        message: consent.abdmConsentId
+          ? 'Consent cancelled locally. Note: ABDM revocation of a granted consent is patient-driven via the ABHA app — the HIU has stopped using this consent.'
+          : 'Consent request cancelled.',
+      };
     } catch (error: any) {
       logger.error('Failed to revoke consent', error);
       throw new AppError(error.message || 'Failed to revoke consent', error.statusCode || 500);

@@ -262,14 +262,18 @@ export class AbdmClient {
     return h;
   }
 
-  /** Headers for gateway calls (dev.abdm.gov.in) */
-  gatewayHeaders(token: string): Record<string, string> {
+  /** Headers for gateway calls (dev.abdm.gov.in).
+   * `extra` lets callers add ABDM routing headers required by specific V3
+   * endpoints, e.g. X-HIP-ID (generate-token / link/carecontext),
+   * X-LINK-TOKEN (link/carecontext) or X-HIU-ID. */
+  gatewayHeaders(token: string, extra?: Record<string, string>): Record<string, string> {
     return {
       'Content-Type': 'application/json',
       'REQUEST-ID': crypto.randomUUID(),
       'TIMESTAMP': new Date().toISOString(),
       'Authorization': `Bearer ${token}`,
       'X-CM-ID': abdmConfig.cmId,
+      ...(extra || {}),
     };
   }
 
@@ -435,10 +439,10 @@ export class AbdmClient {
 
   // ── Generic helpers for legacy M2/M3 services (absolute URLs) ───────────
 
-  async post<T = any>(url: string, data?: any): Promise<T> {
+  async post<T = any>(url: string, data?: any, extraHeaders?: Record<string, string>): Promise<T> {
     const token = await this.ensureValidToken();
     const response = await this.axiosInstance.post<T>(url, data, {
-      headers: this.gatewayHeaders(token),
+      headers: this.gatewayHeaders(token, extraHeaders),
     });
     return response.data;
   }

@@ -158,20 +158,48 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       });
     }
 
-    // Generate key material for this push session
+    // Generate key material for this push session. The same ECDH session key
+    // material is reused across all pages of this transfer.
     const sessionEncrypt = EncryptionService.encryptWithECDH(
       '{}',
       keyMaterial.dhPublicKey.keyValue,
       keyMaterial.nonce,
     );
 
-    await abdmClient.post(dataPushUrl, {
-      pageNumber: 0,
-      pageCount: 1,
-      transactionId,
-      entries,
-      keyMaterial: sessionEncrypt.keyMaterial,
-    });
+    // ABDM data push supports pagination (pageNumber is 0-indexed, pageCount is
+    // the total number of pages). Split entries into bounded pages so large
+    // record sets are delivered in chunks instead of one oversized POST. The
+    // HIU side retains the keypair until the last page (pageNumber >= pageCount-1).
+    const PAGE_SIZE = 10;
+    const pages: (typeof entries)[] = [];
+    for (let i = 0; i < entries.length; i += PAGE_SIZE) {
+      pages.push(entries.slice(i, i + PAGE_SIZE));
+    }
+    if (pages.length === 0) pages.push([]);
+    const pageCount = pages.length;
+
+    for (let pageNumber = 0; pageNumber < pageCount; pageNumber++) {
+      await abdmClient.post(dataPushUrl, {
+        pageNumber,
+        pageCount,
+        transactionId,
+        entries: pages[pageNumber],
+        keyMaterial: sessionEncrypt.keyMaterial,
+      });
+      logger.info('Worker: pushed data page', {
+        transactionId,
+        pageNumber,
+        pageCount,
+        entries: pages[pageNumber].length,
+      });
+    }
+
+    // Per-care-context delivery status for the data-flow notification.
+    const statusResponses = entries.map((e) => ({
+      careContextReference: e.careContextReference,
+      hiStatus: 'DELIVERED',
+      description: 'Transferred',
+    }));
 
     // Notify ABDM: data delivered
     await abdmClient.post(abdmConfig.endpoints.hip.dataFlowNotify, {
@@ -180,11 +208,11 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
         transactionId,
         doneAt: new Date().toISOString(),
         notifier: { type: 'HIP', id: abdmConfig.hip.id },
-        statusNotification: { sessionStatus: 'TRANSFERRED', hipId: abdmConfig.hip.id },
+        statusNotification: { sessionStatus: 'TRANSFERRED', hipId: abdmConfig.hip.id, statusResponses },
       },
     });
 
-    logger.info('Worker: Health data push completed', { transactionId, entriesCount: entries.length });
+    logger.info('Worker: Health data push completed', { transactionId, entriesCount: entries.length, pageCount });
   } catch (error: any) {
     logger.error('Worker: Health data push failed', { transactionId, error: error.message });
 

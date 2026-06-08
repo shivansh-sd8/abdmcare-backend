@@ -125,7 +125,17 @@ export class HipController {
 
   // ── M2: Data Transfer (ABDM callbacks) ─────────────────────────────────────
   handleConsentHipNotify = asyncHandler(async (req: Request, res: Response) => {
-    const { requestId, consentId, status } = req.body;
+    // ABDM → HIP consent notification is NESTED: the consent id lives under
+    // notification.consentDetail.consentId (or notification.consentId) and the
+    // grant status under notification.status. Older code read these flat, so a
+    // live grant was acknowledged with undefined ids. Parse defensively to
+    // support both shapes.
+    const body = req.body || {};
+    const notification = body.notification || {};
+    const consentDetail = notification.consentDetail || {};
+    const requestId = body.requestId || body.response?.requestId;
+    const consentId = notification.consentId || consentDetail.consentId || body.consentId;
+    const status = notification.status || body.status;
     await this.hipService.handleConsentHipNotify({ requestId, consentId, status });
     res.status(202).json({ message: 'Acknowledged' });
   });

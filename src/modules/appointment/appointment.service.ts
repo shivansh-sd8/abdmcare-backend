@@ -456,28 +456,21 @@ export class AppointmentService {
           try {
             const hipService = (await import('../hip/hip.service')).default;
 
+            // Only kick off generate-token. ABDM returns the link token ASYNC via
+            // the /api/v3/hip/token/on-generate-token callback, which then calls
+            // link/carecontext with the X-LINK-TOKEN header and marks the care
+            // context LINKED. Calling hipInitiatedLink directly here (without a
+            // link token) always fails, so we rely on the callback flow instead.
+            const abdmGender = patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
             await hipService.generateLinkToken({
               abhaNumber: abhaRecord.abhaNumber,
               abhaAddress: abhaRecord.abhaAddress || '',
               name: `${patient.firstName} ${patient.lastName}`,
-              gender: patient.gender || 'U',
+              gender: abdmGender,
               yearOfBirth: patient.dob ? new Date(patient.dob).getFullYear() : 2000,
             });
 
-            await hipService.hipInitiatedLink({
-              abhaNumber: abhaRecord.abhaNumber,
-              abhaAddress: abhaRecord.abhaAddress || '',
-              patient: [{
-                referenceNumber: patient.id,
-                display: `${patient.firstName} ${patient.lastName}`,
-                careContexts: [{
-                  referenceNumber: careContext.careContextId,
-                  display: careContext.display,
-                }],
-              }],
-            });
-
-            logger.info('HIP linking initiated for care context', {
+            logger.info('HIP linking initiated (generate-token) for care context', {
               careContextId: careContext.careContextId,
               abhaNumber: abhaRecord.abhaNumber,
             });

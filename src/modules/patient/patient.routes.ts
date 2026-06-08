@@ -48,6 +48,8 @@ router.post(
     body('mobile').isMobilePhone('en-IN').withMessage('Valid mobile number is required'),
     body('email').optional({ values: 'falsy' }).isEmail().withMessage('Valid email is required'),
     body('bloodGroup').optional({ values: 'falsy' }).isIn(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']).withMessage('Invalid blood group'),
+    body('abhaNumber').optional({ values: 'falsy' }).matches(/^\d{2}-?\d{4}-?\d{4}-?\d{4}$/).withMessage('ABHA number must be 14 digits (e.g. 91-1234-1234-1234)'),
+    body('abhaAddress').optional({ values: 'falsy' }).matches(/^[a-zA-Z0-9._]+@[a-zA-Z0-9]+$/).withMessage('ABHA address must look like name@sbx'),
   ],
   validate,
   patientController.createPatient
@@ -132,6 +134,8 @@ router.put(
     body('mobile').optional().isMobilePhone('en-IN').withMessage('Valid Indian mobile number is required'),
     body('email').optional({ values: 'falsy' }).isEmail().withMessage('Valid email is required'),
     body('bloodGroup').optional({ values: 'falsy' }).isIn(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']).withMessage('Invalid blood group'),
+    body('abhaNumber').optional({ values: 'falsy' }).matches(/^\d{2}-?\d{4}-?\d{4}-?\d{4}$/).withMessage('ABHA number must be 14 digits (e.g. 91-1234-1234-1234)'),
+    body('abhaAddress').optional({ values: 'falsy' }).matches(/^[a-zA-Z0-9._]+@[a-zA-Z0-9]+$/).withMessage('ABHA address must look like name@sbx'),
   ],
   validate,
   patientController.updatePatient

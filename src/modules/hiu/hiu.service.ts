@@ -113,18 +113,33 @@ export class HiuService {
    * Send data flow completion notification
    * POST /api/hiecm/data-flow/v3/health-information/notify
    */
-  async dataFlowNotify(params: { consentId: string; transactionId: string; status: string }) {
+  async dataFlowNotify(params: {
+    consentId: string;
+    transactionId: string;
+    status: string;
+    hipId?: string;
+    statusResponses?: Array<{ careContextReference: string; hiStatus: string; description?: string }>;
+  }) {
     try {
+      // Per ABDM M3 data-flow notify spec, statusNotification.hipId is REQUIRED
+      // (the HIP that provided the data) and statusResponses carries per-care-
+      // context delivery status. In the sandbox this instance is both HIP+HIU,
+      // so default hipId to our configured HIP id when not supplied.
+      const hipId = params.hipId || abdmConfig.hip.id;
       await abdmClient.post(abdmConfig.endpoints.hiu.dataFlowNotify, {
         notification: {
           consentId: params.consentId,
           transactionId: params.transactionId,
           doneAt: new Date().toISOString(),
           notifier: { type: 'HIU', id: abdmConfig.hiu.id },
-          statusNotification: { sessionStatus: params.status, hipId: '' },
+          statusNotification: {
+            sessionStatus: params.status,
+            hipId,
+            statusResponses: params.statusResponses || [],
+          },
         },
       });
-      logger.info('HIU: data flow notify sent');
+      logger.info('HIU: data flow notify sent', { transactionId: params.transactionId, hipId });
     } catch (error: any) {
       logger.error('HIU: data flow notify failed', error);
       throw new AppError(error.message || 'Failed to send data flow notification', error.response?.status || 500);

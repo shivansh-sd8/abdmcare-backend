@@ -15,6 +15,11 @@ interface CreatePatientRequest {
   bloodGroup?: string;
   emergencyContact?: any;
   abhaId?: string;
+  // ABDM identity — abhaNumber (14-digit) and abhaAddress (name@sbx) are needed
+  // for M2 linking and M3 consent. abhaAddress in particular is required by
+  // ABDM consent (consent.patient.id) and link/carecontext.
+  abhaNumber?: string;
+  abhaAddress?: string;
 }
 
 interface UpdatePatientRequest {
@@ -28,6 +33,9 @@ interface UpdatePatientRequest {
   address?: any;
   bloodGroup?: string;
   emergencyContact?: any;
+  abhaId?: string;
+  abhaNumber?: string;
+  abhaAddress?: string;
 }
 
 interface SearchPatientQuery {
@@ -84,6 +92,8 @@ export class PatientService {
           bloodGroup: data.bloodGroup,
           emergencyContact: data.emergencyContact || {},
           abhaId: data.abhaId,
+          abhaNumber: data.abhaNumber ? data.abhaNumber.replace(/-/g, '') : undefined,
+          abhaAddress: data.abhaAddress || undefined,
           hospitalId,
         },
         include: {
@@ -218,6 +228,11 @@ export class PatientService {
       if (data.bloodGroup !== undefined)       updateData.bloodGroup = data.bloodGroup || null;
       if (data.address !== undefined)          updateData.address = data.address;
       if (data.emergencyContact !== undefined) updateData.emergencyContact = data.emergencyContact;
+      // Allow editing ABHA identity so patients registered before the address
+      // was captured can be fixed (abhaAddress is required for ABDM linking).
+      if (data.abhaId !== undefined)           updateData.abhaId = data.abhaId ? data.abhaId.replace(/-/g, '') : null;
+      if (data.abhaNumber !== undefined)       updateData.abhaNumber = data.abhaNumber ? data.abhaNumber.replace(/-/g, '') : null;
+      if (data.abhaAddress !== undefined)      updateData.abhaAddress = data.abhaAddress || null;
 
       const updatedPatient = await prisma.patient.update({
         where: { id },

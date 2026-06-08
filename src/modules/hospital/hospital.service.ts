@@ -51,6 +51,10 @@ interface HospitalOnboardingData {
   
   // Subscription Plan
   plan?: 'FREE' | 'BASIC' | 'PROFESSIONAL' | 'ENTERPRISE';
+
+  // ABDM Integration
+  hipId?: string;
+  hiuId?: string;
 }
 
 interface UpdateHospitalData {
@@ -198,6 +202,10 @@ export class HospitalService {
           maxPatients: planLimits.maxPatients,
           maxStorage: planLimits.maxStorage,
           
+          // ABDM Integration (HIP/HIU facility IDs from HFR)
+          hipId: data.hipId || null,
+          hiuId: data.hiuId || null,
+
           // Onboarding
           onboardingStep: 1,
           onboardingCompleted: false,

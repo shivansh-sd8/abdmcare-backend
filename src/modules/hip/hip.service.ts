@@ -124,14 +124,27 @@ export class HipService {
     yearOfBirth: number;
   }) {
     try {
-      const res = await abdmClient.post(abdmConfig.endpoints.hip.generateToken, {
-        abhaNumber: params.abhaNumber,
-        abhaAddress: params.abhaAddress,
-        name: params.name,
-        gender: params.gender,
-        yearOfBirth: params.yearOfBirth,
-      });
-      logger.info('HIP: Link token generated', { abhaNumber: params.abhaNumber });
+      // ABDM V3 requires X-HIP-ID on generate-token so the gateway can route the
+      // on-generate-token callback back to the correct HIP. Without it the call
+      // is rejected / no callback arrives and care contexts stay PENDING.
+      //
+      // CRITICAL: abhaNumber MUST be the bare 14 digits with NO dashes. ABDM's
+      // generate-token returns a generic HTTP 400 "Bad Request" when dashes are
+      // present (verified live against the sandbox). Strip them defensively so a
+      // dashed value from any caller never silently kills linking.
+      const abhaNumber = (params.abhaNumber || '').replace(/-/g, '');
+      const res = await abdmClient.post(
+        abdmConfig.endpoints.hip.generateToken,
+        {
+          abhaNumber,
+          abhaAddress: params.abhaAddress,
+          name: params.name,
+          gender: params.gender,
+          yearOfBirth: params.yearOfBirth,
+        },
+        { 'X-HIP-ID': abdmConfig.hip.id },
+      );
+      logger.info('HIP: Link token generated', { abhaNumber, hipId: abdmConfig.hip.id });
       return res;
     } catch (error: any) {
       logger.error('HIP: Failed to generate link token', error);
@@ -146,19 +159,39 @@ export class HipService {
   async hipInitiatedLink(params: {
     abhaNumber: string;
     abhaAddress: string;
+    linkToken?: string;
     patient: Array<{
       referenceNumber: string;
       display: string;
       careContexts: Array<{ referenceNumber: string; display: string }>;
+      // ABDM link/carecontext REQUIRES hiType + count on each patient entry.
+      // hiType tells the CM what kind of data the linked care contexts hold;
+      // without it the CM cannot match links to a consent's requested HI types
+      // and the patient sees "no facility available to share health records".
+      hiType: string;
+      count: number;
     }>;
   }) {
     try {
-      const res = await abdmClient.post(abdmConfig.endpoints.hip.linkCareContext, {
-        abhaNumber: params.abhaNumber,
-        abhaAddress: params.abhaAddress,
-        patient: params.patient,
-      });
-      logger.info('HIP: Care context linked (HIP-initiated)', { abhaNumber: params.abhaNumber });
+      // ABDM V3 link/carecontext requires BOTH X-HIP-ID and X-LINK-TOKEN headers.
+      // The X-LINK-TOKEN is the JWT returned via the on-generate-token callback.
+      const headers: Record<string, string> = { 'X-HIP-ID': abdmConfig.hip.id };
+      if (params.linkToken) headers['X-LINK-TOKEN'] = params.linkToken;
+      else logger.warn('HIP: hipInitiatedLink called without a link token — ABDM will reject link/carecontext');
+
+      // abhaNumber must be bare 14 digits (no dashes) — same ABDM constraint as
+      // generate-token. Strip defensively.
+      const abhaNumber = (params.abhaNumber || '').replace(/-/g, '');
+      const res = await abdmClient.post(
+        abdmConfig.endpoints.hip.linkCareContext,
+        {
+          abhaNumber,
+          abhaAddress: params.abhaAddress,
+          patient: params.patient,
+        },
+        headers,
+      );
+      logger.info('HIP: Care context linked (HIP-initiated)', { abhaNumber, hasLinkToken: !!params.linkToken });
       return res;
     } catch (error: any) {
       logger.error('HIP: Failed to link care context', error);
@@ -177,17 +210,24 @@ export class HipService {
     hiTypes: string[];
   }) {
     try {
-      const res = await abdmClient.post(abdmConfig.endpoints.hip.linkContextNotify, {
-        notification: {
-          patient: { id: params.abhaAddress },
-          careContext: {
-            patientReference: params.patientReference,
-            careContextReference: params.careContextReference,
+      const res = await abdmClient.post(
+        abdmConfig.endpoints.hip.linkContextNotify,
+        {
+          notification: {
+            patient: { id: params.abhaAddress },
+            careContext: {
+              patientReference: params.patientReference,
+              careContextReference: params.careContextReference,
+            },
+            hiTypes: params.hiTypes,
+            date: new Date().toISOString(),
+            // ABDM notify spec requires the originating HIP id inside the
+            // notification body (in addition to the X-HIP-ID header).
+            hip: { id: abdmConfig.hip.id },
           },
-          hiTypes: params.hiTypes,
-          date: new Date().toISOString(),
         },
-      });
+        { 'X-HIP-ID': abdmConfig.hip.id },
+      );
       logger.info('HIP: Link context notify sent');
       return res;
     } catch (error: any) {
@@ -384,11 +424,17 @@ export class HipService {
    */
   async handleConsentHipNotify(params: { requestId: string; consentId: string; status: string }) {
     try {
+      // Per ABDM M2 spec the acknowledgement.status is the literal "ok"
+      // (receipt acknowledgement), NOT the consent grant status. We log the
+      // grant status separately for traceability.
       await abdmClient.post(abdmConfig.endpoints.hip.consentOnNotify, {
-        acknowledgement: { status: params.status, consentId: params.consentId },
+        acknowledgement: { status: 'ok', consentId: params.consentId },
         response: { requestId: params.requestId },
       });
-      logger.info('HIP: consent on-notify acknowledged', { consentId: params.consentId });
+      logger.info('HIP: consent on-notify acknowledged', {
+        consentId: params.consentId,
+        grantStatus: params.status,
+      });
     } catch (error: any) {
       logger.error('HIP: consent on-notify failed', error);
       throw new AppError(error.message || 'Failed to acknowledge consent', error.response?.status || 500);
@@ -524,11 +570,28 @@ export class HipService {
       const rawAbhaId   = patient.abhaId || '';
       const abhaDigits  = rawAbhaId.replace(/-/g, ''); // "91437633633759"
       const abhaNumber  = patient.abhaRecord?.abhaNumber  || patient.abhaNumber  || abhaDigits;
-      const abhaAddress = patient.abhaRecord?.abhaAddress || patient.abhaAddress
-        || (abhaDigits ? `${abhaDigits}@sbx` : '');
+      // ABDM linking REQUIRES the patient's real ABHA address (e.g. "name@sbx").
+      // The 14-digit number formatted as "<digits>@sbx" is NOT a valid PHR
+      // address — generate-token rejects it, no callback arrives, and the care
+      // contexts stay PENDING forever (this is what "no facility available"
+      // looks like to the patient). So only use a stored value that is actually
+      // an address (contains "@").
+      const storedAddress = patient.abhaRecord?.abhaAddress || patient.abhaAddress || '';
+      const abhaAddress = storedAddress.includes('@') ? storedAddress : '';
       const patientName = `${patient.firstName} ${patient.lastName}`.trim();
-      const gender      = patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'U';
+      const gender      = patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
       const yearOfBirth = patient.dob ? new Date(patient.dob).getFullYear() : 0;
+
+      // Guard: without a real ABHA address we cannot link to ABDM. Save locally
+      // but tell the caller exactly what to fix instead of silently failing.
+      if (!abhaAddress) {
+        logger.warn('HIP: ABDM linking skipped — patient has no real ABHA address', { patientId });
+        return {
+          success: true,
+          data: createdContexts,
+          message: `${createdContexts.length} care context(s) saved locally, but ABDM linking was skipped: this patient has no ABHA address (e.g. name@sbx). Capture it via ABHA Management → Verify/Link, then link care contexts again.`,
+        };
+      }
 
       // Step 2: Fire-and-forget async generate-token call to ABDM.
       // ABDM returns 202 and later POSTs to /api/v3/hip/token/on-generate-token.
