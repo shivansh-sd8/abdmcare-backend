@@ -9,6 +9,34 @@ import { healthDataPushQueue, HealthDataPushJobData } from '../../common/config/
 import redisClient from '../../common/config/redis';
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Logging helpers (link care context flow)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Mask an ABHA number for logs: keep first 2 + last 4 digits (PII-safe). */
+function maskAbha(value?: string): string {
+  const digits = (value || '').replace(/-/g, '');
+  if (!digits) return '(none)';
+  if (digits.length <= 6) return '****';
+  return `${digits.slice(0, 2)}******${digits.slice(-4)}`;
+}
+
+/** Extract safe, non-circular fields from an Axios/HTTP error for logging. */
+function describeAbdmError(error: any): Record<string, unknown> {
+  let abdmError: string | undefined;
+  try {
+    abdmError = error?.response?.data ? JSON.stringify(error.response.data).slice(0, 500) : undefined;
+  } catch {
+    abdmError = '(unserializable response body)';
+  }
+  return {
+    message: error?.message,
+    status: error?.response?.status,
+    statusText: error?.response?.statusText,
+    abdmError,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -123,16 +151,26 @@ export class HipService {
     gender: string;
     yearOfBirth: number;
   }) {
+    // CRITICAL: abhaNumber MUST be the bare 14 digits with NO dashes. ABDM's
+    // generate-token returns a generic HTTP 400 "Bad Request" when dashes are
+    // present (verified live against the sandbox). Strip them defensively so a
+    // dashed value from any caller never silently kills linking.
+    const abhaNumber = (params.abhaNumber || '').replace(/-/g, '');
+
+    logger.info('HIP: [link] → generate-token request', {
+      endpoint: abdmConfig.endpoints.hip.generateToken,
+      hipId: abdmConfig.hip.id,
+      abhaNumber: maskAbha(abhaNumber),
+      abhaAddress: params.abhaAddress,
+      name: params.name,
+      gender: params.gender,
+      yearOfBirth: params.yearOfBirth,
+    });
+
     try {
       // ABDM V3 requires X-HIP-ID on generate-token so the gateway can route the
       // on-generate-token callback back to the correct HIP. Without it the call
       // is rejected / no callback arrives and care contexts stay PENDING.
-      //
-      // CRITICAL: abhaNumber MUST be the bare 14 digits with NO dashes. ABDM's
-      // generate-token returns a generic HTTP 400 "Bad Request" when dashes are
-      // present (verified live against the sandbox). Strip them defensively so a
-      // dashed value from any caller never silently kills linking.
-      const abhaNumber = (params.abhaNumber || '').replace(/-/g, '');
       const res = await abdmClient.post(
         abdmConfig.endpoints.hip.generateToken,
         {
@@ -144,10 +182,19 @@ export class HipService {
         },
         { 'X-HIP-ID': abdmConfig.hip.id },
       );
-      logger.info('HIP: Link token generated', { abhaNumber, hipId: abdmConfig.hip.id });
+      logger.info('HIP: [link] ← generate-token accepted by ABDM (awaiting on-generate-token callback)', {
+        abhaNumber: maskAbha(abhaNumber),
+        abhaAddress: params.abhaAddress,
+        hipId: abdmConfig.hip.id,
+      });
       return res;
     } catch (error: any) {
-      logger.error('HIP: Failed to generate link token', error);
+      logger.error('HIP: [link] ✗ generate-token failed', {
+        abhaNumber: maskAbha(abhaNumber),
+        abhaAddress: params.abhaAddress,
+        hipId: abdmConfig.hip.id,
+        ...describeAbdmError(error),
+      });
       throw new AppError(error.message || 'Failed to generate link token', error.response?.status || 500);
     }
   }
@@ -172,16 +219,34 @@ export class HipService {
       count: number;
     }>;
   }) {
+    // abhaNumber must be bare 14 digits (no dashes) — same ABDM constraint as
+    // generate-token. Strip defensively.
+    const abhaNumber = (params.abhaNumber || '').replace(/-/g, '');
+
+    logger.info('HIP: [link] → link/carecontext request', {
+      endpoint: abdmConfig.endpoints.hip.linkCareContext,
+      hipId: abdmConfig.hip.id,
+      abhaNumber: maskAbha(abhaNumber),
+      abhaAddress: params.abhaAddress,
+      hasLinkToken: !!params.linkToken,
+      patientCount: params.patient?.length || 0,
+      careContexts: params.patient?.flatMap((p) => ({
+        patientRef: p.referenceNumber,
+        hiType: p.hiType,
+        count: p.count,
+        refs: p.careContexts?.map((cc) => cc.referenceNumber),
+      })),
+    });
+
     try {
       // ABDM V3 link/carecontext requires BOTH X-HIP-ID and X-LINK-TOKEN headers.
       // The X-LINK-TOKEN is the JWT returned via the on-generate-token callback.
       const headers: Record<string, string> = { 'X-HIP-ID': abdmConfig.hip.id };
       if (params.linkToken) headers['X-LINK-TOKEN'] = params.linkToken;
-      else logger.warn('HIP: hipInitiatedLink called without a link token — ABDM will reject link/carecontext');
+      else logger.warn('HIP: [link] hipInitiatedLink called WITHOUT a link token — ABDM will reject link/carecontext', {
+        abhaAddress: params.abhaAddress,
+      });
 
-      // abhaNumber must be bare 14 digits (no dashes) — same ABDM constraint as
-      // generate-token. Strip defensively.
-      const abhaNumber = (params.abhaNumber || '').replace(/-/g, '');
       const res = await abdmClient.post(
         abdmConfig.endpoints.hip.linkCareContext,
         {
@@ -191,10 +256,19 @@ export class HipService {
         },
         headers,
       );
-      logger.info('HIP: Care context linked (HIP-initiated)', { abhaNumber, hasLinkToken: !!params.linkToken });
+      logger.info('HIP: [link] ← link/carecontext submitted to ABDM (awaiting on_carecontext callback)', {
+        abhaNumber: maskAbha(abhaNumber),
+        abhaAddress: params.abhaAddress,
+        hasLinkToken: !!params.linkToken,
+      });
       return res;
     } catch (error: any) {
-      logger.error('HIP: Failed to link care context', error);
+      logger.error('HIP: [link] ✗ link/carecontext failed', {
+        abhaNumber: maskAbha(abhaNumber),
+        abhaAddress: params.abhaAddress,
+        hasLinkToken: !!params.linkToken,
+        ...describeAbdmError(error),
+      });
       throw new AppError(error.message || 'Failed to link care context', error.response?.status || 500);
     }
   }
@@ -209,6 +283,15 @@ export class HipService {
     patientReference: string;
     hiTypes: string[];
   }) {
+    logger.info('HIP: [link] → link/context/notify request', {
+      endpoint: abdmConfig.endpoints.hip.linkContextNotify,
+      hipId: abdmConfig.hip.id,
+      abhaAddress: params.abhaAddress,
+      patientReference: params.patientReference,
+      careContextReference: params.careContextReference,
+      hiTypes: params.hiTypes,
+    });
+
     try {
       const res = await abdmClient.post(
         abdmConfig.endpoints.hip.linkContextNotify,
@@ -228,10 +311,17 @@ export class HipService {
         },
         { 'X-HIP-ID': abdmConfig.hip.id },
       );
-      logger.info('HIP: Link context notify sent');
+      logger.info('HIP: [link] ← link/context/notify sent to ABDM (awaiting links/context/on-notify callback)', {
+        abhaAddress: params.abhaAddress,
+        careContextReference: params.careContextReference,
+      });
       return res;
     } catch (error: any) {
-      logger.error('HIP: Failed to send link context notify', error);
+      logger.error('HIP: [link] ✗ link/context/notify failed', {
+        abhaAddress: params.abhaAddress,
+        careContextReference: params.careContextReference,
+        ...describeAbdmError(error),
+      });
       throw new AppError(error.message || 'Failed to notify link context', error.response?.status || 500);
     }
   }
@@ -524,6 +614,11 @@ export class HipService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   async addCareContexts(patientId: string, careContexts: Array<{ encounterId: string; display: string }>) {
+    logger.info('HIP: [link] addCareContexts called', {
+      patientId,
+      count: careContexts?.length || 0,
+      encounterIds: careContexts?.map((c) => c.encounterId),
+    });
     try {
       const patient = await prisma.patient.findUnique({
         where: { id: patientId },
@@ -582,6 +677,16 @@ export class HipService {
       const gender      = patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
       const yearOfBirth = patient.dob ? new Date(patient.dob).getFullYear() : 0;
 
+      logger.info('HIP: [link] resolved ABHA identifiers for linking', {
+        patientId,
+        abhaNumber: maskAbha(abhaNumber),
+        abhaAddress: abhaAddress || '(missing — linking will be skipped)',
+        hasRealAddress: !!abhaAddress,
+        gender,
+        yearOfBirth,
+        contextsToLink: createdContexts.length,
+      });
+
       // Guard: without a real ABHA address we cannot link to ABDM. Save locally
       // but tell the caller exactly what to fix instead of silently failing.
       if (!abhaAddress) {
@@ -603,9 +708,9 @@ export class HipService {
           logger.info('HIP: [async] generate-token sent — awaiting ABDM callback', { abhaAddress });
         } catch (e: any) {
           logger.warn('HIP: [async] generate-token failed', {
-            message: e?.message,
-            status: e?.response?.status,
-            abdmError: JSON.stringify(e?.response?.data)?.substring(0, 300),
+            abhaAddress,
+            patientId,
+            ...describeAbdmError(e),
           });
         }
       });

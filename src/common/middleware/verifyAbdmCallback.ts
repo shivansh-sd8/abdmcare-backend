@@ -113,15 +113,25 @@ function verifyJwt(token: string, publicKey: crypto.KeyObject): any {
     }
   }
 
-  // Validate audience — accept our HIP or HIU IDs
+  // Validate audience — accept our HIP/HIU/CM IDs plus the ABDM gateway's
+  // default Keycloak audience. ABDM sandbox gateway tokens are issued with
+  // aud: "account" (Keycloak's default), NOT our HIP/HIU id — so requiring only
+  // our ids rejected EVERY inbound callback with 401 (verified in prod logs:
+  // `JWT audience mismatch: "account"` on /patient/care-context/discover, which
+  // silently broke user-initiated linking). The token's authenticity is already
+  // guaranteed by the JWKS signature + issuer checks above, so trusting the
+  // gateway's standard audience is safe.
   if (payload.aud) {
     const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-    const acceptableAuds = [abdmConfig.hip.id, abdmConfig.hiu.id, abdmConfig.cmId].filter(Boolean);
-    if (acceptableAuds.length > 0) {
-      const hasMatch = auds.some((a: string) => acceptableAuds.includes(a));
-      if (!hasMatch) {
-        throw new Error(`JWT audience mismatch: ${JSON.stringify(payload.aud)}`);
-      }
+    const acceptableAuds = [
+      abdmConfig.hip.id,
+      abdmConfig.hiu.id,
+      abdmConfig.cmId,
+      'account', // ABDM/Keycloak gateway default audience
+    ].filter(Boolean);
+    const hasMatch = auds.some((a: string) => acceptableAuds.includes(a));
+    if (!hasMatch) {
+      throw new Error(`JWT audience mismatch: ${JSON.stringify(payload.aud)} (acceptable: ${acceptableAuds.join(',')})`);
     }
   }
 
