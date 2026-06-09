@@ -121,12 +121,17 @@ export const linkV3Routes = Router();
 // ABDM sends: POST /api/v3/link/on_carecontext (HIP-initiated link confirmation)
 linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
   const payload = req.body;
-  logger.info('V3 callback: on_carecontext received', { requestId: payload?.requestId });
+  logger.info('V3 callback: on_carecontext received', {
+    requestId: payload?.requestId,
+    status: payload?.acknowledgement?.status,
+    error: payload?.error,
+  });
 
   const acknowledgement = payload?.acknowledgement;
   if (acknowledgement?.status === 'SUCCESS') {
     // Mark matching care contexts as LINKED
     const patient = payload?.patient;
+    const linkedRefs: string[] = [];
     if (patient?.careContexts?.length) {
       for (const cc of patient.careContexts) {
         try {
@@ -134,12 +139,50 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
             where: { careContextId: cc.referenceNumber },
             data: { linkStatus: 'LINKED' },
           });
+          linkedRefs.push(cc.referenceNumber);
         } catch (err: any) {
           logger.warn('on_carecontext: failed to update care context status', { ref: cc.referenceNumber, error: err.message });
         }
       }
     }
-    logger.info('V3 callback: Care context link confirmed by ABDM');
+    logger.info('V3 callback: Care context link confirmed by ABDM', { linkedRefs });
+
+    // CORRECT ORDERING: now that a link exists, notify the CM about the newly
+    // linked care contexts. Doing this earlier (e.g. from the frontend right
+    // after addCareContexts) caused "ABDM-1006: No links found for the patient
+    // in the given HIP" because no link existed yet. Fire-and-forget so we
+    // still ACK ABDM within the callback timeout.
+    if (linkedRefs.length) {
+      setImmediate(async () => {
+        try {
+          const ctx = await prisma.careContext.findFirst({
+            where: { careContextId: linkedRefs[0] },
+            include: { patient: { include: { abhaRecord: true } } },
+          });
+          const p = ctx?.patient;
+          const abhaAddress = p?.abhaRecord?.abhaAddress || p?.abhaAddress || '';
+          const patientReference = p?.uhid || ctx?.patientId || '';
+          if (!abhaAddress || !patientReference) {
+            logger.warn('on_carecontext: cannot send link/context/notify — missing abhaAddress/patientReference', {
+              linkedRefs, hasAddress: !!abhaAddress, hasPatientRef: !!patientReference,
+            });
+            return;
+          }
+          const hipService = (await import('../hip/hip.service')).default;
+          for (const ref of linkedRefs) {
+            await hipService.linkContextNotify({
+              abhaAddress,
+              careContextReference: ref,
+              patientReference,
+              hiTypes: ['OPConsultation', 'Prescription', 'DiagnosticReport'],
+            });
+          }
+          logger.info('on_carecontext: link/context/notify sent for linked contexts', { count: linkedRefs.length });
+        } catch (e: any) {
+          logger.warn('on_carecontext: link/context/notify failed', { message: e?.message });
+        }
+      });
+    }
   } else {
     logger.warn('V3 callback: Care context link failed', { error: payload?.error });
   }
@@ -212,11 +255,23 @@ hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(asy
   logger.info('V3 callback: on-generate-token received', {
     requestId:  payload?.requestId,
     abhaAddress,
+    abhaNumber,
     hasToken:   !!linkToken,
+    error:      payload?.error,
   });
 
   if (!linkToken) {
-    logger.warn('on-generate-token: no link token in payload', { keys: Object.keys(payload || {}) });
+    // Surface the ABDM error verbatim — this is the authoritative reason
+    // generate-token produced no link token (e.g. invalid ABHA address,
+    // PHR not found). Without it the failure is invisible and linking
+    // silently stalls in PENDING.
+    logger.warn('on-generate-token: no link token in payload — ABDM returned an error', {
+      keys: Object.keys(payload || {}),
+      abhaAddress,
+      abhaNumber,
+      error: payload?.error,
+      response: payload?.response,
+    });
     res.status(202).json({ message: 'No token found' });
     return;
   }

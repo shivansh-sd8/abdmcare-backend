@@ -672,7 +672,15 @@ export class HipService {
       // looks like to the patient). So only use a stored value that is actually
       // an address (contains "@").
       const storedAddress = patient.abhaRecord?.abhaAddress || patient.abhaAddress || '';
-      const abhaAddress = storedAddress.includes('@') ? storedAddress : '';
+      // A real PHR/ABHA address has a non-numeric username (e.g. "name@sbx").
+      // The auto-generated fallback "<14-digit-number>@sbx" is NOT a registered
+      // PHR address — ABDM's generate-token responds via on-generate-token with
+      // an error and no link token, so linking silently stalls in PENDING
+      // (verified in prod logs). Reject the number-only form here so the caller
+      // gets a clear, actionable message instead of a silent ABDM failure.
+      const localPart = storedAddress.split('@')[0] || '';
+      const isRealAbhaAddress = storedAddress.includes('@') && !/^\d+$/.test(localPart);
+      const abhaAddress = isRealAbhaAddress ? storedAddress : '';
       const patientName = `${patient.firstName} ${patient.lastName}`.trim();
       const gender      = patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
       const yearOfBirth = patient.dob ? new Date(patient.dob).getFullYear() : 0;
