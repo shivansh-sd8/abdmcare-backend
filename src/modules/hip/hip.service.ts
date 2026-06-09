@@ -38,6 +38,29 @@ function sanitizeDisplay(value?: string): string {
   return cleaned || 'Visit';
 }
 
+/**
+ * ABDM issues ONE active link token per ABHA. The token (a JWT) arrives via the
+ * on-generate-token callback and is stored on the patient's care contexts. While
+ * it is still valid, calling generate-token again returns "ABDM-1092: Duplicate
+ * Link token request" — so further care contexts must be linked by REUSING the
+ * active token, not by regenerating. Returns true only when the JWT carries an
+ * `exp` claim that has already passed, so a dead token triggers a fresh
+ * generate-token; anything unparseable is treated as still usable (regenerating
+ * would just hit ABDM-1092 anyway).
+ */
+function isLinkTokenExpired(token?: string | null): boolean {
+  if (!token) return true;
+  try {
+    const part = token.split('.')[1];
+    if (!part) return false;
+    const payload = JSON.parse(Buffer.from(part, 'base64').toString('utf8'));
+    if (!payload?.exp) return false;
+    return Date.now() >= payload.exp * 1000 - 5000; // 5s clock skew
+  } catch {
+    return false;
+  }
+}
+
 /** Extract safe, non-circular fields from an Axios/HTTP error for logging. */
 function describeAbdmError(error: any): Record<string, unknown> {
   let abdmError: string | undefined;
@@ -419,7 +442,7 @@ export class HipService {
         const errorResp = {
           transactionId: request.transactionId,
           error: { code: 1000, message: 'No verified identifier provided' },
-          resp: { requestId: request.requestId },
+          response: { requestId: request.requestId },
         };
         await abdmClient.post(abdmConfig.endpoints.hip.onDiscover, errorResp);
         return errorResp;
@@ -450,7 +473,7 @@ export class HipService {
         const errorResp = {
           transactionId: request.transactionId,
           error: { code: 1001, message: 'Patient not found' },
-          resp: { requestId: request.requestId },
+          response: { requestId: request.requestId },
         };
         await abdmClient.post(abdmConfig.endpoints.hip.onDiscover, errorResp);
         return errorResp;
@@ -465,10 +488,14 @@ export class HipService {
         transactionId: request.transactionId,
         patient: [{
           referenceNumber: patient.id,
-          display: `${patient.firstName} ${patient.lastName}`,
-          careContexts,
+          display: sanitizeDisplay(`${patient.firstName} ${patient.lastName}`),
+          careContexts: careContexts.map((cc) => ({ ...cc, display: sanitizeDisplay(cc.display) })),
           matchedBy: [patientIdentifier.type],
         }],
+        // ABDM requires `response.requestId` (echoing the inbound REQUEST-ID) on
+        // every on-* callback. Without it ABDM rejects on-discover with
+        // "ABDM-9999: Response cannot be null or empty".
+        response: { requestId: request.requestId },
       };
 
       await abdmClient.post(abdmConfig.endpoints.hip.onDiscover, response);
@@ -483,7 +510,7 @@ export class HipService {
       logger.info('HIP: on-discover sent', { patientId: patient.id, count: careContexts.length });
       return response;
     } catch (error: any) {
-      logger.error('HIP: Failed to discover care contexts', error);
+      logger.error('HIP: Failed to discover care contexts', describeAbdmError(error));
       throw new AppError(error.message || 'Failed to discover care contexts', error.statusCode || 500);
     }
   }
@@ -511,6 +538,8 @@ export class HipService {
             communicationExpiry: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
           },
         },
+        // ABDM requires `response.requestId` on every on-* callback (see on-discover).
+        response: { requestId: request.requestId },
       };
 
       await abdmClient.post(abdmConfig.endpoints.hip.onLinkInit, response);
@@ -732,6 +761,76 @@ export class HipService {
           success: true,
           data: createdContexts,
           message: `${createdContexts.length} care context(s) saved locally, but ABDM linking was skipped: this patient has no ABHA address (e.g. name@sbx). Capture it via ABHA Management → Verify/Link, then link care contexts again.`,
+        };
+      }
+
+      // Reuse an existing active link token if one is present. ABDM allows only
+      // ONE active link token per ABHA: a prior on-generate-token callback stores
+      // the token on the patient's care contexts, and while it is still valid a
+      // fresh generate-token returns "ABDM-1092: Duplicate Link token request".
+      // So if a valid token exists, link the new (and any other PENDING) contexts
+      // directly with it and skip generate-token entirely.
+      const tokenCtx = await prisma.careContext.findFirst({
+        where: { patientId: patient.id, linkToken: { not: null } },
+        orderBy: { updatedAt: 'desc' },
+        select: { linkToken: true },
+      });
+      const reusableToken = !isLinkTokenExpired(tokenCtx?.linkToken) ? tokenCtx?.linkToken : null;
+
+      if (reusableToken) {
+        // Propagate the token to the freshly created PENDING contexts so the
+        // on_carecontext callback can resolve them after ABDM confirms.
+        await prisma.careContext.updateMany({
+          where: { patientId: patient.id, linkStatus: 'PENDING', linkToken: null },
+          data: { linkToken: reusableToken },
+        });
+
+        const pendingContexts = await prisma.careContext.findMany({
+          where: { patientId: patient.id, linkStatus: 'PENDING' },
+        });
+
+        setImmediate(async () => {
+          try {
+            logger.info('HIP: [link] reusing existing active link token — linking directly (skipping generate-token)', {
+              patientId,
+              abhaNumber: maskAbha(abhaNumber),
+              contextsToLink: pendingContexts.length,
+            });
+            await this.hipInitiatedLink({
+              abhaNumber,
+              abhaAddress,
+              linkToken: reusableToken,
+              patient: [{
+                referenceNumber: patient.uhid || patient.id,
+                display: patientName,
+                careContexts: pendingContexts.map((cc) => ({
+                  referenceNumber: cc.careContextId,
+                  display: cc.display,
+                })),
+                hiType: 'OPConsultation',
+                count: pendingContexts.length,
+              }],
+            });
+          } catch (e: any) {
+            // The reused token was rejected (e.g. expired/consumed). Clear it from
+            // the PENDING contexts so the next link attempt regenerates a fresh
+            // token instead of looping on the same dead one.
+            try {
+              await prisma.careContext.updateMany({
+                where: { patientId: patient.id, linkStatus: 'PENDING' },
+                data: { linkToken: null },
+              });
+            } catch { /* ignore */ }
+            logger.warn('HIP: [link] direct link with reused token failed — cleared token for regeneration on next attempt', {
+              patientId, abhaAddress, ...describeAbdmError(e),
+            });
+          }
+        });
+
+        return {
+          success: true,
+          data: createdContexts,
+          message: `${createdContexts.length} care context(s) registered — linking to ABDM with the existing active token (linkStatus will change to LINKED when ABDM confirms)`,
         };
       }
 

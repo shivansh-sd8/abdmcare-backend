@@ -12,15 +12,31 @@ const logFormat = winston.format.combine(
   winston.format.json()
 );
 
-// Circular-safe stringify. Logging an object with a circular reference (e.g. an
-// axios error carrying its ClientRequest/IncomingMessage) would otherwise make
-// JSON.stringify THROW inside the printf template, and that exception bubbles up
-// and 500s the in-flight request (observed on /care-context/discover). Replacing
-// circular refs with "[Circular]" keeps logging side-effect-free.
+// Keys whose values are huge/circular Node internals (typically from a raw axios
+// error accidentally logged as metadata). Dropping them keeps logs readable and,
+// crucially, prevents the bearer token inside axios `config`/`request` from
+// leaking into plaintext logs.
+const NOISY_KEYS = new Set([
+  'config', 'request', 'socket', 'agent', 'httpsAgent', 'httpAgent',
+  'sockets', 'freeSockets', '_sessionCache', 'secureContext', '_httpMessage',
+  '_redirectable', '_currentRequest', 'res', 'req',
+]);
+// Header/field names that must never be written to logs.
+const SECRET_KEYS = new Set(['authorization', 'x-token', 'x-link-token', 'cookie', 'password', 'clientsecret', 'client_secret']);
+
+// Circular-safe + redacting stringify. Logging an object with a circular
+// reference (e.g. an axios error carrying its ClientRequest/IncomingMessage)
+// would otherwise make JSON.stringify THROW inside the printf template, and that
+// exception bubbles up and 500s the in-flight request (observed on
+// /care-context/discover). We replace circular refs with "[Circular]", drop
+// noisy Node internals, and redact secrets — keeping logging safe and useful
+// (e.g. an axios error's `response.data` survives while its token does not).
 const safeStringify = (obj: unknown): string => {
   const seen = new WeakSet();
   try {
-    return JSON.stringify(obj, (_key, value) => {
+    return JSON.stringify(obj, (key, value) => {
+      if (SECRET_KEYS.has(key.toLowerCase())) return '[redacted]';
+      if (NOISY_KEYS.has(key)) return '[omitted]';
       if (typeof value === 'object' && value !== null) {
         if (seen.has(value)) return '[Circular]';
         seen.add(value);
