@@ -20,6 +20,24 @@ function maskAbha(value?: string): string {
   return `${digits.slice(0, 2)}******${digits.slice(-4)}`;
 }
 
+/**
+ * Normalize a care-context "display" string to what ABDM accepts.
+ * ABDM's link/carecontext rejects non-ASCII / special characters in `display`
+ * with "ABDM-9999: Invalid display" — e.g. the em-dash "—" (U+2014) the UI puts
+ * in "OPD Visit — 09 Jun 2026". We map unicode dashes to a plain hyphen, drop any
+ * remaining non-printable-ASCII, collapse whitespace, and cap the length. Applied
+ * at the ABDM boundary so any caller's display value is safe regardless of source.
+ */
+function sanitizeDisplay(value?: string): string {
+  const cleaned = (value || '')
+    .replace(/[\u2010-\u2015]/g, '-') // unicode hyphens/dashes → ASCII hyphen
+    .replace(/[^\x20-\x7E]/g, '')      // strip non-printable / non-ASCII
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+  return cleaned || 'Visit';
+}
+
 /** Extract safe, non-circular fields from an Axios/HTTP error for logging. */
 function describeAbdmError(error: any): Record<string, unknown> {
   let abdmError: string | undefined;
@@ -255,12 +273,24 @@ export class HipService {
         abhaAddress: params.abhaAddress,
       });
 
+      // Sanitize every display value to ABDM's accepted charset before sending —
+      // a non-ASCII char anywhere (patient or care-context display) triggers
+      // "ABDM-9999: Invalid display" and rejects the whole link request.
+      const sanitizedPatient = params.patient.map((p) => ({
+        ...p,
+        display: sanitizeDisplay(p.display),
+        careContexts: p.careContexts.map((cc) => ({
+          ...cc,
+          display: sanitizeDisplay(cc.display),
+        })),
+      }));
+
       const res = await abdmClient.post(
         abdmConfig.endpoints.hip.linkCareContext,
         {
           abhaNumber,
           abhaAddress: params.abhaAddress,
-          patient: params.patient,
+          patient: sanitizedPatient,
         },
         headers,
       );
