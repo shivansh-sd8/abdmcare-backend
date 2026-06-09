@@ -740,19 +740,43 @@ export class HipService {
         logger.debug('Consent hiTypes validated', { types: consentHiTypes });
       }
 
-      // Validate requested date range falls within consent's date range
+      // CLAMP (don't reject) the requested range to the consent-permitted range.
+      // The HIU often requests a window that overhangs the consent boundaries;
+      // ABDM expects the HIP to share only data within the consented period, so
+      // we narrow the effective range to the intersection rather than failing the
+      // whole request with a 403 over a boundary mismatch.
       const consentDateRange = consent.dateRange as { from?: string; to?: string } | null;
-      if (consentDateRange && request.hiRequest.dateRange) {
+      let effectiveDateRange = request.hiRequest.dateRange;
+      if (consentDateRange) {
         const consentFrom = consentDateRange.from ? new Date(consentDateRange.from) : null;
         const consentTo = consentDateRange.to ? new Date(consentDateRange.to) : null;
-        const reqFrom = request.hiRequest.dateRange.from ? new Date(request.hiRequest.dateRange.from) : null;
-        const reqTo = request.hiRequest.dateRange.to ? new Date(request.hiRequest.dateRange.to) : null;
+        const reqFrom = request.hiRequest.dateRange?.from ? new Date(request.hiRequest.dateRange.from) : null;
+        const reqTo = request.hiRequest.dateRange?.to ? new Date(request.hiRequest.dateRange.to) : null;
 
-        if (consentFrom && reqFrom && reqFrom < consentFrom) {
-          throw new AppError('Requested date range starts before consent allows', 403);
-        }
-        if (consentTo && reqTo && reqTo > consentTo) {
-          throw new AppError('Requested date range ends after consent allows', 403);
+        // Effective start = the later of (consentFrom, reqFrom); end = the earlier of (consentTo, reqTo).
+        const from = consentFrom && (!reqFrom || reqFrom < consentFrom) ? consentFrom : reqFrom;
+        const to = consentTo && (!reqTo || reqTo > consentTo) ? consentTo : reqTo;
+
+        effectiveDateRange = {
+          from: (from ?? reqFrom)?.toISOString() ?? request.hiRequest.dateRange?.from,
+          to: (to ?? reqTo)?.toISOString() ?? request.hiRequest.dateRange?.to,
+        };
+
+        if (from && to && from > to) {
+          logger.warn('HIP: requested range does not overlap consent range', {
+            transactionId: request.transactionId,
+            consentRange: consentDateRange,
+            requestedRange: request.hiRequest.dateRange,
+          });
+        } else if (
+          effectiveDateRange.from !== request.hiRequest.dateRange?.from ||
+          effectiveDateRange.to !== request.hiRequest.dateRange?.to
+        ) {
+          logger.info('HIP: clamped requested date range to consent window', {
+            transactionId: request.transactionId,
+            requestedRange: request.hiRequest.dateRange,
+            effectiveRange: effectiveDateRange,
+          });
         }
       }
 
@@ -763,7 +787,7 @@ export class HipService {
         consentAbdmId: request.hiRequest.consent.id,
         consentPatientId: consent.patientId,
         dataPushUrl: request.hiRequest.dataPushUrl,
-        dateRange: request.hiRequest.dateRange,
+        dateRange: effectiveDateRange,
         keyMaterial: request.hiRequest.keyMaterial,
       };
 
