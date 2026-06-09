@@ -65,11 +65,57 @@ export const NRCES_PROFILES = {
   MedicationRequest: `${SYSTEM.NRCES_BASE}/MedicationRequest`,
   DiagnosticReport: `${SYSTEM.NRCES_BASE}/DiagnosticReport`,
   Composition: `${SYSTEM.NRCES_BASE}/Composition`,
+  Immunization: `${SYSTEM.NRCES_BASE}/Immunization`,
   OPConsultRecord: `${SYSTEM.NRCES_BASE}/OPConsultRecord`,
   DischargeSummaryRecord: `${SYSTEM.NRCES_BASE}/DischargeSummaryRecord`,
   PrescriptionRecord: `${SYSTEM.NRCES_BASE}/PrescriptionRecord`,
   DiagnosticReportRecord: `${SYSTEM.NRCES_BASE}/DiagnosticReportRecord`,
   HealthDocumentRecord: `${SYSTEM.NRCES_BASE}/HealthDocumentRecord`,
+  ImmunizationRecord: `${SYSTEM.NRCES_BASE}/ImmunizationRecord`,
+  WellnessRecord: `${SYSTEM.NRCES_BASE}/WellnessRecord`,
+} as const;
+
+// ─── M2 Composition.type codes (per ABDM Health Record Formats) ────────────
+// Each ABDM record type carries a specific Composition.type coding so the CM /
+// HIU can identify the bundle without parsing entries.
+export const COMPOSITION_TYPE = {
+  OPConsultRecord: {
+    code: '371530004',
+    display: 'Clinical consultation report',
+    system: SYSTEM.SNOMED,
+  },
+  DischargeSummaryRecord: {
+    code: '373942005',
+    display: 'Discharge summary',
+    system: SYSTEM.SNOMED,
+  },
+  PrescriptionRecord: {
+    code: '440545006',
+    display: 'Prescription record',
+    system: SYSTEM.SNOMED,
+  },
+  DiagnosticReportRecord: {
+    code: '721981007',
+    display: 'Diagnostic studies report',
+    system: SYSTEM.SNOMED,
+  },
+  HealthDocumentRecord: {
+    code: '419891008',
+    display: 'Record artifact',
+    system: SYSTEM.SNOMED,
+  },
+  ImmunizationRecord: {
+    code: '41000179103',
+    display: 'Immunization record',
+    system: SYSTEM.SNOMED,
+  },
+  WellnessRecord: {
+    // No SNOMED for "wellness record"; ABDM allows free-text Composition.type
+    // when the snomed concept is not available.
+    code: 'WELLNESSREC',
+    display: 'Wellness record',
+    system: 'http://nrces.in/CodeSystem/abdm-record-types',
+  },
 } as const;
 
 // ─── LOINC codes for Vitals ──────────────────────────────────────────────────

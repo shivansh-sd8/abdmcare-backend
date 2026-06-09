@@ -130,6 +130,9 @@ export const abdmConfig = {
       consentOnNotify: `${GATEWAY_BASE}/api/hiecm/consent/v3/request/hip/on-notify`,
       healthInfoOnRequest: `${GATEWAY_BASE}/api/hiecm/data-flow/v3/health-information/hip/on-request`,
       dataFlowNotify: `${GATEWAY_BASE}/api/hiecm/data-flow/v3/health-information/notify`,
+      // Patient lifecycle ack (DEACTIVATED/DELETED → HIP must wipe; spec: ndhm-hip
+      // /v0.5/patients/status/on-notify; V3 path mirrors the consent/hip pattern).
+      patientStatusOnNotify: `${GATEWAY_BASE}/api/hiecm/patients/v3/status/on-notify`,
     },
 
     // ┌─────────────────────────────────────────────────────────────────────┐

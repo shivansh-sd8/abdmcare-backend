@@ -8,11 +8,14 @@ import { buildConditions } from './resources/condition';
 import { buildMedicationRequests } from './resources/medication-request';
 import { buildDiagnosticReports } from './resources/diagnostic-report';
 import { buildAllergyIntolerances } from './resources/allergy-intolerance';
+import { buildImmunizations, ImmunizationInput } from './resources/immunization';
 import { buildOPConsultBundle } from './profiles/op-consult-record';
 import { buildDischargeSummaryBundle } from './profiles/discharge-summary-record';
 import { buildPrescriptionBundle } from './profiles/prescription-record';
 import { buildDiagnosticReportBundle } from './profiles/diagnostic-report-record';
 import { buildHealthDocumentBundle } from './profiles/health-document-record';
+import { buildImmunizationRecordBundle } from './profiles/immunization-record';
+import { buildWellnessRecordBundle } from './profiles/wellness-record';
 
 // ─── Input types matching Prisma models ──────────────────────────────────────
 
@@ -109,18 +112,42 @@ export interface FHIRBundleInput {
     orderedAt: Date;
     reportedAt?: Date | null;
   }>;
+  /** Vaccination doses administered. Drives the ImmunizationRecord profile. */
+  immunizations?: ImmunizationInput[];
   /** Force a specific profile instead of auto-detecting from encounter type */
-  profileOverride?: 'OPConsultRecord' | 'DischargeSummaryRecord' | 'PrescriptionRecord' | 'DiagnosticReportRecord' | 'HealthDocumentRecord';
+  profileOverride?: ProfileName;
 }
 
 // ─── Profile selection ───────────────────────────────────────────────────────
 
-type ProfileName = 'OPConsultRecord' | 'DischargeSummaryRecord' | 'PrescriptionRecord' | 'DiagnosticReportRecord' | 'HealthDocumentRecord';
+export type ProfileName =
+  | 'OPConsultRecord'
+  | 'DischargeSummaryRecord'
+  | 'PrescriptionRecord'
+  | 'DiagnosticReportRecord'
+  | 'HealthDocumentRecord'
+  | 'ImmunizationRecord'
+  | 'WellnessRecord';
 
 function selectProfile(input: FHIRBundleInput): ProfileName {
   if (input.profileOverride) return input.profileOverride;
 
   const enc = input.encounter;
+
+  // Immunization-only encounters (vaccination camps, well-baby clinic) — when
+  // we have at least one dose AND no clinical diagnosis or investigation, that
+  // is the canonical ImmunizationRecord.
+  const hasImmunizations = (input.immunizations?.length || 0) > 0;
+  const hasClinicalContent = !!(
+    input.encounter.finalDiagnosis ||
+    input.encounter.diagnosis ||
+    (input.investigations?.length || 0) > 0 ||
+    (input.prescriptions?.length || 0) > 0 ||
+    (input.encounterPrescriptions?.length || 0) > 0
+  );
+  if (hasImmunizations && !hasClinicalContent) {
+    return 'ImmunizationRecord';
+  }
 
   if (enc.type === 'IPD' && enc.admissionId) {
     return 'DischargeSummaryRecord';
@@ -204,6 +231,13 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     encounterRef,
   );
 
+  const immunizationResults = buildImmunizations(
+    input.immunizations || [],
+    patientRef,
+    practitionerRef,
+    encounterRef,
+  );
+
   // Prepare bundle entries
   const patientEntry: BundleEntry = { fullUrl: urnUUID(patientResult.uuid), resource: patientResult.resource };
   const practitionerEntry: BundleEntry = { fullUrl: urnUUID(practitionerResult.uuid), resource: practitionerResult.resource };
@@ -215,6 +249,7 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
   const medicationEntries: BundleEntry[] = medicationResults.map(m => ({ fullUrl: urnUUID(m.uuid), resource: m.resource }));
   const diagnosticEntries: BundleEntry[] = diagnosticResult.reports.map(d => ({ fullUrl: urnUUID(d.uuid), resource: d.resource }));
   const allergyEntries: BundleEntry[] = allergyResults.map(a => ({ fullUrl: urnUUID(a.uuid), resource: a.resource }));
+  const immunizationEntries: BundleEntry[] = immunizationResults.map(i => ({ fullUrl: urnUUID(i.uuid), resource: i.resource }));
 
   const commonPayload = {
     ...input,
@@ -227,6 +262,7 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     medicationEntries,
     diagnosticEntries,
     allergyEntries,
+    immunizationEntries,
     patientUUID: patientResult.uuid,
     practitionerUUID: practitionerResult.uuid,
     organizationUUID: organizationResult.uuid,
@@ -236,6 +272,7 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     medicationUUIDs: medicationResults.map(m => m.uuid),
     diagnosticUUIDs: diagnosticResult.reports.map(d => d.uuid),
     allergyUUIDs: allergyResults.map(a => a.uuid),
+    immunizationUUIDs: immunizationResults.map(i => i.uuid),
   };
 
   const profile = selectProfile(input);
@@ -251,6 +288,10 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
       return buildDiagnosticReportBundle(commonPayload);
     case 'HealthDocumentRecord':
       return buildHealthDocumentBundle(commonPayload);
+    case 'ImmunizationRecord':
+      return buildImmunizationRecordBundle(commonPayload);
+    case 'WellnessRecord':
+      return buildWellnessRecordBundle(commonPayload);
   }
 }
 

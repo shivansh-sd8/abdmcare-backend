@@ -53,6 +53,7 @@ model Patient {
   admissions              Admission[]
   documents               Document[]
   externalHealthRecords   ExternalHealthRecord[]
+  immunizations           Immunization[]
   
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
@@ -87,6 +88,9 @@ model AbhaRecord {
   mobileLinked    Boolean   @default(false)
   
   kycStatus       KycStatus @default(PENDING)
+  // ABDM lifecycle status from /v0.5/patients/status/notify (M2 deactivate/opt-out)
+  profileStatus   AbhaProfileStatus @default(ACTIVE)
+  deactivatedAt   DateTime?
   profileData     Json?
   
   patient         Patient?  @relation(fields: [patientId], references: [id], onDelete: Cascade)
@@ -95,6 +99,7 @@ model AbhaRecord {
   updatedAt       DateTime  @updatedAt
   
   @@index([abhaNumber])
+  @@index([profileStatus])
   @@map("abha_records")
 }
 
@@ -320,9 +325,17 @@ model Consent {
   grantedAt       DateTime?
   expiresAt       DateTime?
   revokedAt       DateTime?
+  // Set by the consent-expiry sweeper / on-notify revoke handlers when the
+  // associated ExternalHealthRecord and ConsentKeyPair rows have been wiped.
+  purgedAt        DateTime?
   
   abdmRequestId   String?
   abdmConsentId   String?
+  // Full consent artefact body delivered via /api/v3/hiu/consents/on-fetch.
+  // Persisted so the HIU can re-validate scope (hiTypes, dateRange, expiry,
+  // signatures) at read-time before exposing data to clinicians.
+  artefactBody    Json?
+  artefactFetchedAt DateTime?
   
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
@@ -331,6 +344,7 @@ model Consent {
   @@index([status])
   @@index([consentId])
   @@index([abdmConsentId])
+  @@index([expiresAt])
   @@map("consents")
 }
 
@@ -829,17 +843,28 @@ enum ConsentStatus {
   REVOKED
 }
 
+// ABDM ConsentInformationUse purpose codes (V3 spec § Consent Purpose)
+// Mapped to ABDM gateway codes inside the consent service.
 enum ConsentPurpose {
-  CARE_MANAGEMENT
-  BREAK_THE_GLASS
-  PUBLIC_HEALTH
-  DISEASE_SPECIFIC_HEALTHCARE_RESEARCH
+  CARE_MANAGEMENT                       // CAREMGT
+  BREAK_THE_GLASS                       // BTG
+  PUBLIC_HEALTH                         // PUBHLTH
+  DISEASE_SPECIFIC_HEALTHCARE_RESEARCH  // DSRCH
+  HEALTHCARE_PAYMENT                    // HPAYMT
+  SELF_REQUESTED                        // PATRQT
+  HEALTHCARE_QUALITY_AUDIT              // HQUALITY (optional)
 }
 
 enum KycStatus {
   PENDING
   VERIFIED
   FAILED
+}
+
+enum AbhaProfileStatus {
+  ACTIVE
+  DEACTIVATED
+  DELETED
 }
 
 enum UserType {
@@ -1374,10 +1399,63 @@ model ConsentKeyPair {
   @@map("consent_key_pairs")
 }
 
+// Vaccination / Immunization rows. Drives the M2 ImmunizationRecord FHIR profile
+// (Composition.type SNOMED 41000179103). One row = one administered dose.
+model Immunization {
+  id              String    @id @default(uuid())
+
+  patientId       String
+  patient         Patient   @relation(fields: [patientId], references: [id])
+
+  // Optional encounter that the dose was administered at (used to attach this
+  // record to a CareContext during M2 linking).
+  encounterId     String?
+
+  // Vaccine identification
+  vaccineName     String
+  vaccineCode     String?   // SNOMED-CT or HL7 v3 code (e.g. ChAdOx1-S 871751008)
+  manufacturer    String?
+  lotNumber       String?
+  expiryDate      DateTime?
+
+  // Administration
+  doseNumber      Int?
+  totalDoses      Int?
+  site            String?   // SNOMED body-site code or text
+  route           String?   // SNOMED route code or text (IM, SC, PO …)
+  doseQuantity   Decimal?  @db.Decimal(8, 3)
+  doseUnit        String?   // mL by default
+  administeredAt  DateTime
+  administeredBy  String?   // doctor/nurse user id
+
+  // Optional clinical context
+  reason          String?
+  notes           String?
+
+  hospitalId      String?
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([patientId])
+  @@index([encounterId])
+  @@index([administeredAt])
+  @@map("immunizations")
+}
+
 model ExternalHealthRecord {
   id            String   @id @default(uuid())
   patientId     String
+  // FK to the Consent.consentId (not row id) under which this data was pulled.
+  // Required so the consent-revoke / consent-expire cascade can deterministically
+  // wipe records that are no longer authorised. Not nullable for new rows; we
+  // keep it as nullable on the column for backwards compatibility with already
+  // ingested data, but the HIU pipeline always sets it.
   consentId     String?
+  // Hospital that requested the consent. Used for multi-tenant scoping so
+  // Hospital A cannot read records pulled by Hospital B even if the patient
+  // is registered at both.
+  hospitalId    String?
   sourceHipId   String?
   sourceHipName String?
   recordType    String
@@ -1388,6 +1466,7 @@ model ExternalHealthRecord {
   patient       Patient  @relation(fields: [patientId], references: [id])
   @@index([patientId])
   @@index([consentId])
+  @@index([hospitalId])
   @@map("external_health_records")
 }
 

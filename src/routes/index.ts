@@ -20,6 +20,7 @@ import ipdRoutes from '../modules/ipd/ipd.routes';
 import pharmacyRoutes from '../modules/pharmacy/pharmacy.routes';
 import abdmDiagnosticsRoutes from './abdmDiagnosticsRoutes';
 import documentRoutes from '../modules/document/document.routes';
+import immunizationRoutes from './immunizationRoutes';
 
 const router = Router();
 
@@ -44,5 +45,6 @@ router.use('/ipd', ipdRoutes);
 router.use('/pharmacy', pharmacyRoutes);
 router.use('/abdm/diagnostics', abdmDiagnosticsRoutes);
 router.use('/documents', documentRoutes);
+router.use('/immunizations', immunizationRoutes);
 
 export default router;

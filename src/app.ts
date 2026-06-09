@@ -101,6 +101,7 @@ import hiuCallbackRoutes from './modules/hiu/hiu.routes';
 import {
   consentV3Routes,
   hiuConsentV3Routes,
+  hiuConsentsOnFetchRoutes,
   linkV3Routes,
   linksV3Routes,
   patientsV3Routes,
@@ -129,11 +130,16 @@ app.use('/api/v3', (req, _res, next) => {
 app.use('/api/v3/hip/token', hipTokenV3Routes);
 // HIU-side consent callbacks → /api/v3/hiu/consent/request/{on-init,on-status,on-notify}
 app.use('/api/v3/hiu/consent/request', hiuConsentV3Routes);
+// HIU-side consent ARTEFACT delivery → /api/v3/hiu/consents/on-fetch
+// (M3 spec ndhm-hiu /v0.5/consents/on-fetch — async response to /consent/v3/fetch).
+// MUST be mounted before /api/v3/hiu (which applies authenticate middleware).
+app.use('/api/v3/hiu/consents', hiuConsentsOnFetchRoutes);
 // HIP-side consent notification → /api/v3/consent/request/hip/notify
 app.use('/api/v3/consent/request', consentV3Routes);
 app.use('/api/v3/link', linkV3Routes);
 // CM deep-linking ack → /api/v3/links/context/on-notify (note plural "links")
 app.use('/api/v3/links', linksV3Routes);
+// Patient lifecycle (sms/on-notify, status/notify) → /api/v3/patients/...
 app.use('/api/v3/patients', patientsV3Routes);
 
 // ── Generic role routers (internal authenticated APIs + a few callbacks) ────

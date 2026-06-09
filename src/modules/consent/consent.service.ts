@@ -5,6 +5,7 @@ import { abdmConfig } from '../../common/config/abdm';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import { ConsentPurpose } from '@prisma/client';
+import { purgeConsentData } from '../hiu/consent-compliance';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Consent Service V3 (M3 — Consent Management)
@@ -74,12 +75,13 @@ export class ConsentService {
 
       // Maps frontend value → { ABDM code, ABDM text, Prisma enum }
       const PURPOSE_MAP: Record<string, { code: string; text: string; prisma: ConsentPurpose }> = {
-        CAREMGT: { code: 'CAREMGT', text: 'Care Management',                        prisma: ConsentPurpose.CARE_MANAGEMENT },
-        BTG:     { code: 'BTG',     text: 'Break the Glass',                         prisma: ConsentPurpose.BREAK_THE_GLASS },
-        PUBHLTH: { code: 'PUBHLTH', text: 'Public Health',                           prisma: ConsentPurpose.PUBLIC_HEALTH },
-        HPAYMT:  { code: 'HPAYMT',  text: 'Healthcare Payment',                      prisma: ConsentPurpose.CARE_MANAGEMENT },
-        DSRCH:   { code: 'DSRCH',   text: 'Disease Specific Healthcare Research',    prisma: ConsentPurpose.DISEASE_SPECIFIC_HEALTHCARE_RESEARCH },
-        PATRQT:  { code: 'PATRQT',  text: 'Self Requested',                          prisma: ConsentPurpose.CARE_MANAGEMENT },
+        CAREMGT:  { code: 'CAREMGT',  text: 'Care Management',                        prisma: ConsentPurpose.CARE_MANAGEMENT },
+        BTG:      { code: 'BTG',      text: 'Break the Glass',                         prisma: ConsentPurpose.BREAK_THE_GLASS },
+        PUBHLTH:  { code: 'PUBHLTH',  text: 'Public Health',                           prisma: ConsentPurpose.PUBLIC_HEALTH },
+        HPAYMT:   { code: 'HPAYMT',   text: 'Healthcare Payment',                      prisma: ConsentPurpose.HEALTHCARE_PAYMENT },
+        DSRCH:    { code: 'DSRCH',    text: 'Disease Specific Healthcare Research',    prisma: ConsentPurpose.DISEASE_SPECIFIC_HEALTHCARE_RESEARCH },
+        PATRQT:   { code: 'PATRQT',   text: 'Self Requested',                          prisma: ConsentPurpose.SELF_REQUESTED },
+        HQUALITY: { code: 'HQUALITY', text: 'Healthcare Quality',                      prisma: ConsentPurpose.HEALTHCARE_QUALITY_AUDIT },
       };
       const purpose = PURPOSE_MAP[data.purpose] || PURPOSE_MAP['CAREMGT'];
 
@@ -361,15 +363,24 @@ export class ConsentService {
         where: { id: consentId },
         data: { status: 'REVOKED', revokedAt: new Date() },
       });
+
+      // M3 compliance: a local revoke / cancel must wipe any cached health
+      // records and the decryption keypair under this consent. If the consent
+      // had never reached GRANTED there is nothing to wipe — the helper is a
+      // no-op in that case.
+      const purge = await purgeConsentData(consent.id);
+
       logger.info('Consent cancelled/revoked locally', {
         consentId: consent.consentId,
         previousStatus: consent.status,
         hadAbdmConsentId: !!consent.abdmConsentId,
+        recordsDeleted: purge.externalRecordsDeleted,
+        keyPairsDeleted: purge.keyPairsDeleted,
       });
       return {
         success: true,
         message: consent.abdmConsentId
-          ? 'Consent cancelled locally. Note: ABDM revocation of a granted consent is patient-driven via the ABHA app — the HIU has stopped using this consent.'
+          ? `Consent cancelled locally. ${purge.externalRecordsDeleted} record(s) purged. ABDM revocation of a granted consent is patient-driven via the ABHA app — the HIU has stopped using this consent.`
           : 'Consent request cancelled.',
       };
     } catch (error: any) {

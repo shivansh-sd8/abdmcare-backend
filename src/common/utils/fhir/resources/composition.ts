@@ -1,6 +1,6 @@
 import {
   FHIRResource, FHIRReference, SYSTEM,
-  generateUUID, urnUUID,
+  generateUUID, urnUUID, COMPOSITION_TYPE,
 } from '../coding-tables';
 
 export interface CompositionSection {
@@ -8,6 +8,12 @@ export interface CompositionSection {
   code: { coding: ReadonlyArray<{ readonly system: string; readonly code: string; readonly display: string }> };
   entry?: FHIRReference[];
   text?: { status: string; div: string };
+}
+
+export interface CompositionTypeCoding {
+  system: string;
+  code: string;
+  display: string;
 }
 
 export interface CompositionInput {
@@ -19,10 +25,18 @@ export interface CompositionInput {
   organizationRef: FHIRReference;
   encounterRef?: FHIRReference;
   sections: CompositionSection[];
+  /**
+   * Per-profile Composition.type SNOMED coding. Each ABDM record format mandates
+   * a specific code (see COMPOSITION_TYPE). When omitted, defaults to the
+   * OPConsultRecord coding for backwards compatibility.
+   */
+  typeCoding?: CompositionTypeCoding;
 }
 
 export function buildComposition(input: CompositionInput): { uuid: string; resource: FHIRResource } {
   const uuid = generateUUID();
+
+  const typeCoding = input.typeCoding || COMPOSITION_TYPE.OPConsultRecord;
 
   const resource: FHIRResource = {
     resourceType: 'Composition',
@@ -31,9 +45,9 @@ export function buildComposition(input: CompositionInput): { uuid: string; resou
     status: 'final',
     type: {
       coding: [{
-        system: SYSTEM.SNOMED,
-        code: '371530004',
-        display: 'Clinical consultation report',
+        system: typeCoding.system,
+        code: typeCoding.code,
+        display: typeCoding.display,
       }],
       text: input.title,
     },
@@ -97,6 +111,39 @@ export const SECTION_CODES = {
   },
   hospitalCourse: {
     coding: [{ system: SYSTEM.LOINC, code: '8648-8', display: 'Hospital course' }],
+  },
+  // ── M2 ImmunizationRecord sections ────────────────────────────────────────
+  immunization: {
+    coding: [{ system: SYSTEM.LOINC, code: '11369-6', display: 'History of Immunization Narrative' }],
+  },
+  immunizationRecommendation: {
+    coding: [{ system: SYSTEM.SNOMED, code: '41000179103', display: 'Immunization record' }],
+  },
+  // ── M2 WellnessRecord sections ────────────────────────────────────────────
+  // Per ABDM Health Record Formats §"Wellness Record" the record has the
+  // following sections: Vital Signs, Body Measurements, Physical Activity,
+  // General Assessment, Women Health, Lifestyle, Other Observations, and
+  // Document Reference.
+  bodyMeasurement: {
+    coding: [{ system: SYSTEM.LOINC, code: '8716-3', display: 'Vital signs' }], // weight/height/BMI live under Vital Signs panel
+  },
+  physicalActivity: {
+    coding: [{ system: SYSTEM.LOINC, code: '68516-4', display: 'On those days that you exercise, on average how many minutes do you exercise' }],
+  },
+  generalAssessment: {
+    coding: [{ system: SYSTEM.LOINC, code: '10210-3', display: 'Physical findings of General status' }],
+  },
+  lifestyle: {
+    coding: [{ system: SYSTEM.LOINC, code: '29762-2', display: 'Social history' }],
+  },
+  otherObservations: {
+    coding: [{ system: SYSTEM.LOINC, code: '8716-3', display: 'Vital signs' }],
+  },
+  womenHealth: {
+    coding: [{ system: SYSTEM.LOINC, code: '57059-8', display: 'Pregnancy status' }],
+  },
+  documentReference: {
+    coding: [{ system: SYSTEM.LOINC, code: '11488-4', display: 'Consultation note' }],
   },
 } as const;
 

@@ -17,6 +17,28 @@ export const healthDataPushQueue = new Queue('health-data-push', {
   },
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Consent expiry sweeper queue (Phase 3 — M3 lifecycle automation)
+// A repeatable job runs every CONSENT_EXPIRY_INTERVAL_MS milliseconds (default
+// 15 min). The processor flips GRANTED → EXPIRED on stale consents and runs the
+// HIU cascade-delete via consent-compliance.purgeConsentData. Uses its own queue
+// so its retry/backoff settings don't disturb the data-push queue.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const consentExpiryQueue = new Queue('consent-expiry', {
+  connection: REDIS_CONNECTION,
+  defaultJobOptions: {
+    removeOnComplete: 50,
+    removeOnFail: 200,
+    attempts: 1,
+  },
+});
+
+export interface ConsentExpiryJobData {
+  triggeredAt: string;
+  source: 'cron' | 'manual';
+}
+
 export interface HealthDataPushJobData {
   transactionId: string;
   requestId: string;
@@ -50,6 +72,28 @@ export function createHealthDataPushWorker(
       transactionId: job?.data?.transactionId,
       error: err.message,
       attemptsMade: job?.attemptsMade,
+    });
+  });
+
+  return worker;
+}
+
+export function createConsentExpiryWorker(
+  processor: (job: Job<ConsentExpiryJobData>) => Promise<void>,
+): Worker {
+  const worker = new Worker('consent-expiry', processor, {
+    connection: REDIS_CONNECTION,
+    concurrency: 1,
+  });
+
+  worker.on('completed', (job) => {
+    logger.info('Consent expiry sweep completed', { jobId: job.id, source: job.data.source });
+  });
+
+  worker.on('failed', (job, err) => {
+    logger.error('Consent expiry sweep failed', {
+      jobId: job?.id,
+      error: err.message,
     });
   });
 

@@ -55,6 +55,8 @@ const startServer = async (): Promise<void> => {
     try {
       const { startHealthDataPushWorker } = await import('./workers/healthDataPush.worker');
       startHealthDataPushWorker();
+      const { startConsentExpirySweeper } = await import('./workers/consentExpiry.worker');
+      await startConsentExpirySweeper();
       logger.info('BullMQ workers started');
     } catch (err: any) {
       logger.warn('BullMQ workers could not start (Redis may be unavailable)', { error: err.message });

@@ -221,14 +221,30 @@ export class HiuService {
         logger.info('HIU: Keypair retained for next page', { abdmConsentId, pageNumber, pageCount });
       }
 
-      // Find the patient linked to this consent and persist parsed records
+      // Find the patient linked to this consent and persist parsed records.
+      // We tag every record with both the consent id (so the read-time gate /
+      // revoke cascade can find it) and the consent's requesterHospitalId (so
+      // a doctor at a different hospital can never see records pulled under
+      // someone else's consent).
       if (abdmConsentId) {
         const consent = await prisma.consent.findFirst({
           where: { abdmConsentId },
-          select: { patientId: true, id: true },
+          select: { patientId: true, id: true, status: true, requesterHospitalId: true, purgedAt: true },
         });
 
-        if (consent) {
+        // Refuse to persist records that arrive after revoke/expire — this
+        // closes the race window where ABDM is still pushing pages while the
+        // status flips. Without this, a slow push can re-create rows the
+        // cascade-delete just removed.
+        const isAuthorised = consent && consent.status === 'GRANTED' && !consent.purgedAt;
+
+        if (consent && !isAuthorised) {
+          logger.warn('HIU: dropping incoming health data — consent no longer authorised', {
+            abdmConsentId,
+            consentStatus: consent.status,
+            purged: !!consent.purgedAt,
+          });
+        } else if (consent) {
           for (const entry of decryptedEntries) {
             if (!entry.decrypted || !entry.data) continue;
 
@@ -237,6 +253,7 @@ export class HiuService {
               data: {
                 patientId: consent.patientId,
                 consentId: abdmConsentId,
+                hospitalId: consent.requesterHospitalId || null,
                 sourceHipId: parsed.sourceHIP || null,
                 sourceHipName: parsed.sourceHIP || null,
                 recordType: parsed.compositionTitle || 'Health Record',
@@ -263,7 +280,16 @@ export class HiuService {
   }
 
   /**
-   * Get external (ABDM-fetched) health records for a patient
+   * Get external (ABDM-fetched) health records for a patient.
+   *
+   * M3 read-time gating (compliance-critical):
+   *   - A clinician may only see records that were ingested under a consent
+   *     that is STILL in GRANTED status.
+   *   - Records under a REVOKED / EXPIRED / DENIED consent must be invisible
+   *     even if the cascade-delete sweeper has not run yet.
+   *   - Records with no consentId (legacy, pre-FK) are excluded for safety.
+   *   - Multi-tenancy: a doctor at hospital A must not see records pulled
+   *     under a consent issued by hospital B for the same patient.
    */
   async getPatientHealthRecords(patientId: string, currentUser?: any) {
     try {
@@ -279,8 +305,42 @@ export class HiuService {
         throw new AppError('Access denied: Patient belongs to a different hospital', 403);
       }
 
+      // Build the set of consent identifiers the requesting hospital is still
+      // authorised under (active = GRANTED, not expired, not purged). Match by
+      // both local consentId and the ABDM artefact consentId because rows have
+      // historically used either.
+      const now = new Date();
+      const activeConsents = await prisma.consent.findMany({
+        where: {
+          patientId,
+          status: 'GRANTED',
+          purgedAt: null,
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          // Multi-tenant scope: SUPER_ADMIN sees everything; everyone else
+          // only sees records pulled under their own hospital's consents.
+          ...(currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId
+            ? { requesterHospitalId: currentUser.hospitalId }
+            : {}),
+        },
+        select: { id: true, consentId: true, abdmConsentId: true },
+      });
+
+      if (!activeConsents.length) {
+        return { success: true, data: [] };
+      }
+
+      const allowedConsentIds = new Set<string>();
+      for (const c of activeConsents) {
+        if (c.id) allowedConsentIds.add(c.id);
+        if (c.consentId) allowedConsentIds.add(c.consentId);
+        if (c.abdmConsentId) allowedConsentIds.add(c.abdmConsentId);
+      }
+
       const externalRecords = await prisma.externalHealthRecord.findMany({
-        where: { patientId },
+        where: {
+          patientId,
+          consentId: { in: Array.from(allowedConsentIds) },
+        },
         orderBy: { receivedAt: 'desc' },
       });
 

@@ -68,14 +68,18 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       logger.warn('Worker: No encounters found in consent date range', { transactionId, from: dateRange?.from, to: dateRange?.to });
     }
 
-    // Load vitals and investigations separately (they link via encounterId string, not a Prisma relation)
+    // Load vitals, investigations and immunizations separately (they link via
+    // encounterId string, not a Prisma relation).
     const encounterIds = validContexts.map((cc) => cc.encounter!.id);
-    const [allVitals, allInvestigations] = await Promise.all([
+    const [allVitals, allInvestigations, allImmunizations] = await Promise.all([
       encounterIds.length > 0
         ? prisma.vitals.findMany({ where: { encounterId: { in: encounterIds } } })
         : Promise.resolve([]),
       encounterIds.length > 0
         ? prisma.investigation.findMany({ where: { encounterId: { in: encounterIds } } })
+        : Promise.resolve([]),
+      encounterIds.length > 0
+        ? prisma.immunization.findMany({ where: { encounterId: { in: encounterIds } } })
         : Promise.resolve([]),
     ]);
 
@@ -92,6 +96,13 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       const list = investigationsByEnc.get(inv.encounterId) || [];
       list.push(inv);
       investigationsByEnc.set(inv.encounterId, list);
+    }
+    const immunizationsByEnc = new Map<string, any[]>();
+    for (const im of allImmunizations) {
+      if (!im.encounterId) continue;
+      const list = immunizationsByEnc.get(im.encounterId) || [];
+      list.push(im);
+      immunizationsByEnc.set(im.encounterId, list);
     }
 
     const { buildFHIRBundle } = await import('../common/utils/fhir/fhir-builder');
@@ -143,6 +154,23 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
           vitals: vitalsByEnc.get(enc.id) || [],
           encounterPrescriptions: enc.prescriptions || [],
           investigations: investigationsByEnc.get(enc.id) || [],
+          immunizations: (immunizationsByEnc.get(enc.id) || []).map((im: any) => ({
+            id: im.id,
+            vaccineName: im.vaccineName,
+            vaccineCode: im.vaccineCode,
+            manufacturer: im.manufacturer,
+            lotNumber: im.lotNumber,
+            expiryDate: im.expiryDate,
+            doseNumber: im.doseNumber,
+            totalDoses: im.totalDoses,
+            site: im.site,
+            route: im.route,
+            doseQuantity: im.doseQuantity != null ? Number(im.doseQuantity) : null,
+            doseUnit: im.doseUnit,
+            administeredAt: im.administeredAt,
+            reason: im.reason,
+            notes: im.notes,
+          })),
         });
         entries.push(makeEntry(JSON.stringify(fhirBundle), cc.careContextId));
       } catch (buildErr: any) {

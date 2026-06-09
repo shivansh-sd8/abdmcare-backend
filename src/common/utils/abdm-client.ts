@@ -439,20 +439,79 @@ export class AbdmClient {
 
   // ── Generic helpers for legacy M2/M3 services (absolute URLs) ───────────
 
+  /**
+   * Generic gateway POST. ABDM's istio/envoy edge requires X-HIU-ID on every
+   * HIU-facing endpoint and X-HIP-ID on every HIP-facing endpoint. We auto-
+   * detect from the URL path so callers don't have to remember; explicit
+   * extraHeaders still win on conflict.
+   */
   async post<T = any>(url: string, data?: any, extraHeaders?: Record<string, string>): Promise<T> {
     const token = await this.ensureValidToken();
+    const role = this.detectGatewayRole(url);
+    const merged: Record<string, string> = {};
+    if (role === 'HIU' && abdmConfig.hiu.id) merged['X-HIU-ID'] = abdmConfig.hiu.id;
+    if (role === 'HIP' && abdmConfig.hip.id) merged['X-HIP-ID'] = abdmConfig.hip.id;
+    Object.assign(merged, extraHeaders || {});
     const response = await this.axiosInstance.post<T>(url, data, {
-      headers: this.gatewayHeaders(token, extraHeaders),
+      headers: this.gatewayHeaders(token, merged),
     });
     return response.data;
   }
 
   async get<T = any>(url: string): Promise<T> {
     const token = await this.ensureValidToken();
+    const role = this.detectGatewayRole(url);
+    const extra: Record<string, string> = {};
+    if (role === 'HIU' && abdmConfig.hiu.id) extra['X-HIU-ID'] = abdmConfig.hiu.id;
+    if (role === 'HIP' && abdmConfig.hip.id) extra['X-HIP-ID'] = abdmConfig.hip.id;
     const response = await this.axiosInstance.get<T>(url, {
-      headers: this.gatewayHeaders(token),
+      headers: this.gatewayHeaders(token, extra),
     });
     return response.data;
+  }
+
+  /**
+   * Determine whether a gateway URL is HIU-facing or HIP-facing.
+   * Matches both V3 (/api/hiecm/...) and legacy (/v0.5/...) paths.
+   * Returns null for endpoints that don't need a role header (e.g. consent
+   * init, sessions, bridge).
+   */
+  private detectGatewayRole(url: string): 'HIU' | 'HIP' | null {
+    const u = url.toLowerCase();
+
+    // ── HIU-facing endpoints (X-HIU-ID required by gateway envoy) ────────
+    // NOTE: /api/hiecm/data-flow/v3/health-information/notify is shared
+    // between HIP and HIU; per spec it only requires X-CM-ID, so we do NOT
+    // auto-stamp a role header on that path. Callers can pass extraHeaders
+    // explicitly if they want to.
+    if (
+      u.includes('/data-flow/v3/health-information/request') ||
+      u.includes('/consent/v3/fetch') ||
+      u.includes('/consent/v3/request/status') ||
+      u.includes('/consent/v3/request/init') ||
+      u.includes('/consent/v3/request/hiu/') ||
+      u.includes('/api-hiu/')
+    ) {
+      return 'HIU';
+    }
+
+    // ── HIP-facing endpoints ─────────────────────────────────────────────
+    if (
+      u.includes('/hip/v3/') ||
+      u.includes('/data-flow/v3/health-information/hip/') ||
+      u.includes('/consent/v3/request/hip/') ||
+      u.includes('/care-context/v3/discover') ||
+      u.includes('/care-context/v3/on-discover') ||
+      u.includes('/care-context/v3/link') ||
+      u.includes('/care-context/v3/on-link') ||
+      u.includes('/patients/v3/status/on-notify') ||
+      u.includes('/api/hiecm/v3/token/generate-token') ||
+      u.includes('/api/hiecm/sms/notify')
+    ) {
+      return 'HIP';
+    }
+
+    return null;
   }
 }
 

@@ -7,6 +7,7 @@ import logger from '../../common/config/logger';
 import EncryptionService from '../../common/utils/encryption';
 import { healthDataPushQueue, HealthDataPushJobData } from '../../common/config/queue';
 import redisClient from '../../common/config/redis';
+import { pickPatientByCascade, deriveHiType, AbdmHiType } from './discovery-helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Logging helpers (link care context flow)
@@ -88,9 +89,10 @@ interface DiscoverRequest {
   patient: {
     id: string;
     verifiedIdentifiers?: Array<{ type: string; value: string }>;
+    unverifiedIdentifiers?: Array<{ type: string; value: string }>;
     name?: string;
     gender?: string;
-    yearOfBirth?: string;
+    yearOfBirth?: string | number;
   };
 }
 
@@ -421,6 +423,13 @@ export class HipService {
    * Handle discovery request from ABDM (user initiated)
    * ABDM calls: POST /api/v3/hip/patient/care-context/discover (your callback URL)
    * HIP responds: POST /api/hiecm/user-initiated-linking/v3/patient/care-context/on-discover
+   *
+   * M2 cascade: ABDM sends one or more verified identifiers (MOBILE / ABHA-
+   * number / ABHA-address) plus the patient's name, gender and YoB. We:
+   *   1. Build a candidate set from EVERY matching verified identifier.
+   *   2. Run the discovery cascade (name phonetic + gender + YoB ±2) to pick
+   *      ONE unambiguous patient.
+   *   3. For each care context, derive the right `hiType` from its encounter.
    */
   async discoverCareContexts(request: DiscoverRequest) {
     try {
@@ -438,11 +447,10 @@ export class HipService {
         // Redis unavailable — proceed without cache
       }
 
-      const patientIdentifier = request.patient.verifiedIdentifiers?.find(
-        (id) => id.type === 'MOBILE' || id.type === 'ABHA_NUMBER'
-      );
+      const verified = request.patient.verifiedIdentifiers || [];
+      const unverified = request.patient.unverifiedIdentifiers || [];
 
-      if (!patientIdentifier) {
+      if (!verified.length) {
         const errorResp = {
           transactionId: request.transactionId,
           error: { code: 1000, message: 'No verified identifier provided' },
@@ -453,71 +461,184 @@ export class HipService {
       }
 
       // Scope patient lookup by hospital if possible (multi-tenant isolation).
-      // The ABDM callback may carry a hipId — match it to a hospital for scoping.
       let hospitalScope: { hospitalId: string } | undefined;
       if ((request as any).hipId) {
         const hospital = await prisma.hospital.findFirst({ where: { hipId: (request as any).hipId }, select: { id: true } });
         if (hospital) hospitalScope = { hospitalId: hospital.id };
       }
 
-      let patient;
-      if (patientIdentifier.type === 'MOBILE') {
-        patient = await prisma.patient.findFirst({
-          where: { mobile: patientIdentifier.value, ...hospitalScope },
-          include: { encounters: { orderBy: { createdAt: 'desc' }, take: 10 }, abhaRecord: true },
-        });
-      } else {
-        patient = await prisma.patient.findFirst({
-          where: { abhaRecord: { abhaNumber: patientIdentifier.value }, ...hospitalScope },
-          include: { encounters: { orderBy: { createdAt: 'desc' }, take: 10 }, abhaRecord: true },
-        });
+      // Build candidate set: every patient that matches AT LEAST ONE verified
+      // identifier. We OR them across mobile / abhaNumber / abhaAddress.
+      const orClauses: any[] = [];
+      for (const id of verified) {
+        if (id.type === 'MOBILE' && id.value) {
+          orClauses.push({ mobile: id.value });
+        } else if ((id.type === 'ABHA_NUMBER' || id.type === 'HEALTH_NUMBER') && id.value) {
+          orClauses.push({ abhaNumber: id.value });
+          orClauses.push({ abhaRecord: { abhaNumber: id.value } });
+        } else if ((id.type === 'ABHA_ADDRESS' || id.type === 'HEALTH_ID') && id.value) {
+          orClauses.push({ abhaAddress: id.value });
+          orClauses.push({ abhaRecord: { abhaAddress: id.value } });
+        }
       }
-
-      if (!patient) {
+      if (!orClauses.length) {
         const errorResp = {
           transactionId: request.transactionId,
-          error: { code: 1001, message: 'Patient not found' },
+          error: { code: 1000, message: 'Unsupported identifier types' },
           response: { requestId: request.requestId },
         };
         await abdmClient.post(abdmConfig.endpoints.hip.onDiscover, errorResp);
         return errorResp;
       }
 
-      const careContexts = patient.encounters.map((enc) => ({
-        referenceNumber: enc.id,
-        display: sanitizeDisplay(`${enc.type} - ${new Date(enc.createdAt).toLocaleDateString()}`),
+      const candidates = await prisma.patient.findMany({
+        where: { OR: orClauses, ...hospitalScope },
+        include: {
+          abhaRecord: true,
+          encounters: { orderBy: { createdAt: 'desc' }, take: 10 },
+        },
+        take: 25,
+      });
+
+      const yobNum = request.patient.yearOfBirth
+        ? typeof request.patient.yearOfBirth === 'number'
+          ? request.patient.yearOfBirth
+          : parseInt(String(request.patient.yearOfBirth), 10)
+        : undefined;
+
+      const hints = {
+        name: request.patient.name,
+        gender: (request.patient.gender as 'M' | 'F' | 'O' | undefined),
+        yearOfBirth: Number.isFinite(yobNum) ? yobNum : undefined,
+        verifiedIdentifiers: verified,
+        unverifiedIdentifiers: unverified,
+      };
+
+      const cascade = pickPatientByCascade(
+        candidates.map(c => ({
+          id: c.id,
+          firstName: c.firstName,
+          lastName: c.lastName,
+          mobile: c.mobile,
+          gender: c.gender,
+          dob: c.dob,
+          abhaNumber: c.abhaNumber,
+          abhaAddress: c.abhaAddress,
+          abhaRecord: c.abhaRecord ? { abhaNumber: c.abhaRecord.abhaNumber, abhaAddress: c.abhaRecord.abhaAddress } : null,
+        })),
+        hints,
+      );
+
+      if (!cascade.patient) {
+        const errorResp = {
+          transactionId: request.transactionId,
+          error: {
+            code: cascade.ambiguous ? 1002 : 1001,
+            message: cascade.ambiguous
+              ? 'Multiple patients matched; cannot uniquely identify'
+              : 'Patient not found',
+          },
+          response: { requestId: request.requestId },
+        };
+        await abdmClient.post(abdmConfig.endpoints.hip.onDiscover, errorResp);
+        return errorResp;
+      }
+
+      // Pull the encounters for the chosen patient (already loaded as part of
+      // the candidate set, but re-resolve from the candidates array for type
+      // safety) and load their per-encounter content for hiType derivation.
+      const winner = candidates.find(c => c.id === cascade.patient!.id)!;
+      const encIds = winner.encounters.map(e => e.id);
+
+      const [pcounts, icounts, immcounts] = await Promise.all([
+        encIds.length
+          ? prisma.encounterPrescription.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
+          : Promise.resolve([]),
+        encIds.length
+          ? prisma.investigation.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
+          : Promise.resolve([]),
+        encIds.length
+          ? prisma.immunization.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
+          : Promise.resolve([]),
+      ]);
+
+      const prescByEnc = new Map(pcounts.map(p => [p.encounterId!, p._count as any]));
+      const invByEnc = new Map(icounts.map(i => [i.encounterId!, i._count as any]));
+      const immByEnc = new Map(immcounts.map(i => [i.encounterId!, i._count as any]));
+
+      // The CM allows ONE hiType per care context. We bucket the patient's
+      // encounters into per-hiType groups so each context advertises the
+      // correct type.
+      const careContextEntries = winner.encounters.map((enc) => {
+        const hiType: AbdmHiType = deriveHiType({
+          type: enc.type as any,
+          admissionId: enc.admissionId,
+          hasImmunization: !!immByEnc.get(enc.id),
+          hasInvestigation: !!invByEnc.get(enc.id),
+          hasPrescription: !!prescByEnc.get(enc.id),
+          hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
+        });
+        return {
+          referenceNumber: enc.id,
+          display: sanitizeDisplay(`${enc.type} - ${new Date(enc.createdAt).toLocaleDateString()}`),
+          hiType,
+        };
+      });
+
+      // ABDM expects ONE hiType per `patient` entry and the careContexts list
+      // must contain only contexts of THAT type. So we group by hiType and
+      // emit one patient block per group. (Single-block emission would force
+      // a single hiType across heterogeneous encounters → wrong ImmunizationRecord
+      // bundles arriving for an OPD encounter etc.)
+      const byHiType = new Map<AbdmHiType, typeof careContextEntries>();
+      for (const cc of careContextEntries) {
+        const list = byHiType.get(cc.hiType) || [];
+        list.push(cc);
+        byHiType.set(cc.hiType, list);
+      }
+
+      const patientName = sanitizeDisplay(`${winner.firstName} ${winner.lastName}`);
+      const patientBlocks = Array.from(byHiType.entries()).map(([hiType, ccs]) => ({
+        referenceNumber: winner.id,
+        display: patientName,
+        careContexts: ccs.map(c => ({ referenceNumber: c.referenceNumber, display: c.display })),
+        hiType,
+        count: ccs.length,
       }));
 
-      // on-discover body per ABDM M2 spec (Milestone_2 Postman):
-      //   - `hiType` + `count` live INSIDE each patient object.
-      //   - `matchedBy` is a TOP-LEVEL field (sibling of `patient`/`response`),
-      //     NOT inside the patient — putting it per-patient is non-conformant.
-      //   - `response.requestId` (echoing the inbound REQUEST-ID) is REQUIRED;
-      //     omitting it makes ABDM reject with
-      //     "ABDM-9999: Response cannot be null or empty".
+      // Empty patient — emit a single OPConsultation block with zero contexts
+      // so ABDM's response shape is preserved (avoids "patient[] empty" errors).
+      const finalBlocks = patientBlocks.length
+        ? patientBlocks
+        : [{
+            referenceNumber: winner.id,
+            display: patientName,
+            careContexts: [],
+            hiType: 'OPConsultation' as const,
+            count: 0,
+          }];
+
       const response = {
         transactionId: request.transactionId,
-        patient: [{
-          referenceNumber: patient.id,
-          display: sanitizeDisplay(`${patient.firstName} ${patient.lastName}`),
-          careContexts,
-          hiType: 'OPConsultation',
-          count: careContexts.length,
-        }],
-        matchedBy: [patientIdentifier.type],
+        patient: finalBlocks,
+        matchedBy: cascade.matchedBy,
         response: { requestId: request.requestId },
       };
 
       await abdmClient.post(abdmConfig.endpoints.hip.onDiscover, response);
 
-      // Cache response for idempotency (TTL 10 min)
       try {
         await redisClient.set(cacheKey, JSON.stringify(response), { EX: 600 });
       } catch {
         // Redis unavailable
       }
 
-      logger.info('HIP: on-discover sent', { patientId: patient.id, count: careContexts.length });
+      logger.info('HIP: on-discover sent', {
+        patientId: winner.id,
+        count: careContextEntries.length,
+        matchedBy: cascade.matchedBy,
+        hiTypeBreakdown: Object.fromEntries(Array.from(byHiType, ([k, v]) => [k, v.length])),
+      });
       return response;
     } catch (error: any) {
       logger.error('HIP: Failed to discover care contexts', describeAbdmError(error));
@@ -639,6 +760,7 @@ export class HipService {
       const contexts = await prisma.careContext.findMany({
         where: { patientId: patient.id },
         orderBy: { createdAt: 'desc' },
+        include: { encounter: true },
       });
       await prisma.careContext.updateMany({
         where: { patientId: patient.id },
@@ -647,25 +769,33 @@ export class HipService {
 
       const patientName = sanitizeDisplay(`${patient.firstName} ${patient.lastName}`);
 
-      // on-confirm body per ABDM M2 spec: { patient: [{ referenceNumber, display,
-      // careContexts:[{referenceNumber, display}], hiType, count }], response: { requestId } }.
+      // Group by derived hiType (one block per type) per ABDM M2 spec.
+      const blocks = await this.groupCareContextsByHiType(contexts);
+
       const response = {
-        patient: [{
-          referenceNumber: patient.id,
-          display: patientName,
-          careContexts: contexts.map((cc) => ({
-            referenceNumber: cc.careContextId,
-            display: sanitizeDisplay(cc.display),
-          })),
-          hiType: 'OPConsultation',
-          count: contexts.length,
-        }],
+        patient: blocks.length
+          ? blocks.map(b => ({
+              referenceNumber: patient.id,
+              display: patientName,
+              careContexts: b.careContexts,
+              hiType: b.hiType,
+              count: b.count,
+            }))
+          : [{
+              referenceNumber: patient.id,
+              display: patientName,
+              careContexts: [],
+              hiType: 'OPConsultation',
+              count: 0,
+            }],
         // `response.requestId` echoes the inbound REQUEST-ID and is REQUIRED (same
         // "Response cannot be null or empty" rule as the other on-* callbacks).
         response: { requestId: request?.requestId },
       };
       await abdmClient.post(abdmConfig.endpoints.hip.onLinkConfirm, response);
-      logger.info('HIP: on-confirm sent', { patientId: patient.id, count: contexts.length });
+      logger.info('HIP: on-confirm sent', {
+        patientId: patient.id, count: contexts.length, hiTypeBreakdown: blocks.map(b => ({ hiType: b.hiType, count: b.count })),
+      });
       return response;
     } catch (error: any) {
       logger.error('HIP: Failed to confirm link', describeAbdmError(error));
@@ -914,7 +1044,12 @@ export class HipService {
 
         const pendingContexts = await prisma.careContext.findMany({
           where: { patientId: patient.id, linkStatus: 'PENDING' },
+          include: { encounter: true },
         });
+
+        // Group contexts by their derived hiType so each `patient[]` block
+        // in the link/carecontext payload is hiType-homogeneous (M2 spec).
+        const blocks = await this.groupCareContextsByHiType(pendingContexts);
 
         setImmediate(async () => {
           try {
@@ -922,21 +1057,19 @@ export class HipService {
               patientId,
               abhaNumber: maskAbha(abhaNumber),
               contextsToLink: pendingContexts.length,
+              hiTypeBreakdown: blocks.map(b => ({ hiType: b.hiType, count: b.count })),
             });
             await this.hipInitiatedLink({
               abhaNumber,
               abhaAddress,
               linkToken: reusableToken,
-              patient: [{
+              patient: blocks.map(b => ({
                 referenceNumber: patient.uhid || patient.id,
                 display: patientName,
-                careContexts: pendingContexts.map((cc) => ({
-                  referenceNumber: cc.careContextId,
-                  display: cc.display,
-                })),
-                hiType: 'OPConsultation',
-                count: pendingContexts.length,
-              }],
+                careContexts: b.careContexts,
+                hiType: b.hiType,
+                count: b.count,
+              })),
             });
           } catch (e: any) {
             // The reused token was rejected (e.g. expired/consumed). Clear it from
@@ -1102,6 +1235,62 @@ export class HipService {
   // ═══════════════════════════════════════════════════════════════════════════
   // PRIVATE HELPERS
   // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Group an array of care contexts (each with its loaded encounter) into
+   * hiType-homogeneous blocks suitable for the M2 link/carecontext payload
+   * (`patient[].hiType` + `patient[].count`). Each block has exactly one
+   * hiType so the CM can route the linked context to the right consent
+   * scope.
+   */
+  async groupCareContextsByHiType(
+    contexts: Array<{ careContextId: string; display: string; encounter?: any }>,
+  ): Promise<Array<{ hiType: AbdmHiType; count: number; careContexts: Array<{ referenceNumber: string; display: string }> }>> {
+    if (!contexts.length) return [];
+
+    const encIds = contexts
+      .map(c => c.encounter?.id)
+      .filter(Boolean) as string[];
+
+    const [pcounts, icounts, immcounts] = await Promise.all([
+      encIds.length
+        ? prisma.encounterPrescription.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
+        : Promise.resolve([]),
+      encIds.length
+        ? prisma.investigation.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
+        : Promise.resolve([]),
+      encIds.length
+        ? prisma.immunization.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
+        : Promise.resolve([]),
+    ]);
+    const prescByEnc = new Map(pcounts.map(p => [p.encounterId!, p._count as any]));
+    const invByEnc = new Map(icounts.map(i => [i.encounterId!, i._count as any]));
+    const immByEnc = new Map(immcounts.map(i => [i.encounterId!, i._count as any]));
+
+    const groups = new Map<AbdmHiType, Array<{ referenceNumber: string; display: string }>>();
+    for (const cc of contexts) {
+      const enc: any = cc.encounter;
+      const hiType: AbdmHiType = enc
+        ? deriveHiType({
+            type: enc.type,
+            admissionId: enc.admissionId,
+            hasImmunization: !!immByEnc.get(enc.id),
+            hasInvestigation: !!invByEnc.get(enc.id),
+            hasPrescription: !!prescByEnc.get(enc.id),
+            hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
+          })
+        : 'OPConsultation';
+      const list = groups.get(hiType) || [];
+      list.push({ referenceNumber: cc.careContextId, display: sanitizeDisplay(cc.display) });
+      groups.set(hiType, list);
+    }
+
+    return Array.from(groups.entries()).map(([hiType, careContexts]) => ({
+      hiType,
+      careContexts,
+      count: careContexts.length,
+    }));
+  }
 
   /** @deprecated Kept as fallback — new NRCeS builder is in `common/utils/fhir/fhir-builder.ts` */
   async generateFHIRBundleLegacy(consent: any, _dateRange: { from: string; to: string }, encounters: any[]) {
