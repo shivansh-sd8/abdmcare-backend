@@ -25,6 +25,7 @@ import { abdmConfig } from '../../common/config/abdm';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import prisma from '../../common/config/database';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -678,7 +679,7 @@ export class AbhaService {
       return { message: 'ABHA linked to patient successfully' };
     } catch (error: any) {
       logger.error('linkToPatient failed', error);
-      throw new AppError(error.message || 'Failed to link ABHA', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -698,7 +699,7 @@ export class AbhaService {
       return { message: 'ABHA unlinked successfully' };
     } catch (error: any) {
       logger.error('unlinkFromPatient failed', error);
-      throw new AppError(error.message || 'Failed to unlink ABHA', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 

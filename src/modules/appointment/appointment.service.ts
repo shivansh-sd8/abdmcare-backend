@@ -4,6 +4,7 @@ import logger from '../../common/config/logger';
 import { AppointmentType, AppointmentStatus } from '@prisma/client';
 import smsService from '../../common/utils/smsService';
 import { generateSlots, isValidSlotTime, HospitalScheduleConfig, DoctorScheduleConfig } from '../../common/utils/slotEngine';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 interface CreateAppointmentRequest {
   patientId: string;
@@ -117,10 +118,7 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to create appointment', error);
-      throw new AppError(
-        error.message || 'Failed to create appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -155,10 +153,7 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch appointment', error);
-      throw new AppError(
-        error.message || 'Failed to fetch appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -188,7 +183,25 @@ export class AppointmentService {
       }
 
       if (data.status) {
-        updateData.status = data.status;
+        const VALID: Record<string, string[]> = {
+          SCHEDULED:    ['CONFIRMED', 'CANCELLED', 'NO_SHOW', 'IN_PROGRESS'],
+          CONFIRMED:    ['IN_PROGRESS', 'CANCELLED', 'NO_SHOW'],
+          IN_PROGRESS:  ['COMPLETED', 'CANCELLED'],
+          COMPLETED:    [],
+          CANCELLED:    [],
+          NO_SHOW:      [],
+        };
+        const next = String(data.status).toUpperCase();
+        const allowed = VALID[appointment.status] || [];
+        if (appointment.status === next) {
+          // no-op transition allowed
+        } else if (!allowed.includes(next)) {
+          throw new AppError(
+            `Cannot move appointment from ${appointment.status} to ${next}`,
+            400,
+          );
+        }
+        updateData.status = next;
       }
 
       const updatedAppointment = await prisma.appointment.update({
@@ -211,10 +224,7 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to update appointment', error);
-      throw new AppError(
-        error.message || 'Failed to update appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -291,10 +301,7 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to search appointments', error);
-      throw new AppError(
-        error.message || 'Failed to search appointments',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -337,10 +344,7 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to cancel appointment', error);
-      throw new AppError(
-        error.message || 'Failed to cancel appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -382,7 +386,7 @@ export class AppointmentService {
           encounterId,
           patientId: appointment.patientId,
           doctorId: appointment.doctorId,
-          type: (['OPD', 'FOLLOW_UP', 'ROUTINE_CHECKUP', 'DIAGNOSTIC', 'SURGERY_CONSULTATION', 'SECOND_OPINION', 'VACCINATION'].includes(appointment.type)
+          type: (['OPD', 'FOLLOW_UP', 'ROUTINE_CHECKUP', 'DIAGNOSTIC', 'SURGERY_CONSULTATION', 'SECOND_OPINION', 'VACCINATION', 'WALK_IN'].includes(appointment.type)
             ? 'OPD'
             : appointment.type === 'IPD'
               ? 'IPD'
@@ -436,8 +440,30 @@ export class AppointmentService {
         },
       });
 
-      // Create Care Context for ABHA (if patient has ABHA)
-      if (appointment.patient.abhaRecord) {
+      // Create Care Context for ABHA. We'll create one whenever the patient has
+      // any ABHA identity (AbhaRecord row OR scalar abhaNumber / abhaAddress on
+      // the patient), so check-ins from quickly-registered patients still
+      // trigger ABDM linking. Per-hospital hipId is used (falls back to env).
+      const patient: any = appointment.patient;
+      const abhaNumber: string | undefined =
+        patient.abhaRecord?.abhaNumber || patient.abhaNumber || undefined;
+      const abhaAddress: string | undefined =
+        patient.abhaRecord?.abhaAddress || patient.abhaAddress || undefined;
+
+      if (abhaNumber || abhaAddress) {
+        // Resolve the HIP id for this hospital. If the hospital has no hipId
+        // set, the env-level ABDM_HIP_ID is used as a fallback.
+        let hipIdForCareContext = process.env.ABDM_HIP_ID || 'default-hip-id';
+        try {
+          if (appointment.hospitalId) {
+            const hospital = await prisma.hospital.findUnique({
+              where: { id: appointment.hospitalId },
+              select: { hipId: true },
+            });
+            if (hospital?.hipId) hipIdForCareContext = hospital.hipId;
+          }
+        } catch (_) { /* ignore — fall back to env */ }
+
         const careContext = await prisma.careContext.create({
           data: {
             careContextId: `CC-${Date.now()}`,
@@ -445,39 +471,33 @@ export class AppointmentService {
             encounterId: encounter.id,
             display: `OPD Visit - ${encounter.type}`,
             referenceNumber: encounter.encounterId,
-            hipId: process.env.ABDM_HIP_ID || 'default-hip-id',
+            hipId: hipIdForCareContext,
           },
         });
 
-        // Fire-and-forget: initiate ABDM HIP linking for this care context
-        const abhaRecord = appointment.patient.abhaRecord;
-        const patient = appointment.patient;
-        setImmediate(async () => {
-          try {
-            const hipService = (await import('../hip/hip.service')).default;
-
-            // Only kick off generate-token. ABDM returns the link token ASYNC via
-            // the /api/v3/hip/token/on-generate-token callback, which then calls
-            // link/carecontext with the X-LINK-TOKEN header and marks the care
-            // context LINKED. Calling hipInitiatedLink directly here (without a
-            // link token) always fails, so we rely on the callback flow instead.
-            const abdmGender = patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
-            await hipService.generateLinkToken({
-              abhaNumber: abhaRecord.abhaNumber,
-              abhaAddress: abhaRecord.abhaAddress || '',
-              name: `${patient.firstName} ${patient.lastName}`,
-              gender: abdmGender,
-              yearOfBirth: patient.dob ? new Date(patient.dob).getFullYear() : 2000,
-            });
-
-            logger.info('HIP linking initiated (generate-token) for care context', {
-              careContextId: careContext.careContextId,
-              abhaNumber: abhaRecord.abhaNumber,
-            });
-          } catch (err: any) {
-            logger.warn('HIP linking failed (non-blocking)', { error: err.message });
-          }
-        });
+        // Fire-and-forget: initiate ABDM HIP linking only if we have an ABHA
+        // number (generate-token requires the 14-digit number).
+        if (abhaNumber) {
+          setImmediate(async () => {
+            try {
+              const hipService = (await import('../hip/hip.service')).default;
+              const abdmGender =
+                patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
+              await hipService.generateLinkToken({
+                abhaNumber,
+                abhaAddress: abhaAddress || '',
+                name: `${patient.firstName} ${patient.lastName}`,
+                gender: abdmGender,
+                yearOfBirth: patient.dob ? new Date(patient.dob).getFullYear() : 2000,
+              });
+              logger.info('HIP linking initiated (generate-token) for care context', {
+                careContextId: careContext.careContextId,
+              });
+            } catch (err: any) {
+              logger.warn('HIP linking failed (non-blocking)', { error: err.message });
+            }
+          });
+        }
       }
 
       // Update appointment with check-in details
@@ -524,10 +544,7 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to check in appointment', error);
-      throw new AppError(
-        error.message || 'Failed to check in appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -542,26 +559,37 @@ export class AppointmentService {
         ? { hospitalId: currentUser.hospitalId }
         : {};
 
-      const [total, todayCount, scheduled, completed, cancelled] = await Promise.all([
+      const todayWindow = { gte: today, lt: tomorrow };
+      const [
+        total,
+        todayCount,
+        scheduled,
+        completed,
+        cancelled,
+        walkins,
+        checkedIn,
+        inProgress,
+      ] = await Promise.all([
         prisma.appointment.count({ where: hospitalFilter }),
+        prisma.appointment.count({ where: { ...hospitalFilter, scheduledAt: todayWindow } }),
+        prisma.appointment.count({ where: { ...hospitalFilter, status: 'SCHEDULED' } }),
+        prisma.appointment.count({ where: { ...hospitalFilter, status: 'COMPLETED' } }),
+        prisma.appointment.count({ where: { ...hospitalFilter, status: 'CANCELLED' } }),
         prisma.appointment.count({
           where: {
             ...hospitalFilter,
-            scheduledAt: {
-              gte: today,
-              lt: tomorrow,
-            },
+            type: 'WALK_IN' as any,
+            scheduledAt: todayWindow,
           },
-        }),
+        }).catch(() => 0),
         prisma.appointment.count({
-          where: { ...hospitalFilter, status: 'SCHEDULED' },
-        }),
-        prisma.appointment.count({
-          where: { ...hospitalFilter, status: 'COMPLETED' },
-        }),
-        prisma.appointment.count({
-          where: { ...hospitalFilter, status: 'CANCELLED' },
-        }),
+          where: {
+            ...hospitalFilter,
+            scheduledAt: todayWindow,
+            checkedInAt: { not: null },
+          } as any,
+        }).catch(() => 0),
+        prisma.appointment.count({ where: { ...hospitalFilter, status: 'IN_PROGRESS' } }).catch(() => 0),
       ]);
 
       return {
@@ -572,14 +600,14 @@ export class AppointmentService {
           scheduled,
           completed,
           cancelled,
+          walkins,
+          checkedIn,
+          inProgress,
         },
       };
     } catch (error: any) {
       logger.error('Failed to fetch appointment stats', error);
-      throw new AppError(
-        error.message || 'Failed to fetch appointment stats',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 

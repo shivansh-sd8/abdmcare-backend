@@ -2,6 +2,7 @@ import prisma from '../../common/config/database';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import bcrypt from 'bcryptjs';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 interface HospitalOnboardingData {
   // Basic Information
@@ -52,9 +53,20 @@ interface HospitalOnboardingData {
   // Subscription Plan
   plan?: 'FREE' | 'BASIC' | 'PROFESSIONAL' | 'ENTERPRISE';
 
-  // ABDM Integration
+  // Default OPD charge (used when doctor has no individual fee set)
+  defaultOpdCharge?: number;
+
+  // ABDM Integration (per-hospital so each tenant acts as its own bridge;
+  // unset values fall back to env-level ABDM_* config).
   hipId?: string;
+  hipName?: string;
   hiuId?: string;
+  hiuName?: string;
+  abdmClientId?: string;
+  abdmClientSecret?: string;
+  abdmCallbackUrl?: string;
+  hfrFacilityId?: string;
+  hprId?: string;
 }
 
 interface UpdateHospitalData {
@@ -88,7 +100,21 @@ interface UpdateHospitalData {
   status?: any;
   isActive?: boolean;
   hipId?: string;
+  hipName?: string;
   hiuId?: string;
+  hiuName?: string;
+  abdmClientId?: string;
+  abdmClientSecret?: string;
+  abdmCallbackUrl?: string;
+  hfrFacilityId?: string;
+  hprId?: string;
+  abdmEnabled?: boolean;
+  defaultOpdCharge?: number;
+  operatingHours?: any;
+  defaultSlotDuration?: number;
+  breakTimes?: any;
+  holidays?: any;
+  is24x7?: boolean;
 }
 
 export class HospitalService {
@@ -202,9 +228,19 @@ export class HospitalService {
           maxPatients: planLimits.maxPatients,
           maxStorage: planLimits.maxStorage,
           
-          // ABDM Integration (HIP/HIU facility IDs from HFR)
+          // ABDM Integration (HIP/HIU facility IDs + per-hospital bridge creds)
           hipId: data.hipId || null,
+          hipName: data.hipName || null,
           hiuId: data.hiuId || null,
+          hiuName: data.hiuName || null,
+          abdmClientId: data.abdmClientId || null,
+          abdmClientSecret: data.abdmClientSecret || null,
+          abdmCallbackUrl: data.abdmCallbackUrl || null,
+          hfrFacilityId: data.hfrFacilityId || null,
+          hprId: data.hprId || null,
+
+          // Default OPD charge
+          defaultOpdCharge: data.defaultOpdCharge != null ? data.defaultOpdCharge : null,
 
           // Onboarding
           onboardingStep: 1,
@@ -266,10 +302,7 @@ export class HospitalService {
       };
     } catch (error: any) {
       logger.error('Failed to onboard hospital', error);
-      throw new AppError(
-        error.message || 'Failed to onboard hospital',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -333,10 +366,7 @@ export class HospitalService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch hospitals', error);
-      throw new AppError(
-        error.message || 'Failed to fetch hospitals',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -373,15 +403,12 @@ export class HospitalService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch hospital', error);
-      throw new AppError(
-        error.message || 'Failed to fetch hospital',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
   // Update hospital
-  async updateHospital(id: string, data: UpdateHospitalData) {
+  async updateHospital(id: string, data: UpdateHospitalData, currentUser?: any) {
     try {
       const hospital = await prisma.hospital.findUnique({
         where: { id },
@@ -389,6 +416,19 @@ export class HospitalService {
 
       if (!hospital) {
         throw new AppError('Hospital not found', 404);
+      }
+
+      // Tenant guard: hospital ADMIN can only update their own hospital row.
+      // SUPER_ADMIN can update any hospital. Plan/limits/status are still
+      // server-controlled below so ADMIN cannot escalate their own tier.
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (currentUser.hospitalId !== id) {
+          throw new AppError('You can only update your own hospital', 403);
+        }
+        // ADMIN may not change plan/limits/status/active flag from this endpoint.
+        delete (data as any).plan;
+        delete (data as any).status;
+        delete (data as any).isActive;
       }
 
       // Check email uniqueness if changing
@@ -417,10 +457,7 @@ export class HospitalService {
       };
     } catch (error: any) {
       logger.error('Failed to update hospital', error);
-      throw new AppError(
-        error.message || 'Failed to update hospital',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -480,10 +517,7 @@ export class HospitalService {
       };
     } catch (error: any) {
       logger.error('Failed to update hospital plan', error);
-      throw new AppError(
-        error.message || 'Failed to update hospital plan',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -520,10 +554,7 @@ export class HospitalService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch hospital stats', error);
-      throw new AppError(
-        error.message || 'Failed to fetch hospital stats',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -556,10 +587,7 @@ export class HospitalService {
       };
     } catch (error: any) {
       logger.error('Failed to delete hospital', error);
-      throw new AppError(
-        error.message || 'Failed to delete hospital',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 

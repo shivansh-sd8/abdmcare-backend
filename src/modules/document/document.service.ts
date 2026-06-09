@@ -54,9 +54,12 @@ export class DocumentService {
     return { id: document.id, storageUrl: filePath, checksum };
   }
 
-  async getDocumentById(id: string, currentUser?: { hospitalId?: string }) {
+  async getDocumentById(id: string, currentUser?: { role?: string; hospitalId?: string }) {
     const where: any = { id };
-    if (currentUser?.hospitalId) {
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      if (!currentUser.hospitalId) {
+        throw new AppError('Document not found', 404);
+      }
       where.hospitalId = currentUser.hospitalId;
     }
 
@@ -71,9 +74,16 @@ export class DocumentService {
     return document;
   }
 
-  async getDocumentsByPatient(patientId: string, currentUser?: { hospitalId?: string }, filters?: { type?: string }) {
+  async getDocumentsByPatient(
+    patientId: string,
+    currentUser?: { role?: string; hospitalId?: string },
+    filters?: { type?: string }
+  ) {
     const where: any = { patientId };
-    if (currentUser?.hospitalId) {
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      if (!currentUser.hospitalId) {
+        return [];
+      }
       where.hospitalId = currentUser.hospitalId;
     }
     if (filters?.type) {
@@ -89,7 +99,10 @@ export class DocumentService {
     });
   }
 
-  async downloadDocument(id: string, currentUser?: { hospitalId?: string }): Promise<{ buffer: Buffer; fileName: string; mimeType: string }> {
+  async downloadDocument(
+    id: string,
+    currentUser?: { role?: string; hospitalId?: string }
+  ): Promise<{ buffer: Buffer; fileName: string; mimeType: string }> {
     const document = await this.getDocumentById(id, currentUser);
 
     if (!fs.existsSync(document.storageUrl)) {

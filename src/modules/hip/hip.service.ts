@@ -8,6 +8,7 @@ import EncryptionService from '../../common/utils/encryption';
 import { healthDataPushQueue, HealthDataPushJobData } from '../../common/config/queue';
 import redisClient from '../../common/config/redis';
 import { pickPatientByCascade, deriveHiType, AbdmHiType } from './discovery-helpers';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Logging helpers (link care context flow)
@@ -166,11 +167,14 @@ export class HipService {
     if (!hospital) throw new AppError('Hospital not found', 404);
     if (!hospital.hipId) throw new AppError('Hospital has no HIP ID configured', 400);
 
+    // Use per-hospital ABDM client id when set; fall back to env-level bridge.
+    const bridgeId = hospital.abdmClientId || abdmConfig.clientId;
+
     await abdmClient.addBridgeHipService({
       facilityId: hospital.hipId,
-      facilityName: hospital.name,
-      bridgeId: abdmConfig.clientId,
-      hipName: hospital.name,
+      facilityName: hospital.hipName || hospital.name,
+      bridgeId,
+      hipName: hospital.hipName || hospital.name,
       active: true,
     });
 
@@ -181,6 +185,34 @@ export class HipService {
 
     logger.info('HIP service registered for hospital', { hospitalId, hipId: hospital.hipId });
     return { hipId: hospital.hipId, registered: true };
+  }
+
+  /**
+   * Register the hospital as an HIU bridge with ABDM. Mirrors `registerHipService`
+   * for HIU-side capabilities (consent + data fetch).
+   */
+  async registerHiuService(hospitalId: string) {
+    const hospital = await prisma.hospital.findUnique({ where: { id: hospitalId } });
+    if (!hospital) throw new AppError('Hospital not found', 404);
+    if (!hospital.hiuId) throw new AppError('Hospital has no HIU ID configured', 400);
+
+    const bridgeId = hospital.abdmClientId || abdmConfig.clientId;
+
+    await abdmClient.addBridgeHiuService({
+      facilityId: hospital.hiuId,
+      facilityName: hospital.hiuName || hospital.name,
+      bridgeId,
+      hiuName: hospital.hiuName || hospital.name,
+      active: true,
+    });
+
+    await prisma.hospital.update({
+      where: { id: hospitalId },
+      data: { abdmEnabled: true, abdmRegisteredAt: new Date() },
+    });
+
+    logger.info('HIU service registered for hospital', { hospitalId, hiuId: hospital.hiuId });
+    return { hiuId: hospital.hiuId, registered: true };
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -250,7 +282,7 @@ export class HipService {
         hipId: abdmConfig.hip.id,
         ...describeAbdmError(error),
       });
-      throw new AppError(error.message || 'Failed to generate link token', error.response?.status || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -336,7 +368,7 @@ export class HipService {
         hasLinkToken: !!params.linkToken,
         ...describeAbdmError(error),
       });
-      throw new AppError(error.message || 'Failed to link care context', error.response?.status || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -389,7 +421,7 @@ export class HipService {
         careContextReference: params.careContextReference,
         ...describeAbdmError(error),
       });
-      throw new AppError(error.message || 'Failed to notify link context', error.response?.status || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -411,7 +443,7 @@ export class HipService {
       return res;
     } catch (error: any) {
       logger.error('HIP: Failed to send SMS notify', error);
-      throw new AppError(error.message || 'Failed to send SMS', error.response?.status || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -642,7 +674,7 @@ export class HipService {
       return response;
     } catch (error: any) {
       logger.error('HIP: Failed to discover care contexts', describeAbdmError(error));
-      throw new AppError(error.message || 'Failed to discover care contexts', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -714,7 +746,7 @@ export class HipService {
       return response;
     } catch (error: any) {
       logger.error('HIP: Failed to link care contexts', describeAbdmError(error));
-      throw new AppError(error.message || 'Failed to link care contexts', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -799,7 +831,7 @@ export class HipService {
       return response;
     } catch (error: any) {
       logger.error('HIP: Failed to confirm link', describeAbdmError(error));
-      throw new AppError(error.message || 'Failed to confirm link', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -827,7 +859,7 @@ export class HipService {
       });
     } catch (error: any) {
       logger.error('HIP: consent on-notify failed', error);
-      throw new AppError(error.message || 'Failed to acknowledge consent', error.response?.status || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -929,7 +961,7 @@ export class HipService {
       return { success: true, message: 'Health information request accepted, data push in progress' };
     } catch (error: any) {
       logger.error('HIP: Failed to process health information request', error);
-      throw new AppError(error.message || 'Failed to process health information request', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -1160,7 +1192,7 @@ export class HipService {
       };
     } catch (error: any) {
       logger.error('HIP: Failed to add care contexts', error);
-      throw new AppError(error.message || 'Failed to add care contexts', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 

@@ -43,12 +43,6 @@ export class AuthController {
     ResponseHandler.created(res, 'User registered successfully', result);
   });
 
-  superAdminSignup = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const { secretKey, ...userData } = req.body;
-    const result = await this.authService.superAdminSignup(userData, secretKey);
-    ResponseHandler.created(res, 'Super Admin registered successfully', result);
-  });
-
   refreshToken = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const refreshToken = req.body.refreshToken || req.cookies?.refreshToken;
     if (!refreshToken) {

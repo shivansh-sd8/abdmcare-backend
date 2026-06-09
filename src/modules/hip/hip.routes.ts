@@ -37,6 +37,13 @@ router.post(
   hipController.registerHipService
 );
 
+// M1: HIU Registration (mirrors HIP)
+router.post(
+  '/register-hiu',
+  authorize('SUPER_ADMIN', 'ADMIN'),
+  hipController.registerHiuService
+);
+
 // M1: Facility QR data & received shares
 router.get(
   '/facility-qr',

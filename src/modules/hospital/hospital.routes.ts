@@ -3,8 +3,13 @@ import { body } from 'express-validator';
 import hospitalController from './hospital.controller';
 import { authenticate, authorize } from '../../common/middleware/auth';
 import { validate } from '../../common/middleware/validation';
+import { auditLog } from '../../common/middleware/audit';
 
 const router = Router();
+
+// Audit every authenticated hospital operation. Public routes below `authenticate`
+// are not audited.
+router.use(auditLog('HOSPITAL'));
 
 const HOSPITAL_TYPES = [
   'HOSPITAL', 'CLINIC', 'NURSING_HOME', 'DIAGNOSTIC_CENTER',
@@ -214,7 +219,7 @@ router.get(
 router.put(
   '/:id',
   authenticate,
-  authorize('SUPER_ADMIN'),
+  authorize('SUPER_ADMIN', 'ADMIN'),
   updateValidation,
   validate,
   hospitalController.updateHospital

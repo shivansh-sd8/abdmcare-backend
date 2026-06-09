@@ -6,6 +6,7 @@ import logger from '../../common/config/logger';
 import EncryptionService from '../../common/utils/encryption';
 import { config } from '../../common/config/index';
 import { parseFHIRBundle } from '../../common/utils/fhir/fhir-parser';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HIU Service V3 (M3 — Health Information User)
@@ -88,7 +89,7 @@ export class HiuService {
       return { success: true, message: 'Health information request sent successfully' };
     } catch (error: any) {
       logger.error('HIU: Failed to request health information', error);
-      throw new AppError(error.message || 'Failed to request health information', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -105,7 +106,7 @@ export class HiuService {
       logger.info('HIU: consent on-notify acknowledged');
     } catch (error: any) {
       logger.error('HIU: consent on-notify failed', error);
-      throw new AppError(error.message || 'Failed to acknowledge consent', error.response?.status || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -142,7 +143,7 @@ export class HiuService {
       logger.info('HIU: data flow notify sent', { transactionId: params.transactionId, hipId });
     } catch (error: any) {
       logger.error('HIU: data flow notify failed', error);
-      throw new AppError(error.message || 'Failed to send data flow notification', error.response?.status || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -275,7 +276,7 @@ export class HiuService {
       return { success: true, message: 'Health information received successfully', entries: decryptedEntries };
     } catch (error: any) {
       logger.error('HIU: Failed to receive health information', error);
-      throw new AppError(error.message || 'Failed to receive health information', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -347,7 +348,7 @@ export class HiuService {
       return { success: true, data: externalRecords };
     } catch (error: any) {
       logger.error('HIU: Failed to fetch health records', error);
-      throw new AppError(error.message || 'Failed to fetch health records', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 

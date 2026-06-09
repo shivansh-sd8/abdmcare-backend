@@ -39,13 +39,31 @@ class VitalsService {
       bmi = Math.round(bmi * 10) / 10;
     }
 
-    // Auto-link to the patient's active encounter if not provided
+    // Auto-link to the patient's active encounter if not provided.
+    // We include the most common in-flight states (the visit is "live" until
+    // it transitions to COMPLETED/CANCELLED), so vitals taken during a consult
+    // — even after labs/scans/pharmacy/billing have been triggered — still
+    // attach to the right encounter.
     let encounterId = data.encounterId;
     if (!encounterId && data.patientId) {
       const activeEnc = await prisma.encounter.findFirst({
         where: {
           patientId: data.patientId,
-          status: { in: ['CONSULTING', 'CHECKED_IN', 'SCHEDULED'] },
+          status: {
+            in: [
+              'SCHEDULED',
+              'CHECKED_IN',
+              'CONSULTING',
+              'LAB_PENDING',
+              'LAB_IN_PROGRESS',
+              'LAB_COMPLETED',
+              'SCAN_PENDING',
+              'SCAN_IN_PROGRESS',
+              'SCAN_COMPLETED',
+              'PHARMACY_PENDING',
+              'BILLING_PENDING',
+            ] as any,
+          },
         },
         orderBy: { visitDate: 'desc' },
         select: { id: true },

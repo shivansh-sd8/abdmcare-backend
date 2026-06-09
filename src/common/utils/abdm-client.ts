@@ -36,6 +36,58 @@ interface AbdmV3SessionResponse {
   tokenType: string;
 }
 
+/**
+ * Per-hospital ABDM context. When provided (typically resolved from
+ * `Hospital` row by `resolveHospitalAbdmContext()`), every gateway call
+ * uses these values instead of the global env-level ABDM_* config.
+ *
+ * Any field not provided falls back to the env global so single-tenant
+ * deployments and partial migrations keep working.
+ */
+export interface HospitalAbdmContext {
+  hospitalId?: string;
+  clientId?: string | null;
+  clientSecret?: string | null;
+  hipId?: string | null;
+  hiuId?: string | null;
+  hipName?: string | null;
+  hiuName?: string | null;
+  cmId?: string | null;
+}
+
+/**
+ * Load the per-hospital ABDM credentials row from the DB and shape it as a
+ * `HospitalAbdmContext`. Returns `null` if no `hospitalId` is given.
+ *
+ * Use this in route handlers / services to make ABDM calls scoped to the
+ * caller's hospital. Pass the result to `abdmClient.post(url, body, headers, ctx)`.
+ */
+export async function resolveHospitalAbdmContext(
+  hospitalId?: string | null
+): Promise<HospitalAbdmContext | null> {
+  if (!hospitalId) return null;
+  const hospital = await prisma.hospital.findUnique({
+    where: { id: hospitalId },
+    select: {
+      id: true,
+      hipId: true, hipName: true,
+      hiuId: true, hiuName: true,
+      abdmClientId: true, abdmClientSecret: true,
+      name: true,
+    },
+  });
+  if (!hospital) return null;
+  return {
+    hospitalId: hospital.id,
+    clientId: hospital.abdmClientId,
+    clientSecret: hospital.abdmClientSecret,
+    hipId: hospital.hipId,
+    hiuId: hospital.hiuId,
+    hipName: hospital.hipName || hospital.name,
+    hiuName: hospital.hiuName || hospital.name,
+  };
+}
+
 // ABDM has deprecated v0.5. Using v3 only — confirmed in writing by ABDM support
 // (06/04/2026 & 06/05/2026 sandbox tickets). v0.5 calls from non-whitelisted
 // origin servers are now blocked at CloudFront with HTML 403 responses.
@@ -265,14 +317,23 @@ export class AbdmClient {
   /** Headers for gateway calls (dev.abdm.gov.in).
    * `extra` lets callers add ABDM routing headers required by specific V3
    * endpoints, e.g. X-HIP-ID (generate-token / link/carecontext),
-   * X-LINK-TOKEN (link/carecontext) or X-HIU-ID. */
-  gatewayHeaders(token: string, extra?: Record<string, string>): Record<string, string> {
+   * X-LINK-TOKEN (link/carecontext) or X-HIU-ID.
+   *
+   * If `tenant` is provided, its `cmId` overrides the env-level CM-ID. The
+   * caller is responsible for stamping any HIP/HIU headers in `extra` (or
+   * letting `post()` / `get()` auto-detect them from the URL).
+   */
+  gatewayHeaders(
+    token: string,
+    extra?: Record<string, string>,
+    tenant?: HospitalAbdmContext | null,
+  ): Record<string, string> {
     return {
       'Content-Type': 'application/json',
       'REQUEST-ID': crypto.randomUUID(),
       'TIMESTAMP': new Date().toISOString(),
       'Authorization': `Bearer ${token}`,
-      'X-CM-ID': abdmConfig.cmId,
+      'X-CM-ID': (tenant?.cmId || abdmConfig.cmId) as string,
       ...(extra || {}),
     };
   }
@@ -445,27 +506,36 @@ export class AbdmClient {
    * detect from the URL path so callers don't have to remember; explicit
    * extraHeaders still win on conflict.
    */
-  async post<T = any>(url: string, data?: any, extraHeaders?: Record<string, string>): Promise<T> {
+  async post<T = any>(
+    url: string,
+    data?: any,
+    extraHeaders?: Record<string, string>,
+    tenant?: HospitalAbdmContext | null,
+  ): Promise<T> {
     const token = await this.ensureValidToken();
     const role = this.detectGatewayRole(url);
     const merged: Record<string, string> = {};
-    if (role === 'HIU' && abdmConfig.hiu.id) merged['X-HIU-ID'] = abdmConfig.hiu.id;
-    if (role === 'HIP' && abdmConfig.hip.id) merged['X-HIP-ID'] = abdmConfig.hip.id;
+    const hipId = tenant?.hipId || abdmConfig.hip.id;
+    const hiuId = tenant?.hiuId || abdmConfig.hiu.id;
+    if (role === 'HIU' && hiuId) merged['X-HIU-ID'] = hiuId;
+    if (role === 'HIP' && hipId) merged['X-HIP-ID'] = hipId;
     Object.assign(merged, extraHeaders || {});
     const response = await this.axiosInstance.post<T>(url, data, {
-      headers: this.gatewayHeaders(token, merged),
+      headers: this.gatewayHeaders(token, merged, tenant),
     });
     return response.data;
   }
 
-  async get<T = any>(url: string): Promise<T> {
+  async get<T = any>(url: string, tenant?: HospitalAbdmContext | null): Promise<T> {
     const token = await this.ensureValidToken();
     const role = this.detectGatewayRole(url);
     const extra: Record<string, string> = {};
-    if (role === 'HIU' && abdmConfig.hiu.id) extra['X-HIU-ID'] = abdmConfig.hiu.id;
-    if (role === 'HIP' && abdmConfig.hip.id) extra['X-HIP-ID'] = abdmConfig.hip.id;
+    const hipId = tenant?.hipId || abdmConfig.hip.id;
+    const hiuId = tenant?.hiuId || abdmConfig.hiu.id;
+    if (role === 'HIU' && hiuId) extra['X-HIU-ID'] = hiuId;
+    if (role === 'HIP' && hipId) extra['X-HIP-ID'] = hipId;
     const response = await this.axiosInstance.get<T>(url, {
-      headers: this.gatewayHeaders(token, extra),
+      headers: this.gatewayHeaders(token, extra, tenant),
     });
     return response.data;
   }

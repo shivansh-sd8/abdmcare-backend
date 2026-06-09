@@ -1,6 +1,7 @@
 import prisma from '../../common/config/database';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 interface UpdateConsultationRequest {
   chiefComplaint?: string;
@@ -184,10 +185,7 @@ class EncounterService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch encounter', error);
-      throw new AppError(
-        error.message || 'Failed to fetch encounter',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -266,10 +264,7 @@ class EncounterService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch doctor encounters', error);
-      throw new AppError(
-        error.message || 'Failed to fetch encounters',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -440,10 +435,7 @@ class EncounterService {
       };
     } catch (error: any) {
       logger.error('Failed to update consultation', error);
-      throw new AppError(
-        error.message || 'Failed to update consultation',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -685,10 +677,7 @@ class EncounterService {
       };
     } catch (error: any) {
       logger.error('Failed to complete consultation', error);
-      throw new AppError(
-        error.message || 'Failed to complete consultation',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 

@@ -6,6 +6,7 @@ import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import { ConsentPurpose } from '@prisma/client';
 import { purgeConsentData } from '../hiu/consent-compliance';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Consent Service V3 (M3 — Consent Management)
@@ -195,7 +196,7 @@ export class ConsentService {
       return { success: true, data: res };
     } catch (error: any) {
       logger.error('Failed to check consent status', error);
-      throw new AppError(error.message || 'Failed to check consent status', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -309,7 +310,7 @@ export class ConsentService {
    * M3: Fetch consent artefact
    * POST /api/hiecm/consent/v3/fetch
    */
-  async fetchConsentArtefact(consentId: string) {
+  async fetchConsentArtefact(consentId: string, currentUser?: { role?: string; hospitalId?: string }) {
     try {
       const consent = await prisma.consent.findUnique({
         where: { id: consentId },
@@ -317,6 +318,14 @@ export class ConsentService {
       });
 
       if (!consent) throw new AppError('Consent not found', 404);
+      if (
+        currentUser &&
+        currentUser.role !== 'SUPER_ADMIN' &&
+        consent.patient?.hospitalId &&
+        consent.patient.hospitalId !== currentUser.hospitalId
+      ) {
+        throw new AppError('Consent not found', 404);
+      }
       if (!consent.abdmConsentId) throw new AppError('ABDM consent ID not available', 400);
 
       // The M3 consent/v3/fetch endpoint REQUIRES the X-HIU-ID routing header —
@@ -333,19 +342,39 @@ export class ConsentService {
       return { success: true, data: response };
     } catch (error: any) {
       logger.error('Failed to fetch consent artefact', error);
-      throw new AppError(error.message || 'Failed to fetch consent artefact', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
-  async getPatientConsents(patientId: string) {
+  async getPatientConsents(patientId: string, currentUser?: { role?: string; hospitalId?: string }) {
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      const patient = await prisma.patient.findUnique({
+        where: { id: patientId },
+        select: { hospitalId: true },
+      });
+      if (!patient || patient.hospitalId !== currentUser.hospitalId) {
+        return { success: true, data: [] };
+      }
+    }
     const consents = await prisma.consent.findMany({ where: { patientId }, orderBy: { createdAt: 'desc' } });
     return { success: true, data: consents };
   }
 
-  async revokeConsent(consentId: string) {
+  async revokeConsent(consentId: string, currentUser?: { role?: string; hospitalId?: string }) {
     try {
-      const consent = await prisma.consent.findUnique({ where: { id: consentId } });
+      const consent = await prisma.consent.findUnique({
+        where: { id: consentId },
+        include: { patient: { select: { hospitalId: true } } },
+      });
       if (!consent) throw new AppError('Consent not found', 404);
+      if (
+        currentUser &&
+        currentUser.role !== 'SUPER_ADMIN' &&
+        consent.patient?.hospitalId &&
+        consent.patient.hospitalId !== currentUser.hospitalId
+      ) {
+        throw new AppError('Consent not found', 404);
+      }
 
       // ABDM provides NO HIU-initiated consent-revoke endpoint (the M3 HIU API
       // set is: init, status, on-notify, fetch, health-info-request, data-flow
@@ -385,7 +414,7 @@ export class ConsentService {
       };
     } catch (error: any) {
       logger.error('Failed to revoke consent', error);
-      throw new AppError(error.message || 'Failed to revoke consent', error.statusCode || 500);
+      rethrowServiceError(error);
     }
   }
 
@@ -402,13 +431,26 @@ export class ConsentService {
     return { success: true, data: consents };
   }
 
-  async getConsentStatusById(consentId: string) {
+  async getConsentStatusById(consentId: string, currentUser?: { role?: string; hospitalId?: string }) {
     const consent = await prisma.consent.findUnique({
       where: { id: consentId },
-      select: { id: true, consentId: true, status: true, grantedAt: true, revokedAt: true, createdAt: true, updatedAt: true },
+      select: {
+        id: true, consentId: true, status: true, grantedAt: true, revokedAt: true,
+        createdAt: true, updatedAt: true,
+        patient: { select: { hospitalId: true } },
+      },
     });
     if (!consent) throw new AppError('Consent not found', 404);
-    return { success: true, data: consent };
+    if (
+      currentUser &&
+      currentUser.role !== 'SUPER_ADMIN' &&
+      consent.patient?.hospitalId &&
+      consent.patient.hospitalId !== currentUser.hospitalId
+    ) {
+      throw new AppError('Consent not found', 404);
+    }
+    const { patient, ...rest } = consent as any;
+    return { success: true, data: rest };
   }
 
   async getConsentStats(currentUser?: any) {

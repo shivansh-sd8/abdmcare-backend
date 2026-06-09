@@ -1,146 +1,86 @@
-import { Request, Response } from 'express';
+import { Request, Response, NextFunction } from 'express';
 import prisma from '../common/config/database';
-import logger from '../common/config/logger';
+import { AppError } from '../common/middleware/errorHandler';
+import ResponseHandler from '../common/utils/response';
 
-export const getNotifications = async (req: Request, res: Response): Promise<void> => {
+export const getNotifications = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
     const userId = (req as any).user?.id;
-
-    if (!userId) {
-      res.status(401).json({
-        success: false,
-        message: 'Unauthorized',
-      });
-      return;
-    }
+    if (!userId) return next(new AppError('Unauthorized', 401));
 
     const notifications = await prisma.notification.findMany({
-      where: {
-        userId,
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
       take: 50,
     });
 
-    res.json({
-      success: true,
-      data: notifications,
-    });
-  } catch (error: any) {
-    logger.error('Get notifications error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch notifications',
-      error: error.message,
-    });
+    ResponseHandler.success(res, 'Notifications fetched', notifications);
+  } catch (error) {
+    next(error);
   }
 };
 
-export const markAllAsRead = async (req: Request, res: Response): Promise<void> => {
+export const markAllAsRead = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
     const userId = (req as any).user?.id;
-
-    if (!userId) {
-      res.status(401).json({
-        success: false,
-        message: 'Unauthorized',
-      });
-      return;
-    }
+    if (!userId) return next(new AppError('Unauthorized', 401));
 
     await prisma.notification.updateMany({
-      where: {
-        userId,
-        read: false,
-      },
-      data: {
-        read: true,
-      },
+      where: { userId, read: false },
+      data: { read: true },
     });
 
-    res.json({
-      success: true,
-      message: 'All notifications marked as read',
-    });
-  } catch (error: any) {
-    logger.error('Mark all as read error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to mark notifications as read',
-      error: error.message,
-    });
+    ResponseHandler.success(res, 'All notifications marked as read');
+  } catch (error) {
+    next(error);
   }
 };
 
-export const markAsRead = async (req: Request, res: Response): Promise<void> => {
+export const markAsRead = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
     const userId = (req as any).user?.id;
     const { id } = req.params;
-
-    if (!userId) {
-      res.status(401).json({
-        success: false,
-        message: 'Unauthorized',
-      });
-      return;
-    }
+    if (!userId) return next(new AppError('Unauthorized', 401));
 
     const notification = await prisma.notification.update({
-      where: {
-        id,
-        userId,
-      },
-      data: {
-        read: true,
-      },
+      where: { id, userId },
+      data: { read: true },
     });
 
-    res.json({
-      success: true,
-      data: notification,
-    });
-  } catch (error: any) {
-    logger.error('Mark as read error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to mark notification as read',
-      error: error.message,
-    });
+    ResponseHandler.success(res, 'Notification marked as read', notification);
+  } catch (error) {
+    next(error);
   }
 };
 
-export const deleteNotification = async (req: Request, res: Response): Promise<void> => {
+export const deleteNotification = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
   try {
     const userId = (req as any).user?.id;
     const { id } = req.params;
-
-    if (!userId) {
-      res.status(401).json({
-        success: false,
-        message: 'Unauthorized',
-      });
-      return;
-    }
+    if (!userId) return next(new AppError('Unauthorized', 401));
 
     await prisma.notification.delete({
-      where: {
-        id,
-        userId,
-      },
+      where: { id, userId },
     });
 
-    res.json({
-      success: true,
-      message: 'Notification deleted successfully',
-    });
-  } catch (error: any) {
-    logger.error('Delete notification error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to delete notification',
-      error: error.message,
-    });
+    ResponseHandler.success(res, 'Notification deleted');
+  } catch (error) {
+    next(error);
   }
 };

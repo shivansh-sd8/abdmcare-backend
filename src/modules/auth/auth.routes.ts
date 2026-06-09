@@ -69,50 +69,6 @@ const registerValidation = [
 
 /**
  * @openapi
- * /auth/super-admin-signup:
- *   post:
- *     tags: [Auth]
- *     summary: Register the first Super Admin account
- *     description: Public route protected by a server-side secret key. Used for initial platform setup.
- *     security: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [email, password, firstName, lastName, username, secretKey]
- *             properties:
- *               email: { type: string, format: email }
- *               password: { type: string, minLength: 8 }
- *               firstName: { type: string }
- *               lastName: { type: string }
- *               username: { type: string, minLength: 3 }
- *               secretKey: { type: string }
- *     responses:
- *       201:
- *         description: Super Admin created successfully
- *       400:
- *         description: Validation error or invalid secret key
- */
-router.post(
-  '/super-admin-signup',
-  [
-    body('email').isEmail().withMessage('Valid email is required'),
-    body('password')
-      .isLength({ min: 8 })
-      .withMessage('Password must be at least 8 characters'),
-    body('firstName').notEmpty().withMessage('First name is required'),
-    body('lastName').notEmpty().withMessage('Last name is required'),
-    body('username').isLength({ min: 3 }).withMessage('Username must be at least 3 characters'),
-    body('secretKey').notEmpty().withMessage('Secret key is required'),
-  ],
-  validate,
-  authController.superAdminSignup
-);
-
-/**
- * @openapi
  * /auth/register:
  *   post:
  *     tags: [Auth]

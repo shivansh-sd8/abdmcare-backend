@@ -3,10 +3,12 @@ import appointmentController from './appointment.controller';
 import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
 import { authenticate, authorize } from '../../common/middleware/auth';
+import { auditLog } from '../../common/middleware/audit';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(auditLog('APPOINTMENT'));
 
 router.post(
   '/',

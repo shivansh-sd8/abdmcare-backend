@@ -24,10 +24,13 @@ router.get(
 );
 
 // Get full encounter snapshot (encounter + vitals + labs + Rx + payments + hospital)
+// NOTE: RECEPTIONIST is intentionally excluded — they should only see the
+// non-clinical encounter summary used for billing/check-in. Full clinical
+// snapshots are restricted to clinicians and admins.
 router.get(
   '/:id/full',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
   encounterController.getEncounterFull
 );
 

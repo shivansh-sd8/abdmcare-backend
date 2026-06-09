@@ -2,6 +2,7 @@ import prisma from '../../common/config/database';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import bcrypt from 'bcryptjs';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 interface CreateDoctorRequest {
   hprId?: string;
@@ -143,10 +144,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to create doctor', error);
-      throw new AppError(
-        error.message || 'Failed to create doctor',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -184,10 +182,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch doctor', error);
-      throw new AppError(
-        error.message || 'Failed to fetch doctor',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -234,10 +229,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to update doctor', error);
-      throw new AppError(
-        error.message || 'Failed to update doctor',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -299,10 +291,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to search doctors', error);
-      throw new AppError(
-        error.message || 'Failed to search doctors',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -330,10 +319,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to delete doctor', error);
-      throw new AppError(
-        error.message || 'Failed to delete doctor',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -372,10 +358,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch doctor stats', error);
-      throw new AppError(
-        error.message || 'Failed to fetch doctor stats',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 

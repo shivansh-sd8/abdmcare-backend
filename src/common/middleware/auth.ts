@@ -58,15 +58,14 @@ export const authenticate = async (
 export const authorize = (...roles: string[]) => {
   return (req: AuthenticatedRequest, _res: Response, next: NextFunction): void => {
     if (!req.user) {
-      throw new AppError('User not authenticated', 401);
+      return next(new AppError('User not authenticated', 401));
     }
 
-    // Case-insensitive role comparison
     const userRole = req.user.role.toUpperCase();
     const allowedRoles = roles.map(r => r.toUpperCase());
-    
+
     if (!allowedRoles.includes(userRole)) {
-      throw new AppError('Insufficient permissions', 403);
+      return next(new AppError('Insufficient permissions', 403));
     }
 
     next();

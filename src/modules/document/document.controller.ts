@@ -1,25 +1,17 @@
-import { Request, Response } from 'express';
+import { Request, Response, NextFunction } from 'express';
 import documentService from './document.service';
+import { AppError } from '../../common/middleware/errorHandler';
 
 function ok(res: Response, data: any) {
   res.json({ success: true, data });
 }
 
-function err(res: Response, error: any, status = 500) {
-  const msg = error?.message || 'Internal server error';
-  const code = msg.includes('not found') ? 404 : status;
-  res.status(code).json({ success: false, message: msg });
-}
-
-export async function generateDocument(req: Request, res: Response) {
+export async function generateDocument(req: Request, res: Response, next: NextFunction) {
   try {
     const user = (req as any).user;
     const { patientId, encounterId, admissionId, type, fileName } = req.body;
 
-    if (!patientId || !type) {
-      res.status(400).json({ success: false, message: 'patientId and type are required' });
-      return;
-    }
+    if (!patientId || !type) throw new AppError('patientId and type are required', 400);
 
     let content: Buffer;
     if ((req as any).file) {
@@ -27,8 +19,7 @@ export async function generateDocument(req: Request, res: Response) {
     } else if (req.body.content) {
       content = Buffer.from(req.body.content, 'base64');
     } else {
-      res.status(400).json({ success: false, message: 'PDF content required (file upload or base64 content field)' });
-      return;
+      throw new AppError('PDF content required (file upload or base64 content field)', 400);
     }
 
     const result = await documentService.generateDocument({
@@ -43,18 +34,18 @@ export async function generateDocument(req: Request, res: Response) {
     });
 
     res.status(201).json({ success: true, data: result });
-  } catch (e) { err(res, e); }
+  } catch (e) { next(e); }
 }
 
-export async function getDocument(req: Request, res: Response) {
+export async function getDocument(req: Request, res: Response, next: NextFunction) {
   try {
     const user = (req as any).user;
     const data = await documentService.getDocumentById(req.params.id, user);
     ok(res, data);
-  } catch (e) { err(res, e); }
+  } catch (e) { next(e); }
 }
 
-export async function downloadDocument(req: Request, res: Response) {
+export async function downloadDocument(req: Request, res: Response, next: NextFunction) {
   try {
     const user = (req as any).user;
     const { buffer, fileName, mimeType } = await documentService.downloadDocument(req.params.id, user);
@@ -65,41 +56,38 @@ export async function downloadDocument(req: Request, res: Response) {
       'Content-Length': buffer.length.toString(),
     });
     res.send(buffer);
-  } catch (e) { err(res, e); }
+  } catch (e) { next(e); }
 }
 
-export async function listDocuments(req: Request, res: Response) {
+export async function listDocuments(req: Request, res: Response, next: NextFunction) {
   try {
     const user = (req as any).user;
     const { patientId, type } = req.query as any;
 
-    if (!patientId) {
-      res.status(400).json({ success: false, message: 'patientId query parameter is required' });
-      return;
-    }
+    if (!patientId) throw new AppError('patientId query parameter is required', 400);
 
     const data = await documentService.getDocumentsByPatient(patientId, user, { type });
     ok(res, data);
-  } catch (e) { err(res, e); }
+  } catch (e) { next(e); }
 }
 
-export async function getDocumentStats(req: Request, res: Response) {
+export async function getDocumentStats(req: Request, res: Response, next: NextFunction) {
   try {
     const user = (req as any).user;
-    const data = await documentService.getDocumentStats(user.hospitalId);
+    const hospitalId = user?.role === 'SUPER_ADMIN'
+      ? (req.query.hospitalId as string | undefined)
+      : user?.hospitalId;
+    const data = await documentService.getDocumentStats(hospitalId);
     ok(res, data);
-  } catch (e) { err(res, e); }
+  } catch (e) { next(e); }
 }
 
-export async function publicDownload(req: Request, res: Response) {
+export async function publicDownload(req: Request, res: Response, next: NextFunction) {
   try {
     const { token } = req.params;
     const { documentId, valid } = documentService.validateDownloadToken(token);
 
-    if (!valid) {
-      res.status(403).json({ success: false, message: 'Download link has expired or is invalid' });
-      return;
-    }
+    if (!valid) throw new AppError('Download link has expired or is invalid', 403);
 
     const { buffer, fileName, mimeType } = await documentService.downloadDocument(documentId);
 
@@ -109,5 +97,5 @@ export async function publicDownload(req: Request, res: Response) {
       'Content-Length': buffer.length.toString(),
     });
     res.send(buffer);
-  } catch (e) { err(res, e); }
+  } catch (e) { next(e); }
 }

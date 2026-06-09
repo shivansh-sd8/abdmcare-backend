@@ -21,6 +21,7 @@ import pharmacyRoutes from '../modules/pharmacy/pharmacy.routes';
 import abdmDiagnosticsRoutes from './abdmDiagnosticsRoutes';
 import documentRoutes from '../modules/document/document.routes';
 import immunizationRoutes from './immunizationRoutes';
+import enquiryRoutes from '../modules/enquiry/enquiry.routes';
 
 const router = Router();
 
@@ -46,5 +47,6 @@ router.use('/pharmacy', pharmacyRoutes);
 router.use('/abdm/diagnostics', abdmDiagnosticsRoutes);
 router.use('/documents', documentRoutes);
 router.use('/immunizations', immunizationRoutes);
+router.use('/enquiry', enquiryRoutes);
 
 export default router;

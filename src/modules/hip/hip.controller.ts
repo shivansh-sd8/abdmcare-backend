@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { HipService } from './hip.service';
 import ResponseHandler from '../../common/utils/response';
-import { asyncHandler } from '../../common/middleware/errorHandler';
+import { asyncHandler, AppError } from '../../common/middleware/errorHandler';
 import abdmClient from '../../common/utils/abdm-client';
 import { abdmConfig } from '../../common/config/abdm';
 import logger from '../../common/config/logger';
@@ -158,10 +158,33 @@ export class HipController {
   });
 
   // ── M1: HFR / HIP Registration ──────────────────────────────────────────
+  // SUPER_ADMIN may register any hospital by supplying { hospitalId } in body
+  // or ?hospitalId=. Hospital ADMIN is locked to their own hospital.
   registerHipService = asyncHandler(async (req: Request, res: Response) => {
     const currentUser = (req as any).user;
-    const result = await this.hipService.registerHipService(currentUser.hospitalId);
+    const target =
+      currentUser?.role === 'SUPER_ADMIN'
+        ? (req.body?.hospitalId as string) || (req.query?.hospitalId as string) || currentUser.hospitalId
+        : currentUser.hospitalId;
+    if (!target) {
+      throw new AppError('hospitalId is required', 400);
+    }
+    const result = await this.hipService.registerHipService(target);
     ResponseHandler.success(res, 'HIP service registered with ABDM', result);
+  });
+
+  // ── M1: HIU Registration (mirrors HIP for HIU-side bridge) ──────────────
+  registerHiuService = asyncHandler(async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    const target =
+      currentUser?.role === 'SUPER_ADMIN'
+        ? (req.body?.hospitalId as string) || (req.query?.hospitalId as string) || currentUser.hospitalId
+        : currentUser.hospitalId;
+    if (!target) {
+      throw new AppError('hospitalId is required', 400);
+    }
+    const result = await this.hipService.registerHiuService(target);
+    ResponseHandler.success(res, 'HIU service registered with ABDM', result);
   });
 
   // ── M1: Facility QR & Received Shares ──────────────────────────────────────

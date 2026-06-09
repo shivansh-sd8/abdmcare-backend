@@ -24,6 +24,7 @@ model Patient {
   // Basic Info
   firstName        String
   lastName         String
+  middleName       String?
   gender           Gender
   dob              DateTime?
   mobile           String
@@ -31,6 +32,10 @@ model Patient {
   address          Json
   bloodGroup       String?
   emergencyContact Json?
+  maritalStatus    String?
+  occupation       String?
+  allergies        String[]      @default([])
+  medicalHistory   Json?         // { pastMedical: string[], familyHistory: string[], chronicConditions: string[] }
   
   // Hospital that registered the patient
   // Patient data can be shared across hospitals via ABDM Consent model
@@ -691,10 +696,20 @@ model Hospital {
   lastPaymentDate DateTime?
   totalRevenue Decimal  @default(0) @db.Decimal(12, 2)
   
-  // ABDM Integration
-  hipId       String?  @unique
-  hiuId       String?  @unique
-  abdmEnabled Boolean  @default(false)
+  // ABDM Integration (per-hospital so each tenant can act as its own
+  // HIP/HIU bridge. When any of these are unset the system falls back to
+  // the global env-level ABDM_* credentials so existing single-tenant
+  // deployments keep working unchanged).
+  hipId            String?  @unique
+  hipName          String?
+  hiuId            String?  @unique
+  hiuName          String?
+  abdmClientId     String?
+  abdmClientSecret String?
+  abdmCallbackUrl  String?
+  hfrFacilityId    String?  @unique
+  hprId            String?
+  abdmEnabled      Boolean  @default(false)
   abdmRegisteredAt DateTime?
   
   // Settings
@@ -753,6 +768,7 @@ model User {
   
   firstName     String
   lastName      String
+  phone         String?
   
   role          UserRole
   
@@ -902,6 +918,7 @@ enum AppointmentType {
   DIAGNOSTIC           // Diagnostic tests (X-ray, MRI, etc.)
   SURGERY_CONSULTATION // Pre/Post surgery consultation
   SECOND_OPINION       // Second opinion consultation
+  WALK_IN              // Walk-in patient (no prior booking)
 }
 
 enum AppointmentStatus {
@@ -933,7 +950,10 @@ enum PaymentMethod {
   CARD
   UPI
   NET_BANKING
+  BANK_TRANSFER
+  CHEQUE
   INSURANCE
+  OTHER
 }
 
 enum PaymentStatus {

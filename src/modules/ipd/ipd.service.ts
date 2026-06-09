@@ -890,7 +890,13 @@ export class IPDService {
       select: { medicineName: true, dosage: true, frequency: true, duration: true, quantity: true, price: true, encounterId: true },
     }) : [];
 
-    const labCharges      = labInvestigations.reduce((s, i) => s + Number(i.amount ?? 0), 0);
+    // Bill only investigations that are actually completed. Pending / in-progress
+    // tests will be billed once they finish — including them here causes patients
+    // to pay for samples that were never reported. Cancelled tests are skipped.
+    const billableInvestigations = labInvestigations.filter(
+      (i) => i.status === 'COMPLETED',
+    );
+    const labCharges      = billableInvestigations.reduce((s, i) => s + Number(i.amount ?? 0), 0);
     const medicineCharges = prescriptions.filter(r => r.status === 'DISPENSED')
                                          .reduce((s, r) => s + Number(r.totalCharges ?? 0), 0);
 
@@ -1256,11 +1262,14 @@ export class IPDService {
       },
     });
 
-    // Release old bed
+    // Release old bed: BedStatus is the runtime status (set to AVAILABLE after
+    // patient leaves) while cleaningStatus is a separate housekeeping signal.
+    // Setting status to a CleaningStatus value (NEEDS_CLEANING) breaks the
+    // Postgres enum and causes a hard 500.
     if (admission.bedId) {
       await prisma.bed.update({
         where: { id: admission.bedId },
-        data: { status: 'NEEDS_CLEANING', cleaningStatus: 'NEEDS_CLEANING' } as any,
+        data: { status: 'AVAILABLE', cleaningStatus: 'NEEDS_CLEANING' },
       });
     }
 

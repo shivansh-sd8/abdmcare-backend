@@ -31,7 +31,8 @@ export class ConsentController {
   fetchConsentArtefact = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.consentService.fetchConsentArtefact(id);
+      const currentUser = (req as any).user;
+      const result = await this.consentService.fetchConsentArtefact(id, currentUser);
       ResponseHandler.success(res, 'Consent artefact fetched', result.data);
     }
   );
@@ -39,7 +40,8 @@ export class ConsentController {
   getPatientConsents = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { patientId } = req.params;
-      const result = await this.consentService.getPatientConsents(patientId);
+      const currentUser = (req as any).user;
+      const result = await this.consentService.getPatientConsents(patientId, currentUser);
       ResponseHandler.success(res, 'Consents fetched successfully', result.data);
     }
   );
@@ -47,7 +49,8 @@ export class ConsentController {
   revokeConsent = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.consentService.revokeConsent(id);
+      const currentUser = (req as any).user;
+      const result = await this.consentService.revokeConsent(id, currentUser);
       ResponseHandler.success(res, result.message);
     }
   );
@@ -71,7 +74,8 @@ export class ConsentController {
   getConsentStatus = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.consentService.getConsentStatusById(id);
+      const currentUser = (req as any).user;
+      const result = await this.consentService.getConsentStatusById(id, currentUser);
       ResponseHandler.success(res, 'Consent status fetched', result.data);
     }
   );

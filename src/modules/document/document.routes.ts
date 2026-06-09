@@ -21,8 +21,8 @@ router.use(auditLog('DOCUMENT'));
 
 router.post('/generate',  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), generateDocument);
 router.get('/stats',       authorize('SUPER_ADMIN', 'ADMIN'), getDocumentStats);
-router.get('/:id',         getDocument);
-router.get('/:id/download', downloadDocument);
-router.get('/',            listDocuments);
+router.get('/:id',         authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'), getDocument);
+router.get('/:id/download', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'), downloadDocument);
+router.get('/',            authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'), listDocuments);
 
 export default router;

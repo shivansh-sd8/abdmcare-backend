@@ -2,6 +2,7 @@ import prisma from '../../common/config/database';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import { Prisma, Gender } from '@prisma/client';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 interface CreatePatientRequest {
   firstName: string;
@@ -14,6 +15,10 @@ interface CreatePatientRequest {
   address?: any;
   bloodGroup?: string;
   emergencyContact?: any;
+  maritalStatus?: string;
+  occupation?: string;
+  allergies?: string[];
+  medicalHistory?: any;
   abhaId?: string;
   // ABDM identity — abhaNumber (14-digit) and abhaAddress (name@sbx) are needed
   // for M2 linking and M3 consent. abhaAddress in particular is required by
@@ -33,6 +38,10 @@ interface UpdatePatientRequest {
   address?: any;
   bloodGroup?: string;
   emergencyContact?: any;
+  maritalStatus?: string;
+  occupation?: string;
+  allergies?: string[];
+  medicalHistory?: any;
   abhaId?: string;
   abhaNumber?: string;
   abhaAddress?: string;
@@ -44,6 +53,7 @@ interface SearchPatientQuery {
   gender?: string;
   page?: number;
   limit?: number;
+  hospitalId?: string;
 }
 
 export class PatientService {
@@ -79,10 +89,13 @@ export class PatientService {
 
       const uhid = await this.generateUHID();
 
+      const normalizedAbhaNumber = data.abhaNumber ? data.abhaNumber.replace(/-/g, '') : undefined;
+
       const patient = await prisma.patient.create({
         data: {
           uhid,
           firstName: data.firstName,
+          middleName: data.middleName,
           lastName: data.lastName,
           gender: data.gender as Gender,
           dob: new Date(data.dob),
@@ -91,8 +104,12 @@ export class PatientService {
           address: data.address || {},
           bloodGroup: data.bloodGroup,
           emergencyContact: data.emergencyContact || {},
+          maritalStatus: data.maritalStatus || null,
+          occupation: data.occupation || null,
+          allergies: Array.isArray(data.allergies) ? data.allergies : [],
+          medicalHistory: data.medicalHistory ?? undefined,
           abhaId: data.abhaId,
-          abhaNumber: data.abhaNumber ? data.abhaNumber.replace(/-/g, '') : undefined,
+          abhaNumber: normalizedAbhaNumber,
           abhaAddress: data.abhaAddress || undefined,
           hospitalId,
         },
@@ -100,6 +117,41 @@ export class PatientService {
           abhaRecord: true,
         },
       });
+
+      // If the registrar entered an ABHA number / address but no AbhaRecord was
+      // attached, create a minimal AbhaRecord row so downstream HIP / consent
+      // flows can find it (they look up Patient.abhaRecord, not the legacy
+      // scalar fields). This keeps "I typed in my ABHA at the desk" working
+      // for ABDM linking and care-context push without a full re-verify.
+      // Note: AbhaRecord requires a non-null abhaNumber (unique). If only an
+      // address was provided we skip — KYC must be completed before linking.
+      if (normalizedAbhaNumber && !patient.abhaRecord) {
+        try {
+          // Don't conflict with an existing global record for the same ABHA.
+          const existing = await prisma.abhaRecord.findUnique({
+            where: { abhaNumber: normalizedAbhaNumber },
+          });
+          if (!existing) {
+            const created = await prisma.abhaRecord.create({
+              data: {
+                patientId: patient.id,
+                abhaNumber: normalizedAbhaNumber,
+                abhaAddress: data.abhaAddress || null,
+              },
+            });
+            (patient as any).abhaRecord = created;
+          } else if (!existing.patientId) {
+            // Re-attach an orphan ABHA record to this patient
+            const updated = await prisma.abhaRecord.update({
+              where: { abhaNumber: normalizedAbhaNumber },
+              data: { patientId: patient.id, abhaAddress: data.abhaAddress || existing.abhaAddress },
+            });
+            (patient as any).abhaRecord = updated;
+          }
+        } catch (e: any) {
+          logger.warn('AbhaRecord auto-create failed (non-fatal)', { message: e?.message });
+        }
+      }
 
       logger.info('Patient created successfully', {
         patientId: patient.id,
@@ -114,10 +166,7 @@ export class PatientService {
       };
     } catch (error: any) {
       logger.error('Failed to create patient', error);
-      throw new AppError(
-        error.message || 'Failed to create patient',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -162,10 +211,7 @@ export class PatientService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch patient', error);
-      throw new AppError(
-        error.message || 'Failed to fetch patient',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -195,10 +241,7 @@ export class PatientService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch patient by UHID', error);
-      throw new AppError(
-        error.message || 'Failed to fetch patient',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -220,6 +263,7 @@ export class PatientService {
 
       const updateData: any = {};
       if (data.firstName !== undefined)        updateData.firstName = data.firstName;
+      if (data.middleName !== undefined)       updateData.middleName = data.middleName || null;
       if (data.lastName !== undefined)         updateData.lastName = data.lastName;
       if (data.gender !== undefined)           updateData.gender = data.gender;
       if (data.dob !== undefined)              updateData.dob = new Date(data.dob);
@@ -228,6 +272,10 @@ export class PatientService {
       if (data.bloodGroup !== undefined)       updateData.bloodGroup = data.bloodGroup || null;
       if (data.address !== undefined)          updateData.address = data.address;
       if (data.emergencyContact !== undefined) updateData.emergencyContact = data.emergencyContact;
+      if (data.maritalStatus !== undefined)    updateData.maritalStatus = data.maritalStatus || null;
+      if (data.occupation !== undefined)       updateData.occupation = data.occupation || null;
+      if (data.allergies !== undefined)        updateData.allergies = Array.isArray(data.allergies) ? data.allergies : [];
+      if (data.medicalHistory !== undefined)   updateData.medicalHistory = data.medicalHistory;
       // Allow editing ABHA identity so patients registered before the address
       // was captured can be fixed (abhaAddress is required for ABDM linking).
       if (data.abhaId !== undefined)           updateData.abhaId = data.abhaId ? data.abhaId.replace(/-/g, '') : null;
@@ -253,10 +301,7 @@ export class PatientService {
       };
     } catch (error: any) {
       logger.error('Failed to update patient', error);
-      throw new AppError(
-        error.message || 'Failed to update patient',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -268,9 +313,21 @@ export class PatientService {
 
       const where: Prisma.PatientWhereInput = {};
 
-      // Filter by hospital for non-super-admin users
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      // Tenant isolation:
+      //   SUPER_ADMIN: cross-hospital (no filter, optionally narrow with query.hospitalId).
+      //   Anyone else: must be scoped to their hospital. If their JWT has no
+      //   hospitalId we fail closed (return zero results) rather than leaking.
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          return {
+            success: true,
+            data: [],
+            pagination: { total: 0, page, limit, totalPages: 0 },
+          };
+        }
         where.hospitalId = currentUser.hospitalId;
+      } else if (query.hospitalId) {
+        where.hospitalId = query.hospitalId;
       }
 
       if (query.search) {
@@ -322,10 +379,7 @@ export class PatientService {
       };
     } catch (error: any) {
       logger.error('Failed to search patients', error);
-      throw new AppError(
-        error.message || 'Failed to search patients',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -353,10 +407,7 @@ export class PatientService {
       };
     } catch (error: any) {
       logger.error('Failed to delete patient', error);
-      throw new AppError(
-        error.message || 'Failed to delete patient',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -403,10 +454,7 @@ export class PatientService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch patient stats', error);
-      throw new AppError(
-        error.message || 'Failed to fetch patient stats',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
