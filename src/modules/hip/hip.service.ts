@@ -98,8 +98,12 @@ interface LinkInitRequest {
   requestId: string;
   timestamp: string;
   transactionId: string;
-  patient: { referenceNumber: string; display: string };
-  careContexts: Array<{ referenceNumber: string; display: string }>;
+  // ABDM's inbound link/care-context/init body carries abhaAddress at the TOP
+  // level and a `patient` whose shape varies (object or single-element array).
+  // Keep these permissive and resolve defensively in linkCareContexts.
+  abhaAddress?: string;
+  patient?: any;
+  careContexts?: Array<{ referenceNumber: string; display: string }>;
 }
 
 interface HealthInformationRequest {
@@ -528,15 +532,51 @@ export class HipService {
    */
   async linkCareContexts(request: LinkInitRequest) {
     try {
-      logger.info('HIP: Linking care contexts (user-initiated)', { requestId: request.requestId });
+      // The inbound `patient` shape varies (object vs single-element array), so
+      // normalise it. The previous code blindly read request.patient.referenceNumber
+      // which was undefined for the real ABDM body, producing
+      // prisma.patient.findUnique({ where: { id: undefined } }) → 500.
+      const p = Array.isArray(request.patient) ? request.patient[0] : request.patient;
+      const referenceNumber: string | undefined = p?.referenceNumber || p?.id;
+      const abhaAddress: string | undefined = request.abhaAddress || p?.id;
 
-      const patient = await prisma.patient.findUnique({ where: { id: request.patient.referenceNumber } });
+      logger.info('HIP: Linking care contexts (user-initiated)', {
+        requestId: request.requestId,
+        transactionId: request.transactionId,
+        abhaAddress,
+        referenceNumber,
+        patientKeys: p && typeof p === 'object' ? Object.keys(p) : typeof p,
+      });
+
+      // Resolve the patient defensively: try the discover-issued referenceNumber
+      // (our DB id) first, then fall back to abhaAddress (reliably present in the
+      // init body) on either the patient record or its linked abhaRecord.
+      let patient = referenceNumber
+        ? await prisma.patient.findUnique({ where: { id: referenceNumber } }).catch(() => null)
+        : null;
+      if (!patient && abhaAddress) {
+        patient = await prisma.patient.findFirst({
+          where: { OR: [{ abhaAddress }, { abhaRecord: { is: { abhaAddress } } }] },
+        });
+      }
       if (!patient) throw new AppError('Patient not found', 404);
+
+      const linkRefNumber = crypto.randomUUID();
+
+      // Remember which patient this link refers to so the subsequent confirm
+      // callback (which only carries the linkRefNumber/transactionId) can return
+      // that patient's care contexts in on-confirm.
+      try {
+        await redisClient.set(`link-init:${linkRefNumber}`, patient.id, { EX: 600 });
+        await redisClient.set(`link-init-txn:${request.transactionId}`, patient.id, { EX: 600 });
+      } catch {
+        // Redis unavailable — confirm will fall back to transactionId/abhaAddress.
+      }
 
       const response = {
         transactionId: request.transactionId,
         link: {
-          referenceNumber: crypto.randomUUID(),
+          referenceNumber: linkRefNumber,
           authenticationType: 'DIRECT',
           meta: {
             communicationMedium: 'MOBILE',
@@ -549,10 +589,10 @@ export class HipService {
       };
 
       await abdmClient.post(abdmConfig.endpoints.hip.onLinkInit, response);
-      logger.info('HIP: on-init sent', { patientId: patient.id });
+      logger.info('HIP: on-init sent', { patientId: patient.id, linkRefNumber });
       return response;
     } catch (error: any) {
-      logger.error('HIP: Failed to link care contexts', error);
+      logger.error('HIP: Failed to link care contexts', describeAbdmError(error));
       throw new AppError(error.message || 'Failed to link care contexts', error.statusCode || 500);
     }
   }
@@ -562,20 +602,73 @@ export class HipService {
    * ABDM calls: POST /api/v3/hip/link/care-context/confirm (your callback URL)
    * HIP responds: POST /api/hiecm/user-initiated-linking/v3/link/care-context/on-confirm
    */
-  async confirmLinkCareContexts(request: { transactionId: string; patient: any; requestId?: string }) {
+  async confirmLinkCareContexts(request: any) {
     try {
-      // on-confirm body per ABDM M2 spec: { patient: [...], response: { requestId } }.
-      // `response.requestId` echoes the inbound REQUEST-ID and is REQUIRED (same
-      // "Response cannot be null or empty" rule as the other on-* callbacks).
+      // The confirm body carries the linkRefNumber we issued in on-init (under
+      // confirmation.linkRefNumber) and/or the transactionId — but NOT the patient
+      // or care contexts. Recover the patient from the mapping stored at init time
+      // so on-confirm can return that patient's care contexts.
+      const linkRefNumber: string | undefined =
+        request?.confirmation?.linkRefNumber || request?.linkRefNumber;
+      const transactionId: string | undefined = request?.transactionId;
+
+      logger.info('HIP: Confirming link (user-initiated)', {
+        requestId: request?.requestId,
+        transactionId,
+        linkRefNumber,
+        bodyKeys: request && typeof request === 'object' ? Object.keys(request) : typeof request,
+      });
+
+      let patientId: string | null = null;
+      try {
+        if (linkRefNumber) patientId = await redisClient.get(`link-init:${linkRefNumber}`);
+        if (!patientId && transactionId) patientId = await redisClient.get(`link-init-txn:${transactionId}`);
+      } catch {
+        // Redis unavailable — fall through to error below.
+      }
+
+      if (!patientId) throw new AppError('Link reference not found or expired', 404);
+
+      const patient = await prisma.patient.findUnique({
+        where: { id: patientId },
+        include: { abhaRecord: true },
+      });
+      if (!patient) throw new AppError('Patient not found', 404);
+
+      // Link the patient's pending/unlinked care contexts and mark them LINKED.
+      const contexts = await prisma.careContext.findMany({
+        where: { patientId: patient.id },
+        orderBy: { createdAt: 'desc' },
+      });
+      await prisma.careContext.updateMany({
+        where: { patientId: patient.id },
+        data: { linkStatus: 'LINKED' },
+      });
+
+      const patientName = sanitizeDisplay(`${patient.firstName} ${patient.lastName}`);
+
+      // on-confirm body per ABDM M2 spec: { patient: [{ referenceNumber, display,
+      // careContexts:[{referenceNumber, display}], hiType, count }], response: { requestId } }.
       const response = {
-        patient: request.patient,
-        response: { requestId: request.requestId },
+        patient: [{
+          referenceNumber: patient.id,
+          display: patientName,
+          careContexts: contexts.map((cc) => ({
+            referenceNumber: cc.careContextId,
+            display: sanitizeDisplay(cc.display),
+          })),
+          hiType: 'OPConsultation',
+          count: contexts.length,
+        }],
+        // `response.requestId` echoes the inbound REQUEST-ID and is REQUIRED (same
+        // "Response cannot be null or empty" rule as the other on-* callbacks).
+        response: { requestId: request?.requestId },
       };
       await abdmClient.post(abdmConfig.endpoints.hip.onLinkConfirm, response);
-      logger.info('HIP: on-confirm sent');
+      logger.info('HIP: on-confirm sent', { patientId: patient.id, count: contexts.length });
       return response;
     } catch (error: any) {
-      logger.error('HIP: Failed to confirm link', error);
+      logger.error('HIP: Failed to confirm link', describeAbdmError(error));
       throw new AppError(error.message || 'Failed to confirm link', error.statusCode || 500);
     }
   }
