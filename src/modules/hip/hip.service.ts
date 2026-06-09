@@ -705,6 +705,38 @@ export class HipService {
         };
       }
 
+      // Throttle: ABDM deduplicates link-token requests per ABHA and rejects a
+      // new generate-token with "ABDM-1092: Duplicate Link token request" (or
+      // temporarily blocks with "ABDM-1027") if one is already in flight. Since
+      // addCareContexts runs on every "Link" click — including for contexts that
+      // are still PENDING — re-clicking would otherwise fire a fresh
+      // generate-token each time and trip ABDM's dedup/abuse guard. We use a
+      // short-lived Redis key as an in-progress flag to suppress duplicates.
+      // Best-effort: if Redis is down we just proceed (same as before).
+      const linkThrottleKey = `link-token-req:${abhaNumber}`;
+      let linkAlreadyInProgress = false;
+      try {
+        if (await redisClient.get(linkThrottleKey)) {
+          linkAlreadyInProgress = true;
+        } else {
+          await redisClient.set(linkThrottleKey, '1', { EX: 300 }); // 5-min dedup window
+        }
+      } catch {
+        // Redis unavailable — proceed without throttle
+      }
+
+      if (linkAlreadyInProgress) {
+        logger.info('HIP: [link] generate-token skipped — a link request is already in progress for this ABHA (within ABDM dedup window)', {
+          patientId,
+          abhaNumber: maskAbha(abhaNumber),
+        });
+        return {
+          success: true,
+          data: createdContexts,
+          message: `${createdContexts.length} care context(s) saved. A link request is already in progress with ABDM — please wait a couple of minutes for confirmation before linking again.`,
+        };
+      }
+
       // Step 2: Fire-and-forget async generate-token call to ABDM.
       // ABDM returns 202 and later POSTs to /api/v3/hip/token/on-generate-token.
       // That callback will call hipInitiatedLink and mark contexts as LINKED.
@@ -714,11 +746,21 @@ export class HipService {
           await this.generateLinkToken({ abhaNumber, abhaAddress, name: patientName, gender, yearOfBirth });
           logger.info('HIP: [async] generate-token sent — awaiting ABDM callback', { abhaAddress });
         } catch (e: any) {
-          logger.warn('HIP: [async] generate-token failed', {
-            abhaAddress,
-            patientId,
-            ...describeAbdmError(e),
-          });
+          const abdmCode: string = e?.response?.data?.error?.code || '';
+          if (abdmCode.includes('ABDM-1092') || abdmCode.includes('ABDM-1027')) {
+            // ABDM dedup/temporary block — keep the throttle key so we don't
+            // keep hammering; it will expire on its own. Not a code fault.
+            logger.warn('HIP: [async] generate-token throttled/blocked by ABDM — not retrying (key kept until it expires)', {
+              abhaAddress, patientId, abdmCode, ...describeAbdmError(e),
+            });
+          } else {
+            // A genuine failure (bad payload, network, etc.) — clear the throttle
+            // so the user can retry without waiting out the full window.
+            try { await redisClient.del(linkThrottleKey); } catch { /* Redis down */ }
+            logger.warn('HIP: [async] generate-token failed', {
+              abhaAddress, patientId, ...describeAbdmError(e),
+            });
+          }
         }
       });
 
