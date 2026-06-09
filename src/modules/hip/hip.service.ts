@@ -156,6 +156,14 @@ export class HipService {
     // present (verified live against the sandbox). Strip them defensively so a
     // dashed value from any caller never silently kills linking.
     const abhaNumber = (params.abhaNumber || '').replace(/-/g, '');
+    // CRITICAL: the official M2 Postman collection sends abhaNumber to
+    // generate-token as a JSON NUMBER (e.g. 91536782361862, no quotes), unlike
+    // link/carecontext which expects a STRING. Sending a string here passes the
+    // gateway (202) but fails ABDM's downstream validation, so on-generate-token
+    // returns an error with NO link token and linking silently stalls. A 14-digit
+    // ABHA number (~9.1e13) is well within Number.MAX_SAFE_INTEGER (9.0e15), so
+    // numeric conversion is lossless.
+    const abhaNumberNumeric = Number(abhaNumber);
 
     logger.info('HIP: [link] → generate-token request', {
       endpoint: abdmConfig.endpoints.hip.generateToken,
@@ -174,7 +182,7 @@ export class HipService {
       const res = await abdmClient.post(
         abdmConfig.endpoints.hip.generateToken,
         {
-          abhaNumber,
+          abhaNumber: abhaNumberNumeric,
           abhaAddress: params.abhaAddress,
           name: params.name,
           gender: params.gender,
@@ -665,22 +673,13 @@ export class HipService {
       const rawAbhaId   = patient.abhaId || '';
       const abhaDigits  = rawAbhaId.replace(/-/g, ''); // "91437633633759"
       const abhaNumber  = patient.abhaRecord?.abhaNumber  || patient.abhaNumber  || abhaDigits;
-      // ABDM linking REQUIRES the patient's real ABHA address (e.g. "name@sbx").
-      // The 14-digit number formatted as "<digits>@sbx" is NOT a valid PHR
-      // address — generate-token rejects it, no callback arrives, and the care
-      // contexts stay PENDING forever (this is what "no facility available"
-      // looks like to the patient). So only use a stored value that is actually
-      // an address (contains "@").
+      // ABDM linking needs the patient's ABHA address. ABDM auto-assigns the
+      // ABHA number itself as the default PHR address ("<digits>@sbx" in
+      // sandbox / "@abdm" in prod); a custom "name@sbx" is optional. Both are
+      // valid, so we accept any stored value that looks like an address
+      // (contains "@"). Only a truly missing address skips linking.
       const storedAddress = patient.abhaRecord?.abhaAddress || patient.abhaAddress || '';
-      // A real PHR/ABHA address has a non-numeric username (e.g. "name@sbx").
-      // The auto-generated fallback "<14-digit-number>@sbx" is NOT a registered
-      // PHR address — ABDM's generate-token responds via on-generate-token with
-      // an error and no link token, so linking silently stalls in PENDING
-      // (verified in prod logs). Reject the number-only form here so the caller
-      // gets a clear, actionable message instead of a silent ABDM failure.
-      const localPart = storedAddress.split('@')[0] || '';
-      const isRealAbhaAddress = storedAddress.includes('@') && !/^\d+$/.test(localPart);
-      const abhaAddress = isRealAbhaAddress ? storedAddress : '';
+      const abhaAddress = storedAddress.includes('@') ? storedAddress : '';
       const patientName = `${patient.firstName} ${patient.lastName}`.trim();
       const gender      = patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
       const yearOfBirth = patient.dob ? new Date(patient.dob).getFullYear() : 0;
