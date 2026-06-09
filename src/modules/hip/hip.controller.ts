@@ -140,7 +140,8 @@ export class HipController {
     const body = req.body || {};
     const notification = body.notification || {};
     const consentDetail = notification.consentDetail || {};
-    const requestId = body.requestId || body.response?.requestId;
+    // REQUEST-ID is an HTTP header; the notify body is only { notification }.
+    const requestId = (req.headers['request-id'] as string) || body.requestId || body.response?.requestId;
     const consentId = notification.consentId || consentDetail.consentId || body.consentId;
     const status = notification.status || body.status;
     await this.hipService.handleConsentHipNotify({ requestId, consentId, status });
@@ -148,7 +149,11 @@ export class HipController {
   });
 
   handleHealthInformationRequest = asyncHandler(async (req: Request, res: Response) => {
-    const result = await this.hipService.handleHealthInformationRequest(req.body);
+    // REQUEST-ID is an HTTP header (the body is only { transactionId, hiRequest }).
+    // The on-request ACK must echo it as response.requestId, else ABDM rejects with
+    // 400 "ABDM-1015: Invalid Response". The data-push notify also reuses it.
+    const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
+    const result = await this.hipService.handleHealthInformationRequest({ ...req.body, requestId });
     res.status(202).json(result);
   });
 
