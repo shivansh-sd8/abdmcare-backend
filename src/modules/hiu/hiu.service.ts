@@ -152,13 +152,18 @@ export class HiuService {
    */
   async receiveHealthInformation(data: any) {
     try {
+      // The ABDM data push body carries `transactionId` + `entries` + `keyMaterial`
+      // but NOT the consent id by default. Our HIP includes `consentId` so the HIU
+      // can correlate the push to the stored decryption keypair. Accept every shape.
+      const abdmConsentId =
+        data.hiRequest?.consent?.id || data.consentId || data.consent?.id;
+      const hipKeyMaterial = data.keyMaterial;
+
       logger.info('HIU: Receiving health information', {
         transactionId: data.transactionId,
-        consentId: data.hiRequest?.consent?.id,
+        consentId: abdmConsentId,
+        entries: data.entries?.length || 0,
       });
-
-      const abdmConsentId = data.hiRequest?.consent?.id;
-      const hipKeyMaterial = data.keyMaterial;
       const decryptedEntries: any[] = [];
 
       let keyPairRecord: { privateKey: string; nonce: string } | null = null;

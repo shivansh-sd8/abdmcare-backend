@@ -231,9 +231,13 @@ export class ConsentService {
       logger.info('HIP: consent notification received', { abdmConsentId, status });
 
       if (abdmConsentId) {
-        // Find a local consent for this artefact, or fall back to the patient's
-        // most recent active consent (HIP-initiated / patient self-linking flows
-        // have no abdmConsentId on file yet).
+        // The HIP-side notification exists so the HIP can RECORD the granted
+        // artefact (dateRange/hiTypes/careContexts) for validating future
+        // health-information requests. Status authority for a HIU-created
+        // consent belongs to the HIU on-notify callback — so we match precisely
+        // and only ever PROMOTE a still-REQUESTED consent. We never re-flip an
+        // already GRANTED/DENIED/REVOKED record (that caused the wrong consent
+        // to change when a patient had multiple requests).
         let consent = await prisma.consent.findFirst({ where: { abdmConsentId } });
         if (!consent) {
           const patientAddr: string | undefined = consentDetail?.patient?.id;
@@ -244,7 +248,8 @@ export class ConsentService {
             });
             if (patient) {
               consent = await prisma.consent.findFirst({
-                where: { patientId: patient.id, status: { in: ['REQUESTED', 'GRANTED'] } as any },
+                // Only a REQUESTED consent (no artefact yet) is a safe match here.
+                where: { patientId: patient.id, abdmConsentId: null, status: 'REQUESTED' as any },
                 orderBy: { createdAt: 'desc' },
               });
             }
@@ -252,16 +257,24 @@ export class ConsentService {
         }
 
         if (consent) {
+          // Persist the granted artefact window/types so the data-flow request
+          // validates/clamps against what was ACTUALLY granted (not the original
+          // request). Only set status when promoting a still-REQUESTED consent.
+          const artefactDateRange = consentDetail?.permission?.dateRange;
+          const artefactHiTypes: string[] | undefined = consentDetail?.hiTypes;
+          const promote = consent.status === 'REQUESTED';
           await prisma.consent.update({
             where: { id: consent.id },
             data: {
-              status: status as any,
               abdmConsentId,
-              ...(status === 'GRANTED' ? { grantedAt: new Date() } : {}),
-              ...(status === 'REVOKED' ? { revokedAt: new Date() } : {}),
+              ...(artefactDateRange ? { dateRange: artefactDateRange } : {}),
+              ...(artefactHiTypes?.length ? { hiTypes: artefactHiTypes } : {}),
+              ...(promote ? { status: status as any } : {}),
+              ...(promote && status === 'GRANTED' ? { grantedAt: new Date() } : {}),
+              ...(status === 'REVOKED' ? { status: 'REVOKED' as any, revokedAt: new Date() } : {}),
             },
           });
-          logger.info('HIP: consent notification applied', { consentId: consent.consentId, status });
+          logger.info('HIP: consent artefact recorded', { consentId: consent.consentId, status, promoted: promote });
         } else {
           logger.warn('HIP: no local consent matched notification', { abdmConsentId });
         }
@@ -304,11 +317,17 @@ export class ConsentService {
       if (!consent) throw new AppError('Consent not found', 404);
       if (!consent.abdmConsentId) throw new AppError('ABDM consent ID not available', 400);
 
-      const response = await abdmClient.post(abdmConfig.endpoints.consent.fetch, {
-        consentId: consent.abdmConsentId,
-      });
+      // The M3 consent/v3/fetch endpoint REQUIRES the X-HIU-ID routing header —
+      // without it the gateway cannot authorize the HIU role and responds 401
+      // (`WWW-Authenticate: Basic realm`). Note this call is ASYNC: ABDM returns
+      // an acknowledgement and delivers the artefact to the HIU on-fetch callback.
+      const response = await abdmClient.post(
+        abdmConfig.endpoints.consent.fetch,
+        { consentId: consent.abdmConsentId },
+        { 'X-HIU-ID': abdmConfig.hiu.id },
+      );
 
-      logger.info('Consent artefact fetched', { consentId: consent.consentId });
+      logger.info('Consent artefact fetch requested', { consentId: consent.consentId });
       return { success: true, data: response };
     } catch (error: any) {
       logger.error('Failed to fetch consent artefact', error);

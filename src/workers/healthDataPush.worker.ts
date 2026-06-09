@@ -178,6 +178,10 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
         pageNumber,
         pageCount,
         transactionId,
+        // consentId lets the receiving HIU correlate this push to the consent +
+        // its decryption keypair. The push is sent HIP→HIU directly (ABDM is not
+        // in the push path), so this extra field is safe and only read by the HIU.
+        consentId: consentAbdmId,
         entries: pages[pageNumber],
         keyMaterial: sessionKeyMaterial,
       });
