@@ -481,20 +481,26 @@ export class HipService {
 
       const careContexts = patient.encounters.map((enc) => ({
         referenceNumber: enc.id,
-        display: `${enc.type} - ${new Date(enc.createdAt).toLocaleDateString()}`,
+        display: sanitizeDisplay(`${enc.type} - ${new Date(enc.createdAt).toLocaleDateString()}`),
       }));
 
+      // on-discover body per ABDM M2 spec (Milestone_2 Postman):
+      //   - `hiType` + `count` live INSIDE each patient object.
+      //   - `matchedBy` is a TOP-LEVEL field (sibling of `patient`/`response`),
+      //     NOT inside the patient — putting it per-patient is non-conformant.
+      //   - `response.requestId` (echoing the inbound REQUEST-ID) is REQUIRED;
+      //     omitting it makes ABDM reject with
+      //     "ABDM-9999: Response cannot be null or empty".
       const response = {
         transactionId: request.transactionId,
         patient: [{
           referenceNumber: patient.id,
           display: sanitizeDisplay(`${patient.firstName} ${patient.lastName}`),
-          careContexts: careContexts.map((cc) => ({ ...cc, display: sanitizeDisplay(cc.display) })),
-          matchedBy: [patientIdentifier.type],
+          careContexts,
+          hiType: 'OPConsultation',
+          count: careContexts.length,
         }],
-        // ABDM requires `response.requestId` (echoing the inbound REQUEST-ID) on
-        // every on-* callback. Without it ABDM rejects on-discover with
-        // "ABDM-9999: Response cannot be null or empty".
+        matchedBy: [patientIdentifier.type],
         response: { requestId: request.requestId },
       };
 
@@ -556,10 +562,14 @@ export class HipService {
    * ABDM calls: POST /api/v3/hip/link/care-context/confirm (your callback URL)
    * HIP responds: POST /api/hiecm/user-initiated-linking/v3/link/care-context/on-confirm
    */
-  async confirmLinkCareContexts(request: { transactionId: string; patient: any }) {
+  async confirmLinkCareContexts(request: { transactionId: string; patient: any; requestId?: string }) {
     try {
+      // on-confirm body per ABDM M2 spec: { patient: [...], response: { requestId } }.
+      // `response.requestId` echoes the inbound REQUEST-ID and is REQUIRED (same
+      // "Response cannot be null or empty" rule as the other on-* callbacks).
       const response = {
         patient: request.patient,
+        response: { requestId: request.requestId },
       };
       await abdmClient.post(abdmConfig.endpoints.hip.onLinkConfirm, response);
       logger.info('HIP: on-confirm sent');

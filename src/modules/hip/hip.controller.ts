@@ -108,18 +108,25 @@ export class HipController {
   });
 
   // ── M2: User Initiated Linking (ABDM callbacks) ────────────────────────────
+  // ABDM sends the message id in the `REQUEST-ID` HTTP header (NOT the body —
+  // the discover body is only { transactionId, patient }). Every on-* response
+  // must echo it as `response.requestId`, so we merge the header in here. Falling
+  // back to the body keeps it robust if ABDM ever includes it there.
   discoverCareContexts = asyncHandler(async (req: Request, res: Response) => {
-    const result = await this.hipService.discoverCareContexts(req.body);
+    const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
+    const result = await this.hipService.discoverCareContexts({ ...req.body, requestId });
     res.status(202).json(result);
   });
 
   linkCareContexts = asyncHandler(async (req: Request, res: Response) => {
-    const result = await this.hipService.linkCareContexts(req.body);
+    const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
+    const result = await this.hipService.linkCareContexts({ ...req.body, requestId });
     res.status(202).json(result);
   });
 
   confirmLinkCareContexts = asyncHandler(async (req: Request, res: Response) => {
-    const result = await this.hipService.confirmLinkCareContexts(req.body);
+    const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
+    const result = await this.hipService.confirmLinkCareContexts({ ...req.body, requestId });
     res.status(202).json(result);
   });
 

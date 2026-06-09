@@ -3,7 +3,6 @@ import axios from 'axios';
 import crypto from 'crypto';
 import logger from '../config/logger';
 import { abdmConfig } from '../config/abdm';
-import redisClient from '../config/redis';
 
 interface JWK {
   kid: string;
@@ -138,26 +137,12 @@ function verifyJwt(token: string, publicKey: crypto.KeyObject): any {
   return payload;
 }
 
-async function checkJtiReplay(jti: string, exp: number): Promise<boolean> {
-  try {
-    const jtiKey = `abdm-jti:${jti}`;
-    const exists = await redisClient.get(jtiKey);
-    if (exists) return true;
-    const ttl = Math.max(1, Math.ceil(exp - Date.now() / 1000) + CLOCK_SKEW_SECONDS);
-    await redisClient.set(jtiKey, '1', { EX: ttl });
-    return false;
-  } catch {
-    // Redis unavailable — skip replay check, allow through
-    return false;
-  }
-}
-
 /**
  * Middleware to verify ABDM gateway JWT on inbound callbacks.
  * Fetches JWKS from ABDM /v3/certs, caches by kid, and verifies the
  * Authorization: Bearer <jwt> header on every callback request.
  *
- * Validates: signature, exp (with 60s skew), nbf, iss, aud, jti replay.
+ * Validates: signature, exp (with 60s skew), nbf, iss, aud.
  *
  * In development mode with no ABDM credentials configured, this is
  * permissive (logs a warning but allows the request through) to enable
@@ -201,15 +186,14 @@ export function verifyAbdmCallback(req: Request, res: Response, next: NextFuncti
       const publicKey = jwkToPublicKey(jwk);
       const payload = verifyJwt(token, publicKey);
 
-      // Replay protection via jti
-      if (payload.jti && payload.exp) {
-        const isReplay = await checkJtiReplay(payload.jti, payload.exp);
-        if (isReplay) {
-          logger.warn('ABDM callback JWT replay detected', { jti: payload.jti, path: req.path });
-          res.status(401).json({ error: 'JWT replay detected' });
-          return;
-        }
-      }
+      // NOTE: No jti-based replay rejection here. The inbound Authorization is the
+      // ABDM gateway OAuth *session* access token (≈20-min life, single jti) which
+      // ABDM legitimately REUSES across many callbacks. Rejecting a repeated jti
+      // 401'd every callback after the first within the token's lifetime (observed
+      // as "JWT replay detected" on /patient/care-context/discover, breaking
+      // user-initiated linking). Authenticity is guaranteed by the JWKS signature
+      // + exp/nbf + iss + aud checks above. Per-message idempotency is handled
+      // downstream (e.g. discover caches by transactionId).
 
       (req as any).abdmJwtPayload = payload;
       logger.debug('ABDM callback JWT verified', {
