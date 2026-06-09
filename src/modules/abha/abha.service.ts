@@ -97,18 +97,29 @@ export class AbhaService {
   }
 
   /**
-   * Resend Aadhaar OTP — same endpoint, pass existing txnId
+   * Resend Aadhaar OTP.
+   *
+   * ABDM's enrollment/request/otp has NO dedicated resend operation: the txnId
+   * it returns is single-use, so re-posting the previous txnId is rejected with
+   * "txnId: Invalid Transaction Id" (verified in prod logs). A resend is simply
+   * a fresh OTP request — send an EMPTY txnId exactly like the initial send.
+   * ABDM issues a NEW txnId which the caller must use for the subsequent enrol
+   * step (returned below).
+   *
+   * The previous txnId is accepted by the route for API compatibility but is
+   * intentionally not forwarded to ABDM.
    */
-  async resendAadhaarOtp(txnId: string, aadhaar: string) {
+  async resendAadhaarOtp(_txnId: string, aadhaar: string) {
     try {
       const encAadhaar = await abdmClient.encrypt(aadhaar);
       const res = await abdmClient.abhaPost(E.enrollment.requestOtp, {
-        txnId,
+        txnId: '',
         scope: ['abha-enrol'],
         loginHint: 'aadhaar',
         loginId: encAadhaar,
         otpSystem: 'aadhaar',
       });
+      logger.info('Aadhaar OTP resent', { txnId: res.txnId });
       return { txnId: res.txnId, message: res.message || 'OTP resent' };
     } catch (e) { toAppError(e, 'Failed to resend Aadhaar OTP'); }
   }
