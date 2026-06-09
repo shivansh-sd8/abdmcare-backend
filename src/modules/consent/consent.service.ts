@@ -210,7 +210,7 @@ export class ConsentService {
    * health-information request can be validated, and (b) acknowledge receipt to
    * ABDM at /consent/v3/request/hip/on-notify with status "ok".
    */
-  async handleConsentNotification(payload: any) {
+  async handleConsentNotification(payload: any, requestId?: string) {
     const statusMap: Record<string, string> = {
       GRANTED: 'GRANTED',
       DENIED: 'DENIED',
@@ -223,7 +223,9 @@ export class ConsentService {
       const notification = payload?.notification || {};
       const consentDetail = notification.consentDetail || {};
       abdmConsentId = notification.consentId || consentDetail.consentId;
-      echoedRequestId = payload?.requestId || payload?.response?.requestId;
+      // The REQUEST-ID arrives as an HTTP header (passed in as `requestId`); the
+      // body rarely carries it. Prefer the header, fall back to any body field.
+      echoedRequestId = requestId || payload?.requestId || payload?.response?.requestId;
       const status = statusMap[notification.status] || notification.status || 'GRANTED';
 
       logger.info('HIP: consent notification received', { abdmConsentId, status });

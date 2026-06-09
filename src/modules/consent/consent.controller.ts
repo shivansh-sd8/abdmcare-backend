@@ -19,7 +19,11 @@ export class ConsentController {
 
   handleConsentNotification = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.consentService.handleConsentNotification(req.body);
+      // ABDM sends the message id in the `REQUEST-ID` header (the notify body is
+      // only { notification }). The on-notify ACK must echo it as
+      // response.requestId, else ABDM rejects the ACK with 400. Pass it through.
+      const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
+      const result = await this.consentService.handleConsentNotification(req.body, requestId);
       ResponseHandler.success(res, result?.message || 'Consent notification processed');
     }
   );
