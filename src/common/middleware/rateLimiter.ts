@@ -21,6 +21,6 @@ export const createLimiter = (windowMs: number, max: number) => {
 
 export const abhaOtpLimiter = createLimiter(30 * 60 * 1000, 3);
 
-export const loginLimiter = createLimiter(15 * 60 * 1000, 5);
+export const loginLimiter = createLimiter(15 * 60 * 1000, 50);
 
 export const apiLimiter = createLimiter(15 * 60 * 1000, 100);
