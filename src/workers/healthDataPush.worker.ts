@@ -14,6 +14,10 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
 
   logger.info('Worker: Processing health data push', { transactionId, jobId: job.id });
 
+  // Track the care-context references involved so a FAILED notification can
+  // still carry a valid `statusResponses` array (required by ABDM, else 400).
+  let careContextRefs: string[] = [];
+
   try {
     const consent = await prisma.consent.findFirst({
       where: { abdmConsentId: consentAbdmId },
@@ -56,6 +60,10 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       return true;
     });
 
+    careContextRefs = (validContexts.length > 0 ? validContexts : careContextsWithEnc)
+      .map((cc) => cc.careContextId)
+      .filter(Boolean);
+
     if (validContexts.length === 0) {
       logger.warn('Worker: No encounters found in consent date range', { transactionId, from: dateRange?.from, to: dateRange?.to });
     }
@@ -88,6 +96,39 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
 
     const { buildFHIRBundle } = await import('../common/utils/fhir/fhir-builder');
 
+    // Establish ONE ECDH session for the whole transfer. Every entry MUST be
+    // encrypted with this single session key so the HIU can decrypt them all
+    // using the one keyMaterial.dhPublicKey we publish in the push payload.
+    // (Previously each entry used its own ephemeral keypair while the push
+    // advertised a different keypair — the HIU could never decrypt.)
+    const ownKeyPair = EncryptionService.generateECDHKeyPair();
+    const sessionKey = EncryptionService.deriveSharedSecret(
+      ownKeyPair.privateKey,
+      keyMaterial.dhPublicKey.keyValue,
+      ownKeyPair.nonce,
+      keyMaterial.nonce,
+    );
+    const sessionKeyMaterial = {
+      cryptoAlg: 'ECDH',
+      curve: 'Curve25519',
+      dhPublicKey: {
+        expiry: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        parameters: 'Curve25519/32byte random key',
+        keyValue: ownKeyPair.publicKey,
+      },
+      nonce: ownKeyPair.nonce,
+    };
+
+    const makeEntry = (dataString: string, careContextReference: string) => {
+      const content = EncryptionService.encryptWithSessionKey(dataString, sessionKey);
+      return {
+        content,
+        media: 'application/fhir+json',
+        checksum: crypto.createHash('md5').update(content).digest('hex'),
+        careContextReference,
+      };
+    };
+
     // Build one FHIR bundle + entry per care context
     const entries: Array<{ content: string; media: string; checksum: string; careContextReference: string }> = [];
 
@@ -103,68 +144,22 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
           encounterPrescriptions: enc.prescriptions || [],
           investigations: investigationsByEnc.get(enc.id) || [],
         });
-
-        const dataString = JSON.stringify(fhirBundle);
-        const encryptResult = EncryptionService.encryptWithECDH(
-          dataString,
-          keyMaterial.dhPublicKey.keyValue,
-          keyMaterial.nonce,
-        );
-        const checksum = crypto.createHash('md5').update(encryptResult.encryptedData).digest('hex');
-
-        entries.push({
-          content: encryptResult.encryptedData,
-          media: 'application/fhir+json',
-          checksum,
-          careContextReference: cc.careContextId,
-        });
+        entries.push(makeEntry(JSON.stringify(fhirBundle), cc.careContextId));
       } catch (buildErr: any) {
         logger.warn('Worker: Failed to build FHIR bundle for encounter, using fallback', {
           encounterId: enc.id,
           error: buildErr.message,
         });
         const fallback = buildBasicFHIRBundle([enc]);
-        const dataString = JSON.stringify(fallback);
-        const encryptResult = EncryptionService.encryptWithECDH(
-          dataString,
-          keyMaterial.dhPublicKey.keyValue,
-          keyMaterial.nonce,
-        );
-        const checksum = crypto.createHash('md5').update(encryptResult.encryptedData).digest('hex');
-        entries.push({
-          content: encryptResult.encryptedData,
-          media: 'application/fhir+json',
-          checksum,
-          careContextReference: cc.careContextId,
-        });
+        entries.push(makeEntry(JSON.stringify(fallback), cc.careContextId));
       }
     }
 
     // If no entries were built (e.g. no encounters in range), push an empty collection
     if (entries.length === 0) {
       const emptyBundle = buildBasicFHIRBundle([]);
-      const dataString = JSON.stringify(emptyBundle);
-      const encryptResult = EncryptionService.encryptWithECDH(
-        dataString,
-        keyMaterial.dhPublicKey.keyValue,
-        keyMaterial.nonce,
-      );
-      const checksum = crypto.createHash('md5').update(encryptResult.encryptedData).digest('hex');
-      entries.push({
-        content: encryptResult.encryptedData,
-        media: 'application/fhir+json',
-        checksum,
-        careContextReference: careContextsWithEnc[0]?.careContextId || '',
-      });
+      entries.push(makeEntry(JSON.stringify(emptyBundle), careContextsWithEnc[0]?.careContextId || ''));
     }
-
-    // Generate key material for this push session. The same ECDH session key
-    // material is reused across all pages of this transfer.
-    const sessionEncrypt = EncryptionService.encryptWithECDH(
-      '{}',
-      keyMaterial.dhPublicKey.keyValue,
-      keyMaterial.nonce,
-    );
 
     // ABDM data push supports pagination (pageNumber is 0-indexed, pageCount is
     // the total number of pages). Split entries into bounded pages so large
@@ -184,7 +179,7 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
         pageCount,
         transactionId,
         entries: pages[pageNumber],
-        keyMaterial: sessionEncrypt.keyMaterial,
+        keyMaterial: sessionKeyMaterial,
       });
       logger.info('Worker: pushed data page', {
         transactionId,
@@ -224,7 +219,16 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
           transactionId,
           doneAt: new Date().toISOString(),
           notifier: { type: 'HIP', id: abdmConfig.hip.id },
-          statusNotification: { sessionStatus: 'FAILED', hipId: abdmConfig.hip.id },
+          statusNotification: {
+            sessionStatus: 'FAILED',
+            hipId: abdmConfig.hip.id,
+            // ABDM requires a non-empty statusResponses array even on failure.
+            statusResponses: (careContextRefs.length > 0 ? careContextRefs : ['']).map((ref) => ({
+              careContextReference: ref,
+              hiStatus: 'FAILED',
+              description: 'Transfer failed',
+            })),
+          },
         },
       });
     } catch (notifyErr: any) {
