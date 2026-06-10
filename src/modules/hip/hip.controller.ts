@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 import { HipService } from './hip.service';
 import ResponseHandler from '../../common/utils/response';
@@ -18,7 +19,25 @@ export class HipController {
   handleProfileShare = asyncHandler(async (req: Request, res: Response) => {
     res.status(202).json({ message: 'Profile share received' });
     const payload = req.body;
-    logger.info('Scan & Share received', { hipId: payload?.metaData?.hipId });
+
+    // ABDM passes the correlation id as an HTTP header on V3 callbacks
+    // (`REQUEST-ID`), NOT inside the JSON body. Capture it here while we still
+    // have the express `req`; the on-share ACK must echo it as
+    // `response.requestId`, otherwise ABDM rejects with
+    // "RequestId cannot be NULL or Blank". Fall back to common header variants
+    // and finally to a freshly minted UUID so we never send the empty string
+    // (which fails the second validation, "must be Alpha numeric and - in middle").
+    const inboundRequestId =
+      (req.headers['request-id'] as string) ||
+      (req.headers['REQUEST-ID'] as string) ||
+      (req.headers['x-request-id'] as string) ||
+      payload?.requestId ||
+      crypto.randomUUID();
+
+    logger.info('Scan & Share received', {
+      hipId: payload?.metaData?.hipId,
+      requestId: inboundRequestId,
+    });
     setImmediate(async () => {
       try {
         const profile = payload?.profile?.patient || payload?.profile || {};
@@ -41,33 +60,43 @@ export class HipController {
         // Send on-share acknowledgement to ABDM.
         //
         // Wire format per the M3 Scan & Share Postman (`02 profile-on-share`):
-        //   {
+        //   Headers: REQUEST-ID: <a fresh UUID for this outbound call>
+        //   Body: {
         //     acknowledgement: {
         //       status: "SUCCESS",
         //       abhaAddress, profile: { context, tokenNumber, expiry }
         //     },
-        //     response: { requestId }
+        //     response: { requestId: <the REQUEST-ID we received from ABDM> }
         //   }
         //
-        // Critical gotchas (both confirmed by ABDM-9999 errors in prod):
-        //   • `expiry` MUST be a string of digits — seconds, NOT an ISO date.
+        // Critical gotchas (all confirmed by ABDM-9999 errors in prod):
+        //   • `expiry` MUST be a string of digits (seconds), NOT an ISO date.
         //     ABDM rejects with "Invalid expiry, it must contain only 0-9".
         //   • The correlation envelope key is `response` (not `resp`). Sending
         //     `resp` makes ABDM see `response = null` and reject with
         //     "Response cannot be NULL".
+        //   • `response.requestId` MUST be the REQUEST-ID HEADER from the
+        //     inbound /patient/share — it doesn't live in the body. Sending
+        //     "" trips both "RequestId cannot be NULL or Blank" AND the
+        //     "must be Alpha numeric and - in middle" validators.
+        //
         // Token validity = 30 min = 1800 seconds.
-        await abdmClient.post(abdmConfig.endpoints.scanAndShare.onShare, {
-          acknowledgement: {
-            status: 'SUCCESS',
-            abhaAddress: abhaAddr,
-            profile: {
-              context: payload?.metaData?.context || '',
-              tokenNumber,
-              expiry: '1800',
+        await abdmClient.post(
+          abdmConfig.endpoints.scanAndShare.onShare,
+          {
+            acknowledgement: {
+              status: 'SUCCESS',
+              abhaAddress: abhaAddr,
+              profile: {
+                context: payload?.metaData?.context || '',
+                tokenNumber,
+                expiry: '1800',
+              },
             },
+            response: { requestId: inboundRequestId },
           },
-          response: { requestId: payload?.requestId || '' },
-        });
+          { 'REQUEST-ID': crypto.randomUUID() },
+        );
         // Persist received share event for frontend polling
         await this.hipService.saveReceivedShare({
           abhaNumber: abhaNumber.replace(/-/g, ''),
@@ -76,11 +105,11 @@ export class HipController {
           gender: profile?.gender || '',
           mobile: profile?.mobile || profile?.phoneNumber || '',
           tokenNumber,
-          requestId: payload?.requestId || '',
+          requestId: inboundRequestId,
           rawProfile: profile,
         });
 
-        logger.info('Scan & Share: on-share acknowledged', { tokenNumber });
+        logger.info('Scan & Share: on-share acknowledged', { tokenNumber, requestId: inboundRequestId });
       } catch (err) { logger.error('on-share acknowledgement failed', err); }
     });
   });
