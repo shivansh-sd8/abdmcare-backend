@@ -151,10 +151,53 @@ export class HipService {
   }
 
   async getReceivedShares(hospitalId?: string) {
-    return prisma.receivedShare.findMany({
-      where: hospitalId ? { hospitalId } : undefined,
+    // SUPER_ADMIN (no hospitalId) sees all rows. Hospital-scoped users see
+    // rows tagged to their hospital AND any unscoped rows (hospitalId null) —
+    // the latter cover legacy data and the rare case where ABDM addresses a
+    // share to a hipId we haven't mapped to a Hospital yet. Better to show
+    // it at every front desk than to silently lose the patient.
+    const shares = await prisma.receivedShare.findMany({
+      where: hospitalId
+        ? { OR: [{ hospitalId }, { hospitalId: null }] }
+        : undefined,
       orderBy: { receivedAt: 'desc' },
       take: 100,
+    });
+
+    // Resolve each row to the matching Patient (by ABHA number) so the
+    // front desk gets a one-click "Open profile" path. Done in a single
+    // findMany — no N+1.
+    const abhaNumbers = Array.from(new Set(shares.map(s => s.abhaNumber).filter(Boolean)));
+    const patients = abhaNumbers.length
+      ? await prisma.patient.findMany({
+          where: {
+            OR: [
+              { abhaNumber: { in: abhaNumbers } },
+              { abhaId: { in: abhaNumbers } },
+            ],
+          },
+          select: { id: true, uhid: true, abhaNumber: true, abhaId: true, hospitalId: true },
+        })
+      : [];
+    const patientByAbha = new Map<string, typeof patients[number]>();
+    for (const p of patients) {
+      const key = p.abhaNumber || p.abhaId || '';
+      if (key) patientByAbha.set(key, p);
+    }
+
+    // Token TTL is 60 min from receivedAt — surface it so the UI can render
+    // a countdown chip and stop offering actions on expired shares.
+    const TOKEN_TTL_MS = 60 * 60 * 1000;
+    return shares.map((s) => {
+      const matched = patientByAbha.get(s.abhaNumber);
+      const expiresAt = new Date(s.receivedAt.getTime() + TOKEN_TTL_MS);
+      return {
+        ...s,
+        patientId: matched?.id || null,
+        uhid: matched?.uhid || null,
+        expiresAt,
+        expired: expiresAt.getTime() <= Date.now(),
+      };
     });
   }
 
@@ -1214,15 +1257,28 @@ export class HipService {
     });
   }
 
-  async createPatientFromScanShare(profile: any, abhaNumber: string, abhaAddress: string) {
+  async createPatientFromScanShare(
+    profile: any,
+    abhaNumber: string,
+    abhaAddress: string,
+    hospitalId?: string,
+  ) {
     const normalized = abhaNumber.replace(/-/g, '');
     const firstName = profile.firstName || profile.name?.split(' ')[0] || 'Unknown';
     const lastName = profile.lastName || profile.name?.split(' ').slice(1).join(' ') || '';
     const gender = (profile.gender === 'M' ? 'MALE' : profile.gender === 'F' ? 'FEMALE' : 'OTHER') as any;
     const mobile = profile.mobile || profile.phoneNumber || `SCAN-${Date.now()}`;
 
-    const dob = profile.yearOfBirth
-      ? new Date(`${profile.yearOfBirth}-${profile.monthOfBirth || '01'}-${profile.dayOfBirth || '01'}`)
+    // ABDM sends DOB parts as strings, sometimes redacted with '*' in the
+    // sandbox (e.g. yearOfBirth: '19**'). Skip the date if any part has a
+    // non-digit char, otherwise we'd create an "Invalid Date" Date object
+    // and Prisma would reject the row.
+    const yob = String(profile.yearOfBirth || '');
+    const mob = String(profile.monthOfBirth || '01');
+    const dob_ = String(profile.dayOfBirth || '01');
+    const allDigits = (s: string) => s && /^\d+$/.test(s);
+    const dob = (allDigits(yob) && allDigits(mob) && allDigits(dob_))
+      ? new Date(`${yob.padStart(4, '0')}-${mob.padStart(2, '0')}-${dob_.padStart(2, '0')}`)
       : null;
 
     const patient = await prisma.patient.create({
@@ -1236,6 +1292,10 @@ export class HipService {
         abhaNumber: normalized,
         abhaId: normalized,
         abhaAddress: abhaAddress || null,
+        // Tag the patient to the facility that received the share so they
+        // appear in that hospital's patient list and are gated by the
+        // multi-tenant filter.
+        ...(hospitalId ? { hospitalId } : {}),
         address: {
           line: profile.address || '',
           district: profile.districtName || '',

@@ -44,60 +44,67 @@ export class HipController {
         const abhaNumber = profile?.abhaNumber || profile?.ABHANumber || '';
         const abhaAddr = profile?.abhaAddress || profile?.preferredAbhaAddress || '';
         const tokenNumber = `TKN-${Date.now()}`;
+        const inboundHipId = payload?.metaData?.hipId || '';
 
-        // Persist or update patient from Scan & Share
-        if (abhaNumber) {
-          const normalized = abhaNumber.replace(/-/g, '');
-          const existingPatient = await this.hipService.findPatientByAbha(normalized);
-          if (!existingPatient) {
-            await this.hipService.createPatientFromScanShare(profile, normalized, abhaAddr);
-            logger.info('Scan & Share: new patient created', { abhaNumber: normalized });
-          } else {
-            logger.info('Scan & Share: returning patient found', { abhaNumber: normalized, patientId: existingPatient.id });
+        // ── Resolve which Hospital row owns this share ────────────────────
+        // ABDM addresses the call to a specific facility via metaData.hipId.
+        // We must tag both the Patient and the ReceivedShare with that
+        // hospital, otherwise:
+        //   • The receptionist's "Received Shares" list filters by their own
+        //     hospitalId — an untagged row never appears (this is exactly
+        //     why your tab is empty after a successful scan).
+        //   • Patient lookups elsewhere also scope by hospitalId.
+        // hfrFacilityId is the canonical HFR ID; some installs equate it to
+        // hipId, so try both. SUPER_ADMIN reads ignore the filter so they
+        // still see everything.
+        let resolvedHospitalId: string | undefined;
+        if (inboundHipId) {
+          const hospital = await prisma.hospital.findFirst({
+            where: { OR: [{ hfrFacilityId: inboundHipId }, { hipId: inboundHipId }] },
+            select: { id: true },
+          });
+          resolvedHospitalId = hospital?.id;
+          if (!resolvedHospitalId) {
+            logger.warn('Scan & Share: no Hospital matched inbound hipId — share will be unscoped', {
+              inboundHipId,
+            });
           }
         }
 
-        // Send on-share acknowledgement to ABDM.
-        //
-        // Wire format per the M3 Scan & Share Postman (`02 profile-on-share`):
-        //   Headers: REQUEST-ID: <a fresh UUID for this outbound call>
-        //   Body: {
-        //     acknowledgement: {
-        //       status: "SUCCESS",
-        //       abhaAddress, profile: { context, tokenNumber, expiry }
-        //     },
-        //     response: { requestId: <the REQUEST-ID we received from ABDM> }
-        //   }
-        //
-        // Critical gotchas (all confirmed by ABDM-9999 errors in prod):
-        //   • `expiry` MUST be a string of digits (seconds), NOT an ISO date.
-        //     ABDM rejects with "Invalid expiry, it must contain only 0-9".
-        //   • The correlation envelope key is `response` (not `resp`). Sending
-        //     `resp` makes ABDM see `response = null` and reject with
-        //     "Response cannot be NULL".
-        //   • `response.requestId` MUST be the REQUEST-ID HEADER from the
-        //     inbound /patient/share — it doesn't live in the body. Sending
-        //     "" trips both "RequestId cannot be NULL or Blank" AND the
-        //     "must be Alpha numeric and - in middle" validators.
-        //
-        // Token validity = 30 min = 1800 seconds.
-        await abdmClient.post(
-          abdmConfig.endpoints.scanAndShare.onShare,
-          {
-            acknowledgement: {
-              status: 'SUCCESS',
-              abhaAddress: abhaAddr,
-              profile: {
-                context: payload?.metaData?.context || '',
-                tokenNumber,
-                expiry: '1800',
-              },
-            },
-            response: { requestId: inboundRequestId },
-          },
-          { 'REQUEST-ID': crypto.randomUUID() },
-        );
-        // Persist received share event for frontend polling
+        // ── Persist patient + share BEFORE the ABDM ACK ────────────────────
+        // Two reasons to do this first:
+        //   1. The ACK is a network call that has previously failed with
+        //      transient ABDM-9999 errors; we don't want to lose the share
+        //      from our UI just because ABDM throws on its end.
+        //   2. The receptionist needs the row to appear in Received Shares
+        //      the instant the patient walks up to the counter, regardless
+        //      of whether ABDM has fully processed our ACK yet.
+        let existingPatient: any = null;
+        if (abhaNumber) {
+          const normalized = abhaNumber.replace(/-/g, '');
+          existingPatient = await this.hipService.findPatientByAbha(normalized);
+          if (!existingPatient) {
+            existingPatient = await this.hipService.createPatientFromScanShare(
+              profile,
+              normalized,
+              abhaAddr,
+              resolvedHospitalId,
+            );
+            logger.info('Scan & Share: new patient created', {
+              abhaNumber: normalized,
+              hospitalId: resolvedHospitalId,
+            });
+          } else {
+            logger.info('Scan & Share: returning patient found', {
+              abhaNumber: normalized,
+              patientId: existingPatient.id,
+            });
+          }
+        }
+
+        // Persist received share event for the front desk queue. Use the
+        // patient's hospitalId when the share matched an existing patient;
+        // fall back to the resolvedHospitalId from the inbound hipId.
         await this.hipService.saveReceivedShare({
           abhaNumber: abhaNumber.replace(/-/g, ''),
           abhaAddress: abhaAddr,
@@ -107,10 +114,66 @@ export class HipController {
           tokenNumber,
           requestId: inboundRequestId,
           rawProfile: profile,
+          hospitalId: existingPatient?.hospitalId || resolvedHospitalId,
+        });
+        logger.info('Scan & Share: received share persisted', {
+          tokenNumber,
+          hospitalId: existingPatient?.hospitalId || resolvedHospitalId,
         });
 
-        logger.info('Scan & Share: on-share acknowledged', { tokenNumber, requestId: inboundRequestId });
-      } catch (err) { logger.error('on-share acknowledgement failed', err); }
+        // ── Now ACK ABDM ──────────────────────────────────────────────────
+        //
+        // Wire format per M3 Scan & Share Postman (`02 profile-on-share`):
+        //   Headers: REQUEST-ID: <a fresh UUID for this outbound call>
+        //   Body: {
+        //     acknowledgement: {
+        //       status: "SUCCESS",
+        //       abhaAddress, profile: { context, tokenNumber, expiry }
+        //     },
+        //     response: { requestId: <the REQUEST-ID we received from ABDM> }
+        //   }
+        //
+        // Wire-format gotchas (each one observed as ABDM-9999 in prod):
+        //   • `expiry` MUST be a string of digits (seconds), NOT an ISO date.
+        //   • The correlation envelope key is `response` (not `resp`).
+        //   • `response.requestId` MUST be the REQUEST-ID HEADER from the
+        //     inbound /patient/share — it doesn't live in the body.
+        //
+        // Token validity = 60 min = 3600 seconds (matches the printed/scanned
+        // token TTL we show at the front desk).
+        try {
+          await abdmClient.post(
+            abdmConfig.endpoints.scanAndShare.onShare,
+            {
+              acknowledgement: {
+                status: 'SUCCESS',
+                abhaAddress: abhaAddr,
+                profile: {
+                  context: payload?.metaData?.context || '',
+                  tokenNumber,
+                  expiry: '3600',
+                },
+              },
+              response: { requestId: inboundRequestId },
+            },
+            { 'REQUEST-ID': crypto.randomUUID() },
+          );
+          logger.info('Scan & Share: on-share acknowledged', {
+            tokenNumber,
+            requestId: inboundRequestId,
+          });
+        } catch (ackErr: any) {
+          // Don't lose the share row over an ABDM ACK failure — the patient
+          // is already in our queue. Log and move on; ABDM will not retry.
+          logger.error('on-share acknowledgement failed (share kept locally)', {
+            error: ackErr?.message,
+            abdmError: JSON.stringify(ackErr?.response?.data || {}).slice(0, 400),
+            tokenNumber,
+          });
+        }
+      } catch (err) {
+        logger.error('Scan & Share processing failed', err);
+      }
     });
   });
 
