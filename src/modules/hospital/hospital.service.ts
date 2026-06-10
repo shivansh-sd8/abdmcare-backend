@@ -3,6 +3,7 @@ import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import bcrypt from 'bcryptjs';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { istDayRange } from '../../common/utils/dateRange';
 
 interface HospitalOnboardingData {
   // Basic Information
@@ -577,12 +578,9 @@ export class HospitalService {
         }
       }
 
-      const startOfToday = new Date();
-      startOfToday.setHours(0, 0, 0, 0);
-
-      const startOf7DaysAgo = new Date();
-      startOf7DaysAgo.setDate(startOf7DaysAgo.getDate() - 6);
-      startOf7DaysAgo.setHours(0, 0, 0, 0);
+      // IST-anchored. The user expects the dashboard to switch days at
+      // IST midnight regardless of which timezone the Node process is in.
+      const startOfToday = istDayRange(0).start;
 
       const [
         totalPatients, abhaLinkedPatients, todayPatients,
@@ -635,12 +633,7 @@ export class HospitalService {
         admissions: number;
       }> = [];
       for (let i = 6; i >= 0; i--) {
-        const dayStart = new Date();
-        dayStart.setDate(dayStart.getDate() - i);
-        dayStart.setHours(0, 0, 0, 0);
-        const dayEnd = new Date(dayStart);
-        dayEnd.setHours(23, 59, 59, 999);
-        const dateLabel = dayStart.toLocaleDateString('en-IN', { weekday: 'short' });
+        const { start: dayStart, end: dayEnd, label: dateLabel } = istDayRange(i);
         const [pts, enc, adm] = await Promise.all([
           prisma.patient.count({
             where: { hospitalId, createdAt: { gte: dayStart, lte: dayEnd } },

@@ -6,6 +6,7 @@ import smsService from '../../common/utils/smsService';
 import { generateSlots, isValidSlotTime, HospitalScheduleConfig, DoctorScheduleConfig } from '../../common/utils/slotEngine';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
 import { hospitalScope } from '../../common/utils/scope';
+import { istDayRange, istDayRangeOf } from '../../common/utils/dateRange';
 
 interface CreateAppointmentRequest {
   patientId: string;
@@ -82,11 +83,10 @@ export class AppointmentService {
         throw new AppError('Doctor already has an appointment at this time', 400);
       }
 
-      // Prevent duplicate appointment for same patient + same doctor + same day
-      const dayStart = new Date(data.date);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(data.date);
-      dayEnd.setHours(23, 59, 59, 999);
+      // Prevent duplicate appointment for same patient + same doctor + same
+      // IST calendar day (NOT same UTC day — the receptionist means Jun 11
+      // IST when they pick "Jun 11" in the dialog).
+      const { start: dayStart, end: dayEnd } = istDayRangeOf(data.date);
       const existingPatientAppt = await prisma.appointment.findFirst({
         where: {
           patientId: data.patientId,
@@ -601,14 +601,13 @@ export class AppointmentService {
 
   async getAppointmentStats(currentUser?: any) {
     try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      // IST-anchored "today" — server may be running in UTC, but the user
+      // expects the dashboard to switch days at IST midnight, not UTC.
+      const { start: today, end: dayEnd } = istDayRange(0);
 
       const hospitalFilter = hospitalScope(currentUser);
 
-      const todayWindow = { gte: today, lt: tomorrow };
+      const todayWindow = { gte: today, lte: dayEnd };
       const [
         total,
         todayCount,
@@ -698,8 +697,10 @@ export class AppointmentService {
   }
 
   private async getBookedTimesForDate(doctorId: string, date: Date): Promise<string[]> {
-    const dayStart = new Date(date); dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(date); dayEnd.setHours(23, 59, 59, 999);
+    // The booked-times window must be the full IST day for this date —
+    // otherwise on a UTC server we'd miss the early-morning IST slots that
+    // fall in "yesterday" UTC.
+    const { start: dayStart, end: dayEnd } = istDayRangeOf(date);
 
     const appointments = await prisma.appointment.findMany({
       where: {

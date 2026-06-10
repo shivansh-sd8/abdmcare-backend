@@ -16,7 +16,9 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache dumb-init openssl
+RUN apk add --no-cache dumb-init openssl tzdata && \
+    cp /usr/share/zoneinfo/Asia/Kolkata /etc/localtime && \
+    echo "Asia/Kolkata" > /etc/timezone
 
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
@@ -30,6 +32,7 @@ RUN mkdir -p /app/logs && \
     chown -R node:node /app/dist
 
 ENV NODE_ENV=production
+ENV TZ=Asia/Kolkata
 
 EXPOSE 3000
 

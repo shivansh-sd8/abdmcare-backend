@@ -4,6 +4,7 @@ import logger from '../../common/config/logger';
 import { Prisma, Gender } from '@prisma/client';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
 import { hospitalScope } from '../../common/utils/scope';
+import { istDayRange } from '../../common/utils/dateRange';
 
 interface CreatePatientRequest {
   firstName: string;
@@ -461,7 +462,7 @@ export class PatientService {
           where: {
             ...hospitalFilter,
             createdAt: {
-              gte: new Date(new Date().setHours(0, 0, 0, 0)),
+              gte: istDayRange(0).start,
             },
           },
         }),

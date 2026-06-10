@@ -1,5 +1,6 @@
 import prisma from '../common/config/database';
 import { AppError } from '../common/middleware/errorHandler';
+import { istDayRange } from '../common/utils/dateRange';
 
 interface CreatePaymentDTO {
   patientId: string;
@@ -516,8 +517,13 @@ class PaymentService {
 
     // ── Stats ────────────────────────────────────────────────────────────────
     const totalOutstanding = pendingBills.reduce((s, b) => s + (b.outstanding || 0), 0);
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    // IST-anchored: "today" and "this month" should match the user's wall
+    // clock, not the server's. UTC servers would otherwise drop the first
+    // ~5.5 hours of an IST day from these totals.
+    const todayStart = istDayRange(0).start;
+    const istNow = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const istMonthStartIso = `${istNow.getUTCFullYear()}-${String(istNow.getUTCMonth() + 1).padStart(2, '0')}-01T00:00:00+05:30`;
+    const monthStart = new Date(istMonthStartIso);
 
     // Revenue = Payment rows (receipts) — single source of truth for collected money
     const todayCollections = completedPayments
@@ -556,7 +562,7 @@ class PaymentService {
           ...where,
           status: 'PAID',
           paidAt: {
-            gte: new Date(new Date().setHours(0, 0, 0, 0)),
+            gte: istDayRange(0).start,
           },
         },
         _sum: { amount: true },

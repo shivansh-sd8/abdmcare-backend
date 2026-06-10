@@ -1,6 +1,7 @@
 import prisma from '../common/config/database';
 import { AppError } from '../common/middleware/errorHandler';
 import { getEffectiveHospitalId } from '../common/utils/scope';
+import { istDayRange } from '../common/utils/dateRange';
 
 interface CreateInvestigationDTO {
   patientId: string;
@@ -309,7 +310,7 @@ class InvestigationService {
         where: {
           ...where,
           orderedAt: {
-            gte: new Date(new Date().setHours(0, 0, 0, 0)),
+            gte: istDayRange(0).start,
           },
         },
       }),

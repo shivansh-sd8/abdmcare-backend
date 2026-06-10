@@ -4,6 +4,7 @@ import logger from '../../common/config/logger';
 import bcrypt from 'bcryptjs';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
 import { hospitalScope } from '../../common/utils/scope';
+import { istDayRange, istDayRangeOf } from '../../common/utils/dateRange';
 
 interface CreateDoctorRequest {
   hprId?: string;
@@ -522,9 +523,15 @@ export class DoctorService {
       throw new AppError('Doctor not found', 404);
     }
 
-    const targetDate = date ? new Date(date) : new Date();
-    const dayStart = new Date(targetDate); dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(targetDate); dayEnd.setHours(23, 59, 59, 999);
+    // Doctor availability for an IST calendar day. Caller may pass a
+    // specific date string ("2026-06-11") or omit it to mean "today".
+    // In both cases we want the IST-day window so a UTC server doesn't
+    // miss the early-morning IST appointments. `targetDate` is the canonical
+    // start-of-IST-day instant, used downstream by the slot generator.
+    const { start: dayStart, end: dayEnd } = date
+      ? istDayRangeOf(date)
+      : istDayRange(0);
+    const targetDate = dayStart;
 
     const appointments = await prisma.appointment.findMany({
       where: {

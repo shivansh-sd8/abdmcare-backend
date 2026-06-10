@@ -2,6 +2,7 @@ import prisma from '../../common/config/database';
 import logger from '../../common/config/logger';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
 import { getEffectiveHospitalId } from '../../common/utils/scope';
+import { istDayRange, istHourOf, istWindowStart } from '../../common/utils/dateRange';
 
 /**
  * Dashboard service — small, daily-driver aggregations for the role
@@ -33,11 +34,9 @@ export class DashboardService {
       }> = [];
 
       for (let i = N - 1; i >= 0; i--) {
-        const dayStart = new Date();
-        dayStart.setDate(dayStart.getDate() - i);
-        dayStart.setHours(0, 0, 0, 0);
-        const dayEnd = new Date(dayStart);
-        dayEnd.setHours(23, 59, 59, 999);
+        // IST-aware day boundaries — guards against UTC-server skew on
+        // Render. `i=0` is today-IST, `i=6` is six IST days ago.
+        const { start: dayStart, end: dayEnd, label } = istDayRange(i);
 
         const patientsWhere: any = { createdAt: { gte: dayStart, lte: dayEnd } };
         const appointmentsWhere: any = { scheduledAt: { gte: dayStart, lte: dayEnd } };
@@ -74,7 +73,7 @@ export class DashboardService {
 
         out.push({
           date: dayStart.toISOString(),
-          label: dayStart.toLocaleDateString('en-IN', { weekday: 'short' }),
+          label,
           patients,
           appointments,
           encounters,
@@ -97,10 +96,7 @@ export class DashboardService {
   async getTodayHourlyLoad(currentUser: any) {
     try {
       const hospitalId = getEffectiveHospitalId(currentUser);
-      const dayStart = new Date();
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date();
-      dayEnd.setHours(23, 59, 59, 999);
+      const { start: dayStart, end: dayEnd } = istDayRange(0);
 
       const where: any = { scheduledAt: { gte: dayStart, lte: dayEnd } };
       if (hospitalId) where.hospitalId = hospitalId;
@@ -127,7 +123,9 @@ export class DashboardService {
 
       const counts = buckets.map((b) => ({ hour: b.label, total: 0, completed: 0 }));
       for (const a of appts) {
-        const h = new Date(a.scheduledAt).getHours();
+        // Bucket by IST hour, not server-local hour, so a 14:00 IST appt
+        // lands in "2 PM" regardless of server TZ.
+        const h = istHourOf(new Date(a.scheduledAt));
         const idx = buckets.findIndex((b) => h >= b.start && h < b.end);
         if (idx >= 0) {
           counts[idx].total += 1;
@@ -152,9 +150,7 @@ export class DashboardService {
     try {
       const hospitalId = getEffectiveHospitalId(currentUser);
       const N = Math.min(Math.max(days, 1), 90);
-      const since = new Date();
-      since.setDate(since.getDate() - (N - 1));
-      since.setHours(0, 0, 0, 0);
+      const since = istWindowStart(N);
 
       const where: any = {
         paymentStatus: 'PAID',
@@ -198,9 +194,7 @@ export class DashboardService {
     try {
       const hospitalId = getEffectiveHospitalId(currentUser);
       const N = Math.min(Math.max(days, 1), 90);
-      const since = new Date();
-      since.setDate(since.getDate() - (N - 1));
-      since.setHours(0, 0, 0, 0);
+      const since = istWindowStart(N);
 
       const where: any = {
         createdAt: { gte: since },
@@ -258,9 +252,7 @@ export class DashboardService {
     try {
       const hospitalId = getEffectiveHospitalId(currentUser);
       const N = Math.min(Math.max(days, 1), 90);
-      const since = new Date();
-      since.setDate(since.getDate() - (N - 1));
-      since.setHours(0, 0, 0, 0);
+      const since = istWindowStart(N);
 
       const where: any = { createdAt: { gte: since } };
       if (hospitalId) where.patient = { hospitalId };

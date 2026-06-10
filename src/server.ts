@@ -1,5 +1,14 @@
 import * as Sentry from '@sentry/node';
 
+// Defense-in-depth: pin the process timezone to IST so any place we missed
+// migrating to the istDayRange() helpers (or third-party libs that read
+// process.env.TZ) still produces IST-aligned results. Set BEFORE we import
+// any module that may capture a default timezone (Sentry, prisma, logger).
+// Operators can override by setting TZ in the env explicitly.
+if (!process.env.TZ) {
+  process.env.TZ = 'Asia/Kolkata';
+}
+
 if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
