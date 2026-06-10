@@ -30,6 +30,19 @@ class PaymentService {
       throw new AppError('Hospital ID is required', 400);
     }
 
+    // Multi-tenant guard: the patient must belong to the same hospital the
+    // payment is being created in. The controller forces hospitalId to the
+    // caller's JWT for non-SUPER_ADMIN, so this catches a UUID-guessing
+    // attempt to attach a payment to another hospital's patient.
+    const patient = await prisma.patient.findUnique({
+      where: { id: data.patientId },
+      select: { id: true, hospitalId: true },
+    });
+    if (!patient) throw new AppError('Patient not found', 404);
+    if (patient.hospitalId && patient.hospitalId !== data.hospitalId) {
+      throw new AppError('Patient does not belong to this hospital', 403);
+    }
+
     const receiptNumber = `RCP-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
 
     const payment = await prisma.payment.create({

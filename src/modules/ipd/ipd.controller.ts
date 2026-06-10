@@ -22,6 +22,7 @@ function resolveHospitalId(req: Request): string {
     const fromReq =
       (req.query?.hospitalId as string) ||
       (req.body?.hospitalId as string) ||
+      user.scopedHospitalId ||
       user.hospitalId;
     if (!fromReq) throw new AppError('hospitalId is required for super admin', 400);
     return fromReq;
@@ -43,8 +44,12 @@ function scopeHospitalId(req: Request): string | undefined {
   const user = (req as any).user;
   if (!user) throw new AppError('Unauthorized', 401);
   if (user.role === 'SUPER_ADMIN') {
+    // Global "viewing as" scope is set by the auth middleware
+    // (user.scopedHospitalId). Body / query overrides are still honored for
+    // legacy callers and the per-hospital performance page.
     return (req.query?.hospitalId as string) ||
            (req.body?.hospitalId as string) ||
+           user.scopedHospitalId ||
            undefined;
   }
   if (!user.hospitalId) throw new AppError('Your account is not linked to a hospital', 403);

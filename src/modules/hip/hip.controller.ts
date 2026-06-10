@@ -368,12 +368,36 @@ export class HipController {
   addCareContexts = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const { patientId } = req.params;
     const { careContexts } = req.body;
-    const result = await this.hipService.addCareContexts(patientId, careContexts);
+    const currentUser = (req as any).user;
+    const result = await this.hipService.addCareContexts(patientId, careContexts, currentUser);
     ResponseHandler.success(res, result.message, result.data, 201);
   });
 
   getCareContexts = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const { patientId } = req.params;
+    const currentUser = (req as any).user;
+
+    // Multi-tenant guard: only callers in the patient's hospital may list
+    // their care contexts. SUPER_ADMIN bypasses the check.
+    const patient = await prisma.patient.findUnique({
+      where: { id: patientId },
+      select: { id: true, hospitalId: true },
+    });
+    if (!patient) {
+      ResponseHandler.success(res, 'Care contexts retrieved', []);
+      return;
+    }
+    if (
+      currentUser &&
+      currentUser.role !== 'SUPER_ADMIN' &&
+      currentUser.hospitalId &&
+      patient.hospitalId &&
+      patient.hospitalId !== currentUser.hospitalId
+    ) {
+      ResponseHandler.success(res, 'Care contexts retrieved', []);
+      return;
+    }
+
     const contexts = await prisma.careContext.findMany({
       where: { patientId },
       orderBy: { createdAt: 'desc' },

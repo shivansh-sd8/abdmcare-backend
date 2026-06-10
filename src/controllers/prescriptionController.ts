@@ -5,7 +5,8 @@ import ResponseHandler from '../common/utils/response';
 
 class PrescriptionController {
   createPrescription = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const prescription = await prescriptionService.createPrescription(req.body);
+    const currentUser = (req as any).user;
+    const prescription = await prescriptionService.createPrescription(req.body, currentUser);
     ResponseHandler.created(res, 'Prescription created successfully', prescription);
   });
 

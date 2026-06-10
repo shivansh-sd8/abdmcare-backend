@@ -14,6 +14,7 @@ function resolveHospitalId(req: Request): string {
     const fromReq =
       (req.query?.hospitalId as string) ||
       (req.body?.hospitalId as string) ||
+      user.scopedHospitalId ||
       user.hospitalId;
     if (!fromReq) throw new AppError('hospitalId is required for super admin', 400);
     return fromReq;
@@ -22,14 +23,16 @@ function resolveHospitalId(req: Request): string {
   return user.hospitalId;
 }
 
-// Lax — for read-only listings. SUPER_ADMIN with no explicit ?hospitalId =
-// undefined (= every hospital). Service must treat undefined as "no filter".
+// Lax — for read-only listings. SUPER_ADMIN with no explicit ?hospitalId and
+// no global "viewing as" scope = undefined (= every hospital). Service must
+// treat undefined as "no filter".
 function scopeHospitalId(req: Request): string | undefined {
   const user = (req as any).user;
   if (!user) throw new AppError('Unauthorized', 401);
   if (user.role === 'SUPER_ADMIN') {
     return (req.query?.hospitalId as string) ||
            (req.body?.hospitalId as string) ||
+           user.scopedHospitalId ||
            undefined;
   }
   if (!user.hospitalId) throw new AppError('Your account is not linked to a hospital', 403);

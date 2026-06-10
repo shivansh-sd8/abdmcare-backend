@@ -3,6 +3,7 @@ import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import { Prisma, Gender } from '@prisma/client';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { hospitalScope } from '../../common/utils/scope';
 
 interface CreatePatientRequest {
   firstName: string;
@@ -60,11 +61,14 @@ interface SearchPatientQuery {
 export class PatientService {
   async createPatient(data: CreatePatientRequest, currentUser?: any) {
     try {
-      // Determine the hospital scope for this registration.
-      // SUPER_ADMIN with no hospitalId in body operates globally (hospitalId = null).
-      const hospitalId = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
-        ? currentUser.hospitalId
-        : null;
+      // Determine the hospital scope for this registration:
+      //   • non-SUPER_ADMIN: their JWT hospital
+      //   • SUPER_ADMIN with the global "viewing as" scope: that hospital
+      //   • SUPER_ADMIN unscoped + no body.hospitalId: null (platform-wide)
+      const hospitalId =
+        currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
+          ? currentUser.hospitalId
+          : (currentUser?.scopedHospitalId || (data as any).hospitalId || null);
 
       // Duplicate check is scoped PER HOSPITAL.
       // ABHA / mobile are national identifiers and the same person legitimately
@@ -200,7 +204,10 @@ export class PatientService {
       }
 
       // Hospital isolation: Non-SUPER_ADMIN users can only access patients from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (patient.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Patient not found', 404);
         }
@@ -230,7 +237,10 @@ export class PatientService {
       }
 
       // Hospital isolation: Non-SUPER_ADMIN users can only access patients from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (patient.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Patient not found', 404);
         }
@@ -256,7 +266,10 @@ export class PatientService {
         throw new AppError('Patient not found', 404);
       }
 
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (patient.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Patient belongs to a different hospital', 403);
         }
@@ -320,9 +333,12 @@ export class PatientService {
       const where: Prisma.PatientWhereInput = {};
 
       // Tenant isolation:
-      //   SUPER_ADMIN: cross-hospital (no filter, optionally narrow with query.hospitalId).
-      //   Anyone else: must be scoped to their hospital. If their JWT has no
-      //   hospitalId we fail closed (return zero results) rather than leaking.
+      //   SUPER_ADMIN with no scope:        cross-hospital (no filter)
+      //   SUPER_ADMIN with ?hospitalId=:    that hospital (set by middleware)
+      //   Everyone else:                    JWT-bound hospital. If their JWT
+      //                                     has no hospitalId we fail closed
+      //                                     (return zero results) rather than
+      //                                     leaking.
       if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
         if (!currentUser.hospitalId) {
           return {
@@ -332,6 +348,8 @@ export class PatientService {
           };
         }
         where.hospitalId = currentUser.hospitalId;
+      } else if (currentUser?.scopedHospitalId) {
+        where.hospitalId = currentUser.scopedHospitalId;
       } else if (query.hospitalId) {
         where.hospitalId = query.hospitalId;
       }
@@ -419,9 +437,11 @@ export class PatientService {
 
   async getPatientStats(currentUser?: any) {
     try {
-      const hospitalFilter = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
-        ? { hospitalId: currentUser.hospitalId }
-        : {};
+      // Effective scope:
+      //   non-SUPER_ADMIN     → JWT hospitalId
+      //   SUPER_ADMIN scoped  → currentUser.scopedHospitalId (set by mw)
+      //   SUPER_ADMIN unscoped→ platform-wide
+      const hospitalFilter = hospitalScope(currentUser);
 
       const [total, abhaLinked, maleCount, femaleCount, todayCount] = await Promise.all([
         prisma.patient.count({ where: hospitalFilter }),

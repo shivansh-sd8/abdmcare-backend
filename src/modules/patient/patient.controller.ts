@@ -71,6 +71,9 @@ export class PatientController {
   getPatientStats = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const currentUser = (req as any).user;
+      // SUPER_ADMIN's "viewing as" hospital is already attached to the user
+      // by the auth middleware (currentUser.scopedHospitalId). The service
+      // resolves the effective scope itself.
       const result = await this.patientService.getPatientStats(currentUser);
       ResponseHandler.success(res, 'Patient stats fetched successfully', result.data);
     }

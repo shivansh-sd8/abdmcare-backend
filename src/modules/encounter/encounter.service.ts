@@ -2,6 +2,7 @@ import prisma from '../../common/config/database';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { getEffectiveHospitalId } from '../../common/utils/scope';
 
 interface UpdateConsultationRequest {
   chiefComplaint?: string;
@@ -73,8 +74,15 @@ class EncounterService {
 
     if (!encounter) throw new AppError('Encounter not found', 404);
 
+    // Multi-tenant guard: non-SUPER_ADMIN users must have a JWT hospital
+    // AND that hospital must own the encounter's patient. Failing closed
+    // here (rather than skipping the check on a misconfigured JWT) prevents
+    // a user with no hospitalId from reading any encounter in the system.
     if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
-      if (currentUser.hospitalId && encounter.patient.hospitalId !== currentUser.hospitalId) {
+      if (!currentUser.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      if (encounter.patient.hospitalId !== currentUser.hospitalId) {
         throw new AppError('Access denied to this encounter', 403);
       }
     }
@@ -173,9 +181,13 @@ class EncounterService {
         throw new AppError('Encounter not found', 404);
       }
 
-      // Hospital isolation check
+      // Hospital isolation. Fail closed if a non-SUPER_ADMIN somehow has a
+      // JWT without hospitalId — never silently bypass the check.
       if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
-        if (currentUser.hospitalId && encounter.patient.hospitalId !== currentUser.hospitalId) {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
+        if (encounter.patient.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied to this encounter', 403);
         }
       }
@@ -226,11 +238,14 @@ class EncounterService {
         where.status = status;
       }
 
-      // Hospital isolation — non-SUPER_ADMIN users only see their hospital's data
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      // Effective hospital scope on the joined patient — non-SUPER_ADMIN
+      // gets their JWT hospital; SUPER_ADMIN gets the "viewing as" scope when
+      // set, or platform-wide when unscoped.
+      const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+      if (effectiveHospitalId) {
         where.patient = {
           ...(where.patient || {}),
-          hospitalId: currentUser.hospitalId,
+          hospitalId: effectiveHospitalId,
         };
       }
 
@@ -283,8 +298,13 @@ class EncounterService {
         throw new AppError('Encounter not found', 404);
       }
 
-      // Hospital isolation: non-SUPER_ADMIN users must belong to the same hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      // Hospital isolation: non-SUPER_ADMIN users must belong to the same
+      // hospital as the encounter's patient. Fail closed when JWT has no
+      // hospitalId — don't silently bypass.
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (encounter.patient.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: encounter does not belong to your hospital', 403);
         }
@@ -474,8 +494,12 @@ class EncounterService {
         throw new AppError('Encounter not found', 404);
       }
 
-      // Hospital isolation
-      if (_currentUser && _currentUser.role !== 'SUPER_ADMIN' && _currentUser.hospitalId) {
+      // Hospital isolation. Fail closed if a non-SUPER_ADMIN somehow has a
+      // JWT without hospitalId — don't silently allow the write.
+      if (_currentUser && _currentUser.role !== 'SUPER_ADMIN') {
+        if (!_currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (encounter.patient.hospitalId !== _currentUser.hospitalId) {
           throw new AppError('Access denied: encounter does not belong to your hospital', 403);
         }

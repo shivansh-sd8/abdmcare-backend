@@ -12,7 +12,8 @@ export class HiuController {
 
   requestHealthInformation = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.hiuService.requestHealthInformation(req.body);
+      const currentUser = (req as any).user;
+      const result = await this.hiuService.requestHealthInformation(req.body, currentUser);
       ResponseHandler.success(res, result.message);
     }
   );

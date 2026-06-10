@@ -1,5 +1,6 @@
 import prisma from '../common/config/database';
 import { Request } from 'express';
+import { getEffectiveHospitalId } from '../common/utils/scope';
 
 interface AuditLogData {
   userId: string;
@@ -79,9 +80,12 @@ class AuditLogService {
 
     const where: any = {};
 
-    // Hospital isolation: non-SUPER_ADMIN only see logs from users in their hospital
-    if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
-      where.user = { hospitalId: currentUser.hospitalId };
+    // Hospital isolation: non-SUPER_ADMIN only see logs from users in their
+    // hospital. SUPER_ADMIN with the global "viewing as" scope sees only
+    // that hospital's logs; unscoped, they see everything.
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.user = { hospitalId: effectiveHospitalId };
     }
 
     if (userId) where.userId = userId;
@@ -128,8 +132,9 @@ class AuditLogService {
   async getUserActivity(userId: string, limit = 20, currentUser?: any) {
     const where: any = { userId };
 
-    if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
-      where.user = { hospitalId: currentUser.hospitalId };
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.user = { hospitalId: effectiveHospitalId };
     }
 
     return prisma.auditLog.findMany({
@@ -142,8 +147,9 @@ class AuditLogService {
   async getEntityHistory(resourceType: string, resourceId: string, currentUser?: any) {
     const where: any = { resourceType, resourceId };
 
-    if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
-      where.user = { hospitalId: currentUser.hospitalId };
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.user = { hospitalId: effectiveHospitalId };
     }
 
     return prisma.auditLog.findMany({

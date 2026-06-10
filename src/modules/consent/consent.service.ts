@@ -7,6 +7,7 @@ import logger from '../../common/config/logger';
 import { ConsentPurpose } from '@prisma/client';
 import { purgeConsentData } from '../hiu/consent-compliance';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { getEffectiveHospitalId } from '../../common/utils/scope';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Consent Service V3 (M3 — Consent Management)
@@ -28,24 +29,34 @@ export class ConsentService {
    * M3: Create consent request
    * POST /api/hiecm/consent/v3/request/init
    */
-  async createConsentRequest(data: ConsentRequestData) {
+  async createConsentRequest(data: ConsentRequestData, currentUser?: any) {
     try {
       logger.info('Creating consent request', { patientAbhaId: data.patientAbhaId });
 
+      // Multi-tenant scope: non-SUPER_ADMIN may only request consent for
+      // patients registered at their own hospital. Without this, hospital A
+      // could initiate a consent request against hospital B's patient by
+      // knowing their ABHA — which is a national identifier.
+      const where: any = {
+        OR: [
+          { abhaId: data.patientAbhaId },
+          { abhaNumber: data.patientAbhaId },
+          { abhaAddress: data.patientAbhaId },
+          { abhaRecord: { abhaNumber: data.patientAbhaId } },
+          { abhaRecord: { abhaAddress: data.patientAbhaId } },
+        ],
+      };
+      const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+      if (effectiveHospitalId) {
+        where.hospitalId = effectiveHospitalId;
+      }
+
       const patient = await prisma.patient.findFirst({
-        where: {
-          OR: [
-            { abhaId: data.patientAbhaId },
-            { abhaNumber: data.patientAbhaId },
-            { abhaAddress: data.patientAbhaId },
-            { abhaRecord: { abhaNumber: data.patientAbhaId } },
-            { abhaRecord: { abhaAddress: data.patientAbhaId } },
-          ],
-        },
+        where,
         include: { abhaRecord: true },
       });
 
-      if (!patient) throw new AppError('Patient with ABHA ID not found', 404);
+      if (!patient) throw new AppError('Patient with ABHA ID not found at this hospital', 404);
 
       // ABDM consent init requires the patient's ABHA *address* (PHR address,
       // e.g. "name@sbx") as consent.patient.id — NOT the 14-digit ABHA number.
@@ -146,6 +157,13 @@ export class ConsentService {
           dateRange: { from: fromDt, to: toDt },
           requesterName: data.requesterName,
           requesterId: data.requesterId,
+          // Tag the requesting hospital so HIU read-time gating
+          // (`requesterHospitalId`) can scope incoming records to the
+          // hospital that initiated the consent.
+          requesterHospitalId:
+            currentUser?.role !== 'SUPER_ADMIN'
+              ? currentUser?.hospitalId || null
+              : (currentUser?.scopedHospitalId || patient.hospitalId || null),
           // Store outbound requestId immediately — ABDM echoes it in the on-notify callback
           abdmRequestId: abdmOutboundRequestId,
         },
@@ -478,8 +496,9 @@ export class ConsentService {
 
   async getAllConsents(currentUser?: any) {
     const where: any = {};
-    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
-      where.patient = { hospitalId: currentUser.hospitalId };
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.patient = { hospitalId: effectiveHospitalId };
     }
     const consents = await prisma.consent.findMany({
       where,
@@ -545,8 +564,9 @@ export class ConsentService {
 
   async getConsentStats(currentUser?: any) {
     const where: any = {};
-    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
-      where.patient = { hospitalId: currentUser.hospitalId };
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.patient = { hospitalId: effectiveHospitalId };
     }
     const [total, granted, denied, pending, revoked, expired] = await Promise.all([
       prisma.consent.count({ where }),

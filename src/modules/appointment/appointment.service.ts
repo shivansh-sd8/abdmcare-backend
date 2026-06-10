@@ -5,6 +5,7 @@ import { AppointmentType, AppointmentStatus } from '@prisma/client';
 import smsService from '../../common/utils/smsService';
 import { generateSlots, isValidSlotTime, HospitalScheduleConfig, DoctorScheduleConfig } from '../../common/utils/slotEngine';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { hospitalScope } from '../../common/utils/scope';
 
 interface CreateAppointmentRequest {
   patientId: string;
@@ -24,7 +25,7 @@ interface UpdateAppointmentRequest {
 }
 
 export class AppointmentService {
-  async createAppointment(data: CreateAppointmentRequest) {
+  async createAppointment(data: CreateAppointmentRequest, currentUser?: any) {
     try {
       const patient = await prisma.patient.findUnique({
         where: { id: data.patientId },
@@ -32,6 +33,33 @@ export class AppointmentService {
 
       if (!patient) {
         throw new AppError('Patient not found', 404);
+      }
+
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: data.doctorId },
+        select: { id: true, hospitalId: true },
+      });
+      if (!doctor) {
+        throw new AppError('Doctor not found', 404);
+      }
+
+      // Multi-tenant guard: non-SUPER_ADMIN users may only create
+      // appointments inside their own hospital. Block any cross-hospital
+      // booking — including bookings where patient and doctor straddle
+      // different hospitals (which would also be a data-integrity bug).
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
+        if (patient.hospitalId && patient.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Patient does not belong to your hospital', 403);
+        }
+        if (doctor.hospitalId && doctor.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Doctor does not belong to your hospital', 403);
+        }
+      }
+      if (patient.hospitalId && doctor.hospitalId && patient.hospitalId !== doctor.hospitalId) {
+        throw new AppError('Patient and doctor must belong to the same hospital', 400);
       }
 
       const { hospitalConfig, doctorConfig } = await this.loadScheduleConfigs(data.doctorId);
@@ -141,7 +169,10 @@ export class AppointmentService {
       }
 
       // Hospital isolation: Non-SUPER_ADMIN users can only access appointments from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (appointment.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Appointment not found', 404);
         }
@@ -168,7 +199,10 @@ export class AppointmentService {
       }
 
       // Hospital isolation: Non-SUPER_ADMIN users can only update appointments from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (appointment.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Cannot update appointment from another hospital', 403);
         }
@@ -243,9 +277,10 @@ export class AppointmentService {
 
       const where: any = {};
 
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
-        where.hospitalId = currentUser.hospitalId;
-      }
+      // Effective hospital scope (non-SUPER_ADMIN: their JWT; SUPER_ADMIN
+      // with the global "viewing as" scope: that hospital; SUPER_ADMIN
+      // unscoped: cross-hospital).
+      Object.assign(where, hospitalScope(currentUser));
 
       if (query.doctorId && currentUser?.role === 'DOCTOR') {
         where.doctorId = currentUser.id;
@@ -325,7 +360,10 @@ export class AppointmentService {
         throw new AppError('Appointment not found', 404);
       }
 
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (appointment.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Appointment belongs to a different hospital', 403);
         }
@@ -376,7 +414,10 @@ export class AppointmentService {
         throw new AppError('Appointment not found', 404);
       }
 
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (appointment.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Appointment belongs to a different hospital', 403);
         }
@@ -565,9 +606,7 @@ export class AppointmentService {
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
 
-      const hospitalFilter = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
-        ? { hospitalId: currentUser.hospitalId }
-        : {};
+      const hospitalFilter = hospitalScope(currentUser);
 
       const todayWindow = { gte: today, lt: tomorrow };
       const [
@@ -680,8 +719,13 @@ export class AppointmentService {
   async getAvailableSlots(doctorId: string, dateStr: string, currentUser?: any) {
     const { doctor, hospitalConfig, doctorConfig } = await this.loadScheduleConfigs(doctorId);
 
-    if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId && doctor.hospitalId !== currentUser.hospitalId) {
-      throw new AppError('Access denied: Doctor belongs to a different hospital', 403);
+    if (currentUser?.role !== 'SUPER_ADMIN') {
+      if (!currentUser?.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      if (doctor.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Access denied: Doctor belongs to a different hospital', 403);
+      }
     }
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) throw new AppError('Invalid date', 400);

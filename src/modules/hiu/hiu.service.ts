@@ -7,6 +7,7 @@ import EncryptionService from '../../common/utils/encryption';
 import { config } from '../../common/config/index';
 import { parseFHIRBundle } from '../../common/utils/fhir/fhir-parser';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { getEffectiveHospitalId } from '../../common/utils/scope';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HIU Service V3 (M3 — Health Information User)
@@ -32,12 +33,15 @@ export class HiuService {
    * Request health information from HIP via ABDM
    * POST /api/hiecm/data-flow/v3/health-information/request
    */
-  async requestHealthInformation(data: {
-    consentId: string;
-    dateRangeFrom: string;
-    dateRangeTo: string;
-    dataPushUrl?: string;
-  }) {
+  async requestHealthInformation(
+    data: {
+      consentId: string;
+      dateRangeFrom: string;
+      dateRangeTo: string;
+      dataPushUrl?: string;
+    },
+    currentUser?: any,
+  ) {
     try {
       logger.info('HIU: Requesting health information', { consentId: data.consentId });
 
@@ -47,6 +51,31 @@ export class HiuService {
       });
 
       if (!consent) throw new AppError('Consent not found', 404);
+
+      // Multi-tenant guard: only the requesting hospital (or SUPER_ADMIN)
+      // may pull data against this consent. The consent's
+      // `requesterHospitalId` is set when the consent is created and is the
+      // single source of truth for "who owns this consent". Without this
+      // check, any HIU user with a consent UUID could trigger record
+      // fetches for another hospital's patient.
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+        if (
+          consent.requesterHospitalId &&
+          consent.requesterHospitalId !== currentUser.hospitalId
+        ) {
+          throw new AppError('Consent not found', 404);
+        }
+        // Fallback: if the consent has no requesterHospitalId (legacy data)
+        // require the patient itself to be in the caller's hospital.
+        if (
+          !consent.requesterHospitalId &&
+          consent.patient?.hospitalId &&
+          consent.patient.hospitalId !== currentUser.hospitalId
+        ) {
+          throw new AppError('Consent not found', 404);
+        }
+      }
+
       if (consent.status !== 'GRANTED') throw new AppError('Consent not granted', 403);
       if (!consent.abdmConsentId) throw new AppError('ABDM consent ID not available', 400);
 
@@ -302,8 +331,13 @@ export class HiuService {
         throw new AppError('Patient not found', 404);
       }
 
-      if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId && patient.hospitalId !== currentUser.hospitalId) {
-        throw new AppError('Access denied: Patient belongs to a different hospital', 403);
+      if (currentUser?.role !== 'SUPER_ADMIN') {
+        if (!currentUser?.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
+        if (patient.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Patient belongs to a different hospital', 403);
+        }
       }
 
       // Build the set of consent identifiers the requesting hospital is still
@@ -311,17 +345,18 @@ export class HiuService {
       // both local consentId and the ABDM artefact consentId because rows have
       // historically used either.
       const now = new Date();
+      // Multi-tenant scope: non-SUPER_ADMIN sees only records pulled under
+      // their own hospital's consents. SUPER_ADMIN with the global "viewing
+      // as" scope sees only that hospital's consents; unscoped SUPER_ADMIN
+      // sees everything.
+      const requesterHospitalId = getEffectiveHospitalId(currentUser);
       const activeConsents = await prisma.consent.findMany({
         where: {
           patientId,
           status: 'GRANTED',
           purgedAt: null,
           OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-          // Multi-tenant scope: SUPER_ADMIN sees everything; everyone else
-          // only sees records pulled under their own hospital's consents.
-          ...(currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId
-            ? { requesterHospitalId: currentUser.hospitalId }
-            : {}),
+          ...(requesterHospitalId ? { requesterHospitalId } : {}),
         },
         select: { id: true, consentId: true, abdmConsentId: true },
       });

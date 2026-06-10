@@ -1,5 +1,6 @@
 import prisma from '../common/config/database';
 import { AppError } from '../common/middleware/errorHandler';
+import { getEffectiveHospitalId } from '../common/utils/scope';
 
 interface CreateInvestigationDTO {
   patientId: string;
@@ -13,7 +14,41 @@ interface CreateInvestigationDTO {
 }
 
 class InvestigationService {
-  async createInvestigation(data: CreateInvestigationDTO) {
+  async createInvestigation(data: CreateInvestigationDTO, currentUser?: any) {
+    // Multi-tenant guard: ensure the patient and doctor belong to the
+    // caller's hospital. Without this check, a doctor at hospital A could
+    // attach lab orders to hospital B's patient by passing their UUID.
+    const [patient, doctor] = await Promise.all([
+      prisma.patient.findUnique({
+        where: { id: data.patientId },
+        select: { id: true, hospitalId: true },
+      }),
+      prisma.doctor.findUnique({
+        where: { id: data.doctorId },
+        select: { id: true, hospitalId: true },
+      }),
+    ]);
+    if (!patient) throw new AppError('Patient not found', 404);
+    if (!doctor) throw new AppError('Doctor not found', 404);
+
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      if (!currentUser.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      if (patient.hospitalId && patient.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Patient does not belong to your hospital', 403);
+      }
+      if (doctor.hospitalId && doctor.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Doctor does not belong to your hospital', 403);
+      }
+      if (data.hospitalId && data.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Cannot create investigation in another hospital', 403);
+      }
+    }
+    if (patient.hospitalId && doctor.hospitalId && patient.hospitalId !== doctor.hospitalId) {
+      throw new AppError('Patient and doctor must belong to the same hospital', 400);
+    }
+
     const investigation = await prisma.investigation.create({
       data: {
         patientId: data.patientId,
@@ -60,9 +95,9 @@ class InvestigationService {
   }, currentUser?: any) {
     const { hospitalId, patientId, doctorId, status, testType, page = 1, limit = 10 } = filters;
 
-    const effectiveHospitalId = currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId
-      ? currentUser.hospitalId
-      : hospitalId;
+    // Resolve effective hospital: non-SUPER_ADMIN → JWT; SUPER_ADMIN → the
+    // global "viewing as" scope, or explicit ?hospitalId=, otherwise platform-wide.
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser) || hospitalId;
 
     const where: any = {};
     if (effectiveHospitalId) where.hospitalId = effectiveHospitalId;
@@ -253,9 +288,7 @@ class InvestigationService {
   }
 
   async getInvestigationStats(hospitalId?: string, doctorId?: string, currentUser?: any) {
-    const effectiveHospitalId = currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId
-      ? currentUser.hospitalId
-      : hospitalId;
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser) || hospitalId;
 
     const where: any = {};
     if (effectiveHospitalId) where.hospitalId = effectiveHospitalId;

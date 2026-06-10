@@ -556,6 +556,178 @@ export class HospitalService {
     }
   }
 
+  /**
+   * Per-hospital performance snapshot for the Hospital Performance page.
+   * Aggregates volume + ABDM adoption + clinical activity + revenue across
+   * the patient / doctor / appointment / encounter / admission / payment
+   * tables, plus a 7-day trend for the most useful series.
+   *
+   * Auth scoping:
+   *   - SUPER_ADMIN: any hospital.
+   *   - ADMIN: only their own hospital (403 otherwise).
+   */
+  async getHospitalPerformance(hospitalId: string, currentUser?: any) {
+    try {
+      const hospital = await prisma.hospital.findUnique({ where: { id: hospitalId } });
+      if (!hospital) throw new AppError('Hospital not found', 404);
+
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (currentUser.hospitalId !== hospitalId) {
+          throw new AppError('Access denied', 403);
+        }
+      }
+
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+
+      const startOf7DaysAgo = new Date();
+      startOf7DaysAgo.setDate(startOf7DaysAgo.getDate() - 6);
+      startOf7DaysAgo.setHours(0, 0, 0, 0);
+
+      const [
+        totalPatients, abhaLinkedPatients, todayPatients,
+        totalDoctors, hprLinkedDoctors,
+        totalAppointments, todayAppointments, completedAppointments,
+        totalEncounters, completedEncounters,
+        totalAdmissions, activeAdmissions, dischargedAdmissions,
+        totalBeds, occupiedBeds,
+        revenue30d, paymentCount30d,
+      ] = await Promise.all([
+        prisma.patient.count({ where: { hospitalId } }),
+        prisma.patient.count({ where: { hospitalId, abhaId: { not: null } } }),
+        prisma.patient.count({ where: { hospitalId, createdAt: { gte: startOfToday } } }),
+        prisma.doctor.count({ where: { hospitalId } }),
+        prisma.doctor.count({ where: { hospitalId, hprId: { not: null } } }),
+        prisma.appointment.count({ where: { hospitalId } }),
+        prisma.appointment.count({ where: { hospitalId, createdAt: { gte: startOfToday } } }),
+        prisma.appointment.count({ where: { hospitalId, status: 'COMPLETED' } }),
+        prisma.encounter.count({ where: { patient: { hospitalId } } }),
+        prisma.encounter.count({ where: { patient: { hospitalId }, status: 'COMPLETED' } }),
+        prisma.admission.count({ where: { hospitalId } }),
+        prisma.admission.count({
+          where: { hospitalId, status: { in: ['ADMITTED', 'DISCHARGE_READY'] } },
+        }),
+        prisma.admission.count({ where: { hospitalId, status: 'DISCHARGED' } }),
+        prisma.bed.count({ where: { ward: { hospitalId } } }),
+        prisma.bed.count({ where: { ward: { hospitalId }, status: 'OCCUPIED' } }),
+        prisma.payment.aggregate({
+          where: {
+            hospitalId,
+            status: 'PAID',
+            createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+          },
+          _sum: { amount: true },
+        }),
+        prisma.payment.count({
+          where: {
+            hospitalId,
+            status: 'PAID',
+            createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+          },
+        }),
+      ]);
+
+      // 7-day trend — patients registered, encounters opened, admissions opened.
+      const trend: Array<{
+        date: string;
+        patients: number;
+        encounters: number;
+        admissions: number;
+      }> = [];
+      for (let i = 6; i >= 0; i--) {
+        const dayStart = new Date();
+        dayStart.setDate(dayStart.getDate() - i);
+        dayStart.setHours(0, 0, 0, 0);
+        const dayEnd = new Date(dayStart);
+        dayEnd.setHours(23, 59, 59, 999);
+        const dateLabel = dayStart.toLocaleDateString('en-IN', { weekday: 'short' });
+        const [pts, enc, adm] = await Promise.all([
+          prisma.patient.count({
+            where: { hospitalId, createdAt: { gte: dayStart, lte: dayEnd } },
+          }),
+          prisma.encounter.count({
+            where: { patient: { hospitalId }, createdAt: { gte: dayStart, lte: dayEnd } },
+          }),
+          prisma.admission.count({
+            where: { hospitalId, admittedAt: { gte: dayStart, lte: dayEnd } },
+          }),
+        ]);
+        trend.push({ date: dateLabel, patients: pts, encounters: enc, admissions: adm });
+      }
+
+      // Doctor specialisation distribution (top 6).
+      const specGrouping = await prisma.doctor.groupBy({
+        by: ['specialization'],
+        where: { hospitalId },
+        _count: true,
+      });
+      const specializations = specGrouping
+        .filter((s) => s.specialization)
+        .sort((a, b) => (b._count as any) - (a._count as any))
+        .slice(0, 6)
+        .map((s) => ({ name: s.specialization || 'Unknown', count: s._count as any }));
+
+      const abhaPercent = totalPatients > 0
+        ? Math.round((abhaLinkedPatients / totalPatients) * 100)
+        : 0;
+      const hprPercent = totalDoctors > 0
+        ? Math.round((hprLinkedDoctors / totalDoctors) * 100)
+        : 0;
+      const occupancyPercent = totalBeds > 0
+        ? Math.round((occupiedBeds / totalBeds) * 100)
+        : 0;
+
+      return {
+        success: true,
+        data: {
+          hospital: {
+            id: hospital.id,
+            name: hospital.name,
+            code: hospital.code,
+            type: hospital.type,
+            city: (hospital as any).city,
+            state: (hospital as any).state,
+            phone: hospital.phone,
+            email: hospital.email,
+            status: hospital.status,
+            isActive: hospital.isActive,
+            abdmEnabled: (hospital as any).abdmEnabled || false,
+            hipId: hospital.hipId,
+            hiuId: hospital.hiuId,
+            createdAt: hospital.createdAt,
+          },
+          summary: {
+            totalPatients,
+            abhaLinkedPatients,
+            abhaPercent,
+            todayPatients,
+            totalDoctors,
+            hprLinkedDoctors,
+            hprPercent,
+            totalAppointments,
+            todayAppointments,
+            completedAppointments,
+            totalEncounters,
+            completedEncounters,
+            totalAdmissions,
+            activeAdmissions,
+            dischargedAdmissions,
+            totalBeds,
+            occupiedBeds,
+            occupancyPercent,
+            revenue30d: Number((revenue30d as any)?._sum?.amount || 0),
+            paymentCount30d,
+          },
+          trend,
+          specializations,
+        },
+      };
+    } catch (error: any) {
+      logger.error('Failed to fetch hospital performance', error);
+      rethrowServiceError(error);
+    }
+  }
+
   // Delete hospital (soft delete - mark as inactive)
   async deleteHospital(id: string) {
     try {
@@ -590,15 +762,28 @@ export class HospitalService {
   }
 
   // Update hospital schedule configuration
-  async updateSchedule(id: string, data: {
-    operatingHours?: any;
-    defaultSlotDuration?: number;
-    breakTimes?: any;
-    holidays?: string[];
-    is24x7?: boolean;
-  }) {
+  async updateSchedule(
+    id: string,
+    data: {
+      operatingHours?: any;
+      defaultSlotDuration?: number;
+      breakTimes?: any;
+      holidays?: string[];
+      is24x7?: boolean;
+    },
+    currentUser?: any,
+  ) {
     const hospital = await prisma.hospital.findUnique({ where: { id } });
     if (!hospital) throw new AppError('Hospital not found', 404);
+
+    // Multi-tenant guard: only SUPER_ADMIN may modify any hospital, ADMIN
+    // may modify only their own hospital. Other roles are blocked at the
+    // route level by `authorize`, but we re-check here defensively.
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      if (!currentUser.hospitalId || currentUser.hospitalId !== id) {
+        throw new AppError('Access denied: Cannot modify another hospital\'s schedule', 403);
+      }
+    }
 
     if (data.defaultSlotDuration && ![10, 15, 20, 30, 45, 60].includes(data.defaultSlotDuration)) {
       throw new AppError('Slot duration must be 10, 15, 20, 30, 45, or 60 minutes', 400);
@@ -617,7 +802,7 @@ export class HospitalService {
   }
 
   // Get hospital schedule configuration
-  async getSchedule(id: string) {
+  async getSchedule(id: string, currentUser?: any) {
     const hospital = await prisma.hospital.findUnique({
       where: { id },
       select: {
@@ -626,6 +811,18 @@ export class HospitalService {
       },
     });
     if (!hospital) throw new AppError('Hospital not found', 404);
+
+    // Multi-tenant guard: non-SUPER_ADMIN can only read their own hospital's
+    // schedule. The schedule includes operating hours / holidays / break
+    // times that are otherwise treated as internal config.
+    if (
+      currentUser &&
+      currentUser.role !== 'SUPER_ADMIN' &&
+      currentUser.hospitalId !== id
+    ) {
+      throw new AppError('Hospital not found', 404);
+    }
+
     return { success: true, data: hospital };
   }
 

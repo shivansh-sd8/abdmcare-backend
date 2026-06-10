@@ -3,6 +3,7 @@ import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import bcrypt from 'bcryptjs';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { hospitalScope } from '../../common/utils/scope';
 
 interface CreateDoctorRequest {
   hprId?: string;
@@ -59,10 +60,14 @@ export class DoctorService {
         throw new AppError('User with this email already exists', 400);
       }
 
-      // Set hospitalId from currentUser for non-SUPER_ADMIN users
-      const hospitalId = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
-        ? currentUser.hospitalId
-        : null;
+      // Set hospitalId from the effective scope:
+      //   • non-SUPER_ADMIN: their JWT hospital (multi-tenant isolation)
+      //   • SUPER_ADMIN with the global "viewing as" scope: that hospital
+      //   • SUPER_ADMIN unscoped: null (platform-wide doctor — rare)
+      const hospitalId =
+        currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
+          ? currentUser.hospitalId
+          : (currentUser?.scopedHospitalId || (data as any).hospitalId || null);
 
       let facility = await prisma.facility.findFirst();
       if (!facility) {
@@ -175,8 +180,12 @@ export class DoctorService {
         throw new AppError('Doctor not found', 404);
       }
 
-      // Hospital isolation: Non-SUPER_ADMIN users can only access doctors from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      // Hospital isolation: Non-SUPER_ADMIN users can only access doctors
+      // from their hospital. Fail closed when JWT has no hospitalId.
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (doctor.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Doctor not found', 404);
         }
@@ -202,8 +211,12 @@ export class DoctorService {
         throw new AppError('Doctor not found', 404);
       }
 
-      // Hospital isolation: Non-SUPER_ADMIN users can only update doctors from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      // Hospital isolation: Non-SUPER_ADMIN users can only update doctors
+      // from their hospital. Fail closed when JWT has no hospitalId.
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (doctor.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Cannot update doctor from another hospital', 403);
         }
@@ -254,10 +267,9 @@ export class DoctorService {
 
       const where: any = {};
 
-      // Filter by hospital for non-super-admin users
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
-        where.hospitalId = currentUser.hospitalId;
-      }
+      // Effective hospital scope (non-SUPER_ADMIN: their JWT; SUPER_ADMIN
+      // with ?hospitalId=: that hospital; SUPER_ADMIN unscoped: cross-hospital).
+      Object.assign(where, hospitalScope(currentUser));
 
       if (query.search) {
         where.OR = [
@@ -338,9 +350,10 @@ export class DoctorService {
 
   async getDoctorStats(currentUser?: any) {
     try {
-      const hospitalFilter = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
-        ? { hospitalId: currentUser.hospitalId }
-        : {};
+      // Effective scope is resolved centrally: non-SUPER_ADMIN gets JWT
+      // hospital, SUPER_ADMIN with `?hospitalId=` gets that hospital,
+      // SUPER_ADMIN unscoped → platform-wide (no filter).
+      const hospitalFilter = hospitalScope(currentUser);
 
       const [total, hprLinked] = await Promise.all([
         prisma.doctor.count({ where: hospitalFilter }),
@@ -479,11 +492,12 @@ export class DoctorService {
     };
   }
 
-  async getDoctorAvailability(doctorId: string, date?: string) {
+  async getDoctorAvailability(doctorId: string, date?: string, currentUser?: any) {
     const doctor = await prisma.doctor.findUnique({
       where: { id: doctorId },
       select: {
         id: true, firstName: true, lastName: true, specialization: true, isActive: true,
+        hospitalId: true,
         workingHours: true, slotDuration: true, maxPatientsPerDay: true, breakTimes: true,
         hospital: {
           select: {
@@ -494,6 +508,19 @@ export class DoctorService {
       },
     });
     if (!doctor) throw new AppError('Doctor not found', 404);
+
+    // Multi-tenant guard: non-SUPER_ADMIN can only see availability for
+    // doctors in their own hospital. Without this, anyone with a UUID can
+    // probe schedules and read patient names from the same-day appointment
+    // list returned below.
+    if (
+      currentUser &&
+      currentUser.role !== 'SUPER_ADMIN' &&
+      currentUser.hospitalId &&
+      doctor.hospitalId !== currentUser.hospitalId
+    ) {
+      throw new AppError('Doctor not found', 404);
+    }
 
     const targetDate = date ? new Date(date) : new Date();
     const dayStart = new Date(targetDate); dayStart.setHours(0, 0, 0, 0);
@@ -551,14 +578,30 @@ export class DoctorService {
     };
   }
 
-  async updateSchedule(doctorId: string, data: {
-    workingHours?: any;
-    slotDuration?: number | null;
-    maxPatientsPerDay?: number;
-    breakTimes?: any;
-  }) {
+  async updateSchedule(
+    doctorId: string,
+    data: {
+      workingHours?: any;
+      slotDuration?: number | null;
+      maxPatientsPerDay?: number;
+      breakTimes?: any;
+    },
+    currentUser?: any,
+  ) {
     const doctor = await prisma.doctor.findUnique({ where: { id: doctorId } });
     if (!doctor) throw new AppError('Doctor not found', 404);
+
+    // Multi-tenant guard: only SUPER_ADMIN, the doctor themselves, or an
+    // ADMIN of the same hospital may update a doctor's schedule.
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      const sameHospital =
+        currentUser.hospitalId && doctor.hospitalId === currentUser.hospitalId;
+      const ownProfile =
+        currentUser.role === 'DOCTOR' && currentUser.doctorId === doctor.id;
+      if (!sameHospital && !ownProfile) {
+        throw new AppError('Access denied: Cannot modify another hospital\'s doctor', 403);
+      }
+    }
 
     if (data.slotDuration && ![10, 15, 20, 30, 45, 60].includes(data.slotDuration)) {
       throw new AppError('Slot duration must be 10, 15, 20, 30, 45, or 60 minutes', 400);
@@ -577,11 +620,12 @@ export class DoctorService {
     return { success: true, data: updated, message: 'Doctor schedule updated successfully' };
   }
 
-  async getSchedule(doctorId: string) {
+  async getSchedule(doctorId: string, currentUser?: any) {
     const doctor = await prisma.doctor.findUnique({
       where: { id: doctorId },
       select: {
         id: true, firstName: true, lastName: true,
+        hospitalId: true,
         workingHours: true, slotDuration: true, maxPatientsPerDay: true, breakTimes: true,
         hospital: {
           select: {
@@ -592,6 +636,17 @@ export class DoctorService {
       },
     });
     if (!doctor) throw new AppError('Doctor not found', 404);
+
+    // Multi-tenant guard: non-SUPER_ADMIN may only read schedules for
+    // doctors in their own hospital.
+    if (
+      currentUser &&
+      currentUser.role !== 'SUPER_ADMIN' &&
+      currentUser.hospitalId &&
+      doctor.hospitalId !== currentUser.hospitalId
+    ) {
+      throw new AppError('Doctor not found', 404);
+    }
     return { success: true, data: doctor };
   }
 }

@@ -12,7 +12,8 @@ export class ConsentController {
 
   createConsentRequest = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.consentService.createConsentRequest(req.body);
+      const currentUser = (req as any).user;
+      const result = await this.consentService.createConsentRequest(req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data, 201);
     }
   );

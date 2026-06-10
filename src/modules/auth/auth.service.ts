@@ -283,7 +283,11 @@ export class AuthService {
     else if (currentUser.role !== 'SUPER_ADMIN') {
       where.role = { not: 'SUPER_ADMIN' };
     }
-    // SUPER_ADMIN sees all users
+    // SUPER_ADMIN with the global "viewing as" hospital scope: only show
+    // users that belong to that hospital. Without a scope, show all users.
+    else if (currentUser.role === 'SUPER_ADMIN' && currentUser.scopedHospitalId) {
+      where.hospitalId = currentUser.scopedHospitalId;
+    }
 
     const users = await prisma.user.findMany({
       where,

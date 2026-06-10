@@ -36,6 +36,9 @@ router.get('/config', asyncHandler(async (_req: Request, res: Response) => {
 }));
 
 router.get('/transaction-stats', asyncHandler(async (_req: Request, res: Response) => {
+  // ABDM transactions are platform-wide infrastructure traffic — they aren't
+  // tagged with a hospitalId, so the SUPER_ADMIN "viewing as" scope cannot
+  // narrow them down. Always return the global counts.
   const [total, successful, failed] = await Promise.all([
     prisma.abdmTransaction.count(),
     prisma.abdmTransaction.count({ where: { success: true } }),

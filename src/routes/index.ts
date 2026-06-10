@@ -22,6 +22,7 @@ import abdmDiagnosticsRoutes from './abdmDiagnosticsRoutes';
 import documentRoutes from '../modules/document/document.routes';
 import immunizationRoutes from './immunizationRoutes';
 import enquiryRoutes from '../modules/enquiry/enquiry.routes';
+import dashboardRoutes from '../modules/dashboard/dashboard.routes';
 
 const router = Router();
 
@@ -48,5 +49,6 @@ router.use('/abdm/diagnostics', abdmDiagnosticsRoutes);
 router.use('/documents', documentRoutes);
 router.use('/immunizations', immunizationRoutes);
 router.use('/enquiry', enquiryRoutes);
+router.use('/dashboard', dashboardRoutes);
 
 export default router;

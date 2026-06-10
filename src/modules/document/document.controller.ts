@@ -13,6 +13,29 @@ export async function generateDocument(req: Request, res: Response, next: NextFu
 
     if (!patientId || !type) throw new AppError('patientId and type are required', 400);
 
+    // Multi-tenant guard: verify the patient belongs to the caller's
+    // hospital before letting them attach a document. Without this, any
+    // authenticated user with a patient UUID could write a document into
+    // another hospital's patient record.
+    const prisma = (await import('../../common/config/database')).default;
+    const patient = await prisma.patient.findUnique({
+      where: { id: patientId },
+      select: { id: true, hospitalId: true },
+    });
+    if (!patient) throw new AppError('Patient not found', 404);
+
+    const targetHospitalId =
+      user?.role === 'SUPER_ADMIN'
+        ? (user.scopedHospitalId || patient.hospitalId || user.hospitalId)
+        : user.hospitalId;
+
+    if (user?.role !== 'SUPER_ADMIN') {
+      if (!user?.hospitalId) throw new AppError('Your account is not linked to a hospital', 403);
+      if (patient.hospitalId && patient.hospitalId !== user.hospitalId) {
+        throw new AppError('Patient does not belong to your hospital', 403);
+      }
+    }
+
     let content: Buffer;
     if ((req as any).file) {
       content = (req as any).file.buffer;
@@ -27,7 +50,7 @@ export async function generateDocument(req: Request, res: Response, next: NextFu
       encounterId,
       admissionId,
       type,
-      hospitalId: user.hospitalId,
+      hospitalId: targetHospitalId,
       generatedBy: user.id,
       content,
       fileName,

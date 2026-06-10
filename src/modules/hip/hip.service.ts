@@ -152,10 +152,12 @@ export class HipService {
 
   async getReceivedShares(hospitalId?: string) {
     // SUPER_ADMIN (no hospitalId) sees all rows. Hospital-scoped users see
-    // rows tagged to their hospital AND any unscoped rows (hospitalId null) —
-    // the latter cover legacy data and the rare case where ABDM addresses a
-    // share to a hipId we haven't mapped to a Hospital yet. Better to show
-    // it at every front desk than to silently lose the patient.
+    // ONLY rows tagged to their hospital. Earlier we also surfaced
+    // hospitalId=null rows (legacy / unmapped hipId) at every facility, but
+    // that's a multi-tenant leak: any front desk could see another
+    // hospital's untagged shares (and we'd attach a global Patient match
+    // from that other hospital). Untagged shares now go to no-one until a
+    // SUPER_ADMIN reroutes them.
     //
     // We surface PENDING + recently CONVERTED rows (last 24h) so the queue
     // doesn't grow forever and the receptionist can still see what they
@@ -167,18 +169,20 @@ export class HipService {
         { status: 'CONVERTED' as any, convertedAt: { gte: cutoff } },
       ],
     };
-    const tenantOr: any = hospitalId
-      ? { OR: [{ hospitalId }, { hospitalId: null }] }
-      : null;
+    const where: any = hospitalId
+      ? { AND: [{ hospitalId }, statusOr] }
+      : statusOr;
     const shares = await prisma.receivedShare.findMany({
-      where: tenantOr ? { AND: [tenantOr, statusOr] } : statusOr,
+      where,
       orderBy: { receivedAt: 'desc' },
       take: 100,
     });
 
     // Resolve each row to the matching Patient (by ABHA number) so the
     // front desk gets a one-click "Open profile" path. Done in a single
-    // findMany — no N+1.
+    // findMany — no N+1. For hospital-scoped callers we ALSO scope the
+    // patient enrichment to that hospital, so we never reveal that the
+    // same ABHA is registered at some other facility.
     const abhaNumbers = Array.from(new Set(shares.map(s => s.abhaNumber).filter(Boolean)));
     const patients = abhaNumbers.length
       ? await prisma.patient.findMany({
@@ -187,6 +191,7 @@ export class HipService {
               { abhaNumber: { in: abhaNumbers } },
               { abhaId: { in: abhaNumbers } },
             ],
+            ...(hospitalId ? { hospitalId } : {}),
           },
           select: { id: true, uhid: true, abhaNumber: true, abhaId: true, hospitalId: true },
         })
@@ -1024,7 +1029,11 @@ export class HipService {
   // CARE CONTEXT MANAGEMENT (local)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  async addCareContexts(patientId: string, careContexts: Array<{ encounterId: string; display: string }>) {
+  async addCareContexts(
+    patientId: string,
+    careContexts: Array<{ encounterId: string; display: string }>,
+    currentUser?: any,
+  ) {
     logger.info('HIP: [link] addCareContexts called', {
       patientId,
       count: careContexts?.length || 0,
@@ -1037,6 +1046,20 @@ export class HipService {
       });
 
       if (!patient) {
+        throw new AppError('Patient not found', 404);
+      }
+
+      // Multi-tenant guard: only the patient's hospital may add care
+      // contexts to their record. Without this check, any HIP user with a
+      // patient UUID could attach encounters from another hospital to that
+      // patient's ABHA chain.
+      if (
+        currentUser &&
+        currentUser.role !== 'SUPER_ADMIN' &&
+        currentUser.hospitalId &&
+        patient.hospitalId &&
+        patient.hospitalId !== currentUser.hospitalId
+      ) {
         throw new AppError('Patient not found', 404);
       }
 
@@ -1341,6 +1364,23 @@ export class HipService {
     const share = await prisma.receivedShare.findUnique({ where: { id: shareId } });
     if (!share) throw new AppError('Share not found', 404);
 
+    // Multi-tenant guard: only the share's own hospital (or SUPER_ADMIN)
+    // may probe match candidates for it. share.rawProfile contains
+    // demographics from ABDM, so we can't reveal it across hospitals.
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      if (!currentUser.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      if (share.hospitalId && share.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Share not found', 404);
+      }
+      // Refuse legacy null-tenancy shares to non-SUPER_ADMINs — same
+      // reasoning as getReceivedShares.
+      if (!share.hospitalId) {
+        throw new AppError('Share not found', 404);
+      }
+    }
+
     const hospitalId = currentUser?.role !== 'SUPER_ADMIN'
       ? currentUser?.hospitalId
       : (share.hospitalId || undefined);
@@ -1434,12 +1474,16 @@ export class HipService {
     }
 
     const myHospitalId = currentUser?.hospitalId;
-    if (
-      currentUser?.role !== 'SUPER_ADMIN' &&
-      share.hospitalId &&
-      share.hospitalId !== myHospitalId
-    ) {
-      throw new AppError('This share belongs to a different hospital', 403);
+    if (currentUser?.role !== 'SUPER_ADMIN') {
+      if (!myHospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      // Block both cross-hospital shares AND legacy null-tenancy shares
+      // (matches the read-side change in getReceivedShares: untagged
+      // shares are reserved for SUPER_ADMIN reroute).
+      if (!share.hospitalId || share.hospitalId !== myHospitalId) {
+        throw new AppError('This share belongs to a different hospital', 403);
+      }
     }
 
     if (body.mode === 'IGNORE') {

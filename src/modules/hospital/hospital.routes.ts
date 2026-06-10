@@ -210,6 +210,13 @@ router.get(
 );
 
 router.get(
+  '/:id/stats',
+  authenticate,
+  authorize('SUPER_ADMIN', 'ADMIN'),
+  hospitalController.getHospitalPerformance
+);
+
+router.get(
   '/:id',
   authenticate,
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'),

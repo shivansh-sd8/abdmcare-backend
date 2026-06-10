@@ -4,6 +4,7 @@ import logger from '../../common/config/logger';
 import { AppError } from '../../common/middleware/errorHandler';
 import fs from 'fs';
 import path from 'path';
+import { getEffectiveHospitalId } from '../../common/utils/scope';
 
 const UPLOAD_DIR = process.env.DOCUMENT_STORAGE_PATH || path.join(process.cwd(), 'uploads', 'documents');
 
@@ -76,15 +77,19 @@ export class DocumentService {
 
   async getDocumentsByPatient(
     patientId: string,
-    currentUser?: { role?: string; hospitalId?: string },
+    currentUser?: { role?: string; hospitalId?: string; scopedHospitalId?: string },
     filters?: { type?: string }
   ) {
     const where: any = { patientId };
-    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
-      if (!currentUser.hospitalId) {
-        return [];
-      }
-      where.hospitalId = currentUser.hospitalId;
+    // Effective hospital: non-SUPER_ADMIN must be scoped to their JWT;
+    // SUPER_ADMIN with the global "viewing as" scope only sees that hospital;
+    // unscoped SUPER_ADMIN sees all hospitals' docs for the patient.
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.hospitalId = effectiveHospitalId;
+    } else if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      // Non-super-admin user without a hospital — fail closed.
+      return [];
     }
     if (filters?.type) {
       where.type = filters.type;

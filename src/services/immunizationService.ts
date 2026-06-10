@@ -30,8 +30,13 @@ class ImmunizationService {
     });
     if (!patient) throw new AppError('Patient not found', 404);
 
-    if (user?.role !== 'SUPER_ADMIN' && user?.hospitalId && patient.hospitalId && patient.hospitalId !== user.hospitalId) {
-      throw new AppError('Access denied: patient belongs to a different hospital', 403);
+    if (user?.role !== 'SUPER_ADMIN') {
+      if (!user?.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      if (patient.hospitalId && patient.hospitalId !== user.hospitalId) {
+        throw new AppError('Access denied: patient belongs to a different hospital', 403);
+      }
     }
 
     const created = await prisma.immunization.create({
@@ -68,8 +73,13 @@ class ImmunizationService {
     });
     if (!patient) throw new AppError('Patient not found', 404);
 
-    if (user?.role !== 'SUPER_ADMIN' && user?.hospitalId && patient.hospitalId && patient.hospitalId !== user.hospitalId) {
-      throw new AppError('Access denied', 403);
+    if (user?.role !== 'SUPER_ADMIN') {
+      if (!user?.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      if (patient.hospitalId && patient.hospitalId !== user.hospitalId) {
+        throw new AppError('Access denied', 403);
+      }
     }
 
     return prisma.immunization.findMany({
@@ -82,8 +92,13 @@ class ImmunizationService {
     const im = await prisma.immunization.findUnique({ where: { id } });
     if (!im) throw new AppError('Immunization not found', 404);
 
-    if (user?.role !== 'SUPER_ADMIN' && user?.hospitalId && im.hospitalId && im.hospitalId !== user.hospitalId) {
-      throw new AppError('Access denied', 403);
+    if (user?.role !== 'SUPER_ADMIN') {
+      if (!user?.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      if (im.hospitalId && im.hospitalId !== user.hospitalId) {
+        throw new AppError('Access denied', 403);
+      }
     }
     await prisma.immunization.delete({ where: { id } });
     return { message: 'Immunization deleted' };

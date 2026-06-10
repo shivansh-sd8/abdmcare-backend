@@ -1,5 +1,6 @@
 import prisma from '../common/config/database';
 import { AppError } from '../common/middleware/errorHandler';
+import { getEffectiveHospitalId } from '../common/utils/scope';
 
 interface CreateVitalsDTO {
   patientId: string;
@@ -19,8 +20,13 @@ interface CreateVitalsDTO {
 
 class VitalsService {
   async createVitals(data: CreateVitalsDTO, currentUser?: any) {
-    // Hospital isolation: verify patient belongs to the user's hospital
-    if (data.patientId && currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+    // Hospital isolation: verify patient belongs to the user's hospital.
+    // Always run when caller is non-SUPER_ADMIN — fail closed if their JWT
+    // has no hospitalId.
+    if (data.patientId && currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      if (!currentUser.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
       const patient = await prisma.patient.findUnique({
         where: { id: data.patientId },
         select: { hospitalId: true },
@@ -113,9 +119,9 @@ class VitalsService {
   }, currentUser?: any) {
     const { patientId, encounterId, hospitalId, startDate, endDate, page = 1, limit = 10 } = filters;
 
-    const effectiveHospitalId = currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId
-      ? currentUser.hospitalId
-      : hospitalId;
+    // Effective hospital: non-SUPER_ADMIN → JWT; SUPER_ADMIN → global
+    // "viewing as" scope, or explicit ?hospitalId=, otherwise platform-wide.
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser) || hospitalId;
     const pageNum  = parseInt(String(page),  10) || 1;
     const limitNum = parseInt(String(limit), 10) || 10;
 

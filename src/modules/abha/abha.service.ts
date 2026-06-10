@@ -26,6 +26,7 @@ import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import prisma from '../../common/config/database';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { getEffectiveHospitalId } from '../../common/utils/scope';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -655,8 +656,17 @@ export class AbhaService {
       const patient = await prisma.patient.findUnique({ where: { id: patientId } });
       if (!patient) throw new AppError('Patient not found', 404);
 
-      if (currentUser?.hospitalId && patient.hospitalId !== currentUser.hospitalId) {
-        throw new AppError('Access denied: patient belongs to a different hospital', 403);
+      // Multi-tenant guard: non-SUPER_ADMIN may only link ABHA to patients
+      // in their own hospital. Note we explicitly require patient.hospitalId
+      // to be set — refusing to operate on rogue null-tenancy rows — and
+      // we don't bypass when the JWT happens to have no hospitalId.
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
+        if (patient.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: patient belongs to a different hospital', 403);
+        }
       }
 
       const normalized = abhaNumber.replace(/-/g, '');
@@ -683,16 +693,37 @@ export class AbhaService {
     }
   }
 
-  async unlinkFromPatient(abhaNumber: string, patientId: string) {
+  async unlinkFromPatient(abhaNumber: string, patientId: string, currentUser?: any) {
     try {
+      // Multi-tenant guard: a receptionist at hospital A must not be able
+      // to clear another hospital's patient ABHA fields. Block unless
+      // SUPER_ADMIN or same hospital.
+      const patient = await prisma.patient.findUnique({
+        where: { id: patientId },
+        select: { id: true, hospitalId: true },
+      });
+      if (!patient) throw new AppError('Patient not found', 404);
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
+        if (patient.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: patient belongs to a different hospital', 403);
+        }
+      }
+
       const normalized = abhaNumber.replace(/-/g, '');
+      // Only clear the AbhaRecord.patientId back-pointer if it currently
+      // points to *this* patient — the same ABHA may be linked to multiple
+      // Patient rows across hospitals and we shouldn't blow away another
+      // hospital's pointer just because we're unlinking ours.
       await prisma.$transaction([
         prisma.patient.update({
           where: { id: patientId },
           data: { abhaId: null, abhaNumber: null, abhaAddress: null },
         }),
-        prisma.abhaRecord.update({
-          where: { abhaNumber: normalized },
+        prisma.abhaRecord.updateMany({
+          where: { abhaNumber: normalized, patientId },
           data: { patientId: null },
         }),
       ]);
@@ -703,9 +734,29 @@ export class AbhaService {
     }
   }
 
-  async getLocalAbhaRecord(abhaNumber: string) {
+  async getLocalAbhaRecord(abhaNumber: string, currentUser?: any) {
     const normalized = abhaNumber.replace(/-/g, '');
-    return prisma.abhaRecord.findUnique({ where: { abhaNumber: normalized } });
+    const record = await prisma.abhaRecord.findUnique({
+      where: { abhaNumber: normalized },
+    });
+    if (!record) return null;
+
+    // Multi-tenant guard: AbhaRecord is a global cache, but it carries a
+    // patientId pointing at one Patient row (which itself is hospital-bound).
+    // For non-SUPER_ADMIN, only return the record if the linked patient is
+    // in the caller's hospital — otherwise we'd reveal that some other
+    // hospital has registered this ABHA.
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (!record.patientId) return record;
+      const linked = await prisma.patient.findUnique({
+        where: { id: record.patientId },
+        select: { hospitalId: true },
+      });
+      if (linked && linked.hospitalId !== currentUser.hospitalId) {
+        return null;
+      }
+    }
+    return record;
   }
 
   // ===========================================================================
@@ -968,12 +1019,13 @@ export class AbhaService {
       orConditions.push({ mobile: identifier.trim() });
     }
 
-    // Multi-tenancy: scope to caller's hospital unless they're a SUPER_ADMIN.
-    // Without this, a receptionist at one facility could discover patients
-    // registered at another — a privacy leak.
+    // Multi-tenancy: scope to caller's hospital unless they're an unscoped
+    // SUPER_ADMIN. Without this, a receptionist at one facility could discover
+    // patients registered at another — a privacy leak.
     const where: any = { OR: orConditions };
-    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
-      where.hospitalId = currentUser.hospitalId;
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.hospitalId = effectiveHospitalId;
     }
 
     const patient = await prisma.patient.findFirst({

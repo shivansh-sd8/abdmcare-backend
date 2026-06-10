@@ -288,12 +288,14 @@ export class AbhaController {
 
   unlinkFromPatient = asyncHandler(async (req: Request, res: Response) => {
     const { abhaNumber, patientId } = req.body;
-    const data = await abhaService.unlinkFromPatient(abhaNumber, patientId);
+    const currentUser = (req as any).user;
+    const data = await abhaService.unlinkFromPatient(abhaNumber, patientId, currentUser);
     res.json({ success: true, data });
   });
 
   getLocalRecord = asyncHandler(async (req: Request, res: Response) => {
-    const data = await abhaService.getLocalAbhaRecord(req.params.abhaNumber);
+    const currentUser = (req as any).user;
+    const data = await abhaService.getLocalAbhaRecord(req.params.abhaNumber, currentUser);
     if (!data) res.status(404).json({ success: false, message: 'ABHA record not found' });
     else res.json({ success: true, data });
   });
