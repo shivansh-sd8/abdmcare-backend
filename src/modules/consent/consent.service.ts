@@ -548,14 +548,15 @@ export class ConsentService {
     if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
       where.patient = { hospitalId: currentUser.hospitalId };
     }
-    const [total, granted, denied, pending, revoked] = await Promise.all([
+    const [total, granted, denied, pending, revoked, expired] = await Promise.all([
       prisma.consent.count({ where }),
       prisma.consent.count({ where: { ...where, status: 'GRANTED' } }),
       prisma.consent.count({ where: { ...where, status: 'DENIED' } }),
       prisma.consent.count({ where: { ...where, status: 'REQUESTED' } }),
       prisma.consent.count({ where: { ...where, status: 'REVOKED' } }),
+      prisma.consent.count({ where: { ...where, status: 'EXPIRED' } }),
     ]);
-    return { success: true, data: { total, granted, denied, pending, revoked } };
+    return { success: true, data: { total, granted, denied, pending, revoked, expired } };
   }
 }
 

@@ -304,7 +304,11 @@ export class AbhaController {
       res.status(400).json({ success: false, message: 'identifier query param required (ABHA number or address)' });
       return;
     }
-    const data = await abhaService.lookupPatientByAbha(identifier);
+    // Multi-tenancy: SUPER_ADMIN sees across hospitals, everyone else is
+    // scoped to their own hospital so a receptionist can never find a
+    // patient that belongs to a different facility.
+    const currentUser = (req as any).user;
+    const data = await abhaService.lookupPatientByAbha(identifier, currentUser);
     res.json({ success: true, data });
   });
 

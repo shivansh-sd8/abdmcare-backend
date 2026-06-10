@@ -27,6 +27,12 @@ interface UpdateDoctorRequest {
   email?: string;
   consultationFee?: number;
   experience?: number;
+  // Scheduling fields editable from the Doctor profile UI.
+  workingHours?: any;       // { mon: { start, end }, tue: ... } — JSON blob
+  slotDuration?: number;    // minutes
+  maxPatientsPerDay?: number;
+  breakTimes?: any;         // [{ day, start, end, label }, …] — JSON blob
+  isActive?: boolean;
 }
 
 export class DoctorService {
@@ -203,19 +209,26 @@ export class DoctorService {
         }
       }
 
+      // Build a partial update so callers can ship just the fields they care
+      // about (e.g. only consultationFee from the "set fee" dialog, or only
+      // workingHours from the schedule editor) without nulling everything else.
+      const updateData: any = {};
+      if (data.firstName !== undefined)         updateData.firstName = data.firstName;
+      if (data.lastName !== undefined)          updateData.lastName = data.lastName;
+      if (data.specialization !== undefined)    updateData.specialization = data.specialization;
+      if (data.qualification !== undefined)     updateData.qualification = data.qualification;
+      if (data.mobile !== undefined)            updateData.mobile = data.mobile;
+      if (data.email !== undefined)             updateData.email = data.email;
+      if (data.consultationFee !== undefined)   updateData.consultationFee = data.consultationFee;
+      if (data.workingHours !== undefined)      updateData.workingHours = data.workingHours as any;
+      if (data.slotDuration !== undefined)      updateData.slotDuration = data.slotDuration;
+      if (data.maxPatientsPerDay !== undefined) updateData.maxPatientsPerDay = data.maxPatientsPerDay;
+      if (data.breakTimes !== undefined)        updateData.breakTimes = data.breakTimes as any;
+      if (data.isActive !== undefined)          updateData.isActive = data.isActive;
+
       const updatedDoctor = await prisma.doctor.update({
         where: { id },
-        data: {
-          firstName: data.firstName,
-          lastName: data.lastName,
-          specialization: data.specialization,
-          qualification: data.qualification,
-          mobile: data.mobile,
-          email: data.email,
-          consultationFee: (data as any).consultationFee !== undefined
-            ? (data as any).consultationFee
-            : undefined,
-        },
+        data: updateData,
       });
 
       logger.info('Doctor updated successfully', {
@@ -408,15 +421,36 @@ export class DoctorService {
     });
     const patientsSeen = Array.from(patientMap.values()).sort((a, b) => new Date(b.lastVisit).getTime() - new Date(a.lastVisit).getTime());
 
-    // Earnings: sum of collected payments from encounters
+    // Earnings: a doctor only earns the **consultation fee** per encounter,
+    // capped by what the patient actually paid. The encounter's
+    // `paymentCollected` is the *total* money received (consult + lab +
+    // medicine + scan) so summing it whole inflated earnings with pharmacy
+    // and lab revenue that belongs to the hospital's other budgets.
+    //
+    // Standard accounting convention: when a patient makes a partial
+    // payment, the consultation fee is collected first — everything beyond
+    // the consult is operational income (pharmacy/lab/scan) that doesn't
+    // accrue to the doctor.
+    //
+    // Returned alongside totalEarnings so the UI can show the breakdown:
+    //   • totalEarnings  — what the doctor actually earned (capped consult)
+    //   • totalCollected — total cash collected against the doctor's encounters
+    //   • totalAncillary — pharmacy + lab + scan collected (= the gap)
     let totalEarnings = 0;
+    let totalCollected = 0;
     const monthlyEarnings: Record<string, number> = {};
     encounters.forEach((e: any) => {
-      const collected = parseFloat(e.paymentCollected || '0');
-      totalEarnings += collected;
+      const collected   = parseFloat(e.paymentCollected || '0');
+      const consultFee  = parseFloat(e.consultationFee  || '0');
+      // Doctor earns at most the consult fee; if patient paid less, only
+      // what they paid counts.
+      const doctorShare = Math.min(consultFee, collected);
+      totalEarnings  += doctorShare;
+      totalCollected += collected;
       const month = new Date(e.visitDate).toISOString().substring(0, 7);
-      monthlyEarnings[month] = (monthlyEarnings[month] || 0) + collected;
+      monthlyEarnings[month] = (monthlyEarnings[month] || 0) + doctorShare;
     });
+    const totalAncillary = Math.max(0, totalCollected - totalEarnings);
 
     const earningsSummary = Object.entries(monthlyEarnings)
       .map(([month, amount]) => ({ month, amount: Math.round(amount * 100) / 100 }))
@@ -430,7 +464,13 @@ export class DoctorService {
         totalEncounters: encounters.length,
         totalAppointments: appointments.length,
         totalPrescriptions: prescriptions.length,
+        // Doctor's actual earnings (capped consult fee per encounter).
         totalEarnings: Math.round(totalEarnings * 100) / 100,
+        // Total money the front desk collected against this doctor's
+        // encounters — useful as a sanity-check for the breakdown.
+        totalCollected: Math.round(totalCollected * 100) / 100,
+        // Pharmacy + labs + scans collected that DON'T accrue to the doctor.
+        totalAncillary: Math.round(totalAncillary * 100) / 100,
       },
       encounters,
       appointments,

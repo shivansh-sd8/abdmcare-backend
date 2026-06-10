@@ -953,11 +953,11 @@ export class AbhaService {
   // SECTION 18 — NEW vs RETURNING PATIENT LOOKUP
   // ===========================================================================
 
-  async lookupPatientByAbha(identifier: string) {
+  async lookupPatientByAbha(identifier: string, currentUser?: any) {
     const normalized = identifier.replace(/-/g, '').replace(/@.*$/, '');
     const isMobile = /^\d{10}$/.test(identifier.trim());
 
-    const conditions: any[] = [
+    const orConditions: any[] = [
       { abhaNumber: normalized },
       { abhaId: normalized },
       { abhaAddress: identifier },
@@ -965,11 +965,19 @@ export class AbhaService {
       { abhaRecord: { abhaAddress: identifier } },
     ];
     if (isMobile) {
-      conditions.push({ mobile: identifier.trim() });
+      orConditions.push({ mobile: identifier.trim() });
+    }
+
+    // Multi-tenancy: scope to caller's hospital unless they're a SUPER_ADMIN.
+    // Without this, a receptionist at one facility could discover patients
+    // registered at another — a privacy leak.
+    const where: any = { OR: orConditions };
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      where.hospitalId = currentUser.hospitalId;
     }
 
     const patient = await prisma.patient.findFirst({
-      where: { OR: conditions },
+      where,
       include: {
         abhaRecord: true,
         encounters: {
