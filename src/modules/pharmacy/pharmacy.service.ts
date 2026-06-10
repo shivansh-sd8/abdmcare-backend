@@ -8,7 +8,7 @@ const prisma = prismaClient as any;
 export class PharmacyService {
   // ── Medicine Master ─────────────────────────────────────────────────────────
 
-  async listMedicines(hospitalId: string, filters: {
+  async listMedicines(hospitalId: string | undefined, filters: {
     search?: string;
     category?: string;
     isActive?: boolean;
@@ -16,7 +16,9 @@ export class PharmacyService {
     limit?: number;
   } = {}) {
     const { search, category, isActive = true, page = 1, limit = 50 } = filters;
-    const where: any = { hospitalId, isActive };
+    // SUPER_ADMIN with no explicit ?hospitalId → list across every hospital.
+    const where: any = { isActive };
+    if (hospitalId) where.hospitalId = hospitalId;
 
     if (search) {
       where.OR = [
@@ -52,9 +54,11 @@ export class PharmacyService {
     return { medicines: data, total, page, limit };
   }
 
-  async getMedicine(medicineId: string, hospitalId: string) {
+  async getMedicine(medicineId: string, hospitalId?: string) {
+    const where: any = { id: medicineId };
+    if (hospitalId) where.hospitalId = hospitalId;
     const med = await prisma.medicine.findFirst({
-      where: { id: medicineId, hospitalId },
+      where,
       include: {
         batches: {
           where: { quantityAvailable: { gt: 0 } },
@@ -217,9 +221,11 @@ export class PharmacyService {
 
   // ── Stock Overview ─────────────────────────────────────────────────────────
 
-  async getStockOverview(hospitalId: string) {
+  async getStockOverview(hospitalId?: string) {
+    const where: any = { isActive: true };
+    if (hospitalId) where.hospitalId = hospitalId;
     const medicines = await prisma.medicine.findMany({
-      where: { hospitalId, isActive: true },
+      where,
       include: {
         batches: {
           where: { quantityAvailable: { gt: 0 } },
@@ -267,9 +273,11 @@ export class PharmacyService {
     };
   }
 
-  async getLowStockMedicines(hospitalId: string) {
+  async getLowStockMedicines(hospitalId?: string) {
+    const where: any = { isActive: true };
+    if (hospitalId) where.hospitalId = hospitalId;
     const medicines = await prisma.medicine.findMany({
-      where: { hospitalId, isActive: true },
+      where,
       include: {
         batches: { where: { quantityAvailable: { gt: 0 } } },
       },
@@ -284,16 +292,18 @@ export class PharmacyService {
       .sort((a: any, b: any) => a.totalStock - b.totalStock);
   }
 
-  async getExpiringBatches(hospitalId: string, daysAhead: number = 90) {
+  async getExpiringBatches(hospitalId: string | undefined, daysAhead: number = 90) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() + daysAhead);
 
+    const where: any = {
+      quantityAvailable: { gt: 0 },
+      expiryDate: { lte: cutoff },
+    };
+    if (hospitalId) where.hospitalId = hospitalId;
+
     return prisma.inventoryBatch.findMany({
-      where: {
-        hospitalId,
-        quantityAvailable: { gt: 0 },
-        expiryDate: { lte: cutoff },
-      },
+      where,
       include: { medicine: { select: { name: true, genericName: true, category: true, unit: true } } },
       orderBy: { expiryDate: 'asc' },
     });
@@ -338,14 +348,15 @@ export class PharmacyService {
 
   // ── Stock Movements (Audit Log) ────────────────────────────────────────────
 
-  async getStockMovements(hospitalId: string, filters: {
+  async getStockMovements(hospitalId: string | undefined, filters: {
     medicineId?: string;
     type?: string;
     page?: number;
     limit?: number;
   } = {}) {
     const { medicineId, type, page = 1, limit = 50 } = filters;
-    const where: any = { hospitalId };
+    const where: any = {};
+    if (hospitalId) where.hospitalId = hospitalId;
     if (medicineId) where.medicineId = medicineId;
     if (type) where.type = type;
 
@@ -422,9 +433,11 @@ export class PharmacyService {
 
   // ── Dashboard Stats ────────────────────────────────────────────────────────
 
-  async getDashboardStats(hospitalId: string) {
+  async getDashboardStats(hospitalId?: string) {
+    const medCountWhere: any = { isActive: true };
+    if (hospitalId) medCountWhere.hospitalId = hospitalId;
     const [totalMedicines, lowStockMeds, expiringBatches] = await Promise.all([
-      prisma.medicine.count({ where: { hospitalId, isActive: true } }),
+      prisma.medicine.count({ where: medCountWhere }),
       this.getLowStockMedicines(hospitalId),
       this.getExpiringBatches(hospitalId, 90),
     ]);

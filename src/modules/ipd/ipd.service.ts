@@ -22,9 +22,12 @@ function generateReceiptNumber(): string {
 export class IPDService {
   // ── Ward operations ──────────────────────────────────────────────────────
 
-  async listWards(hospitalId: string) {
+  async listWards(hospitalId?: string) {
+    // SUPER_ADMIN with no explicit ?hospitalId → list across every hospital.
+    const where: any = { isActive: true };
+    if (hospitalId) where.hospitalId = hospitalId;
     return prisma.ward.findMany({
-      where: { hospitalId, isActive: true },
+      where,
       include: {
         _count: { select: { beds: true, admissions: { where: { status: 'ADMITTED' } } } },
         beds: { orderBy: { bedNumber: 'asc' } },
@@ -120,14 +123,15 @@ export class IPDService {
 
   // ── Admission operations ─────────────────────────────────────────────────
 
-  async listAdmissions(hospitalId: string, filters: {
+  async listAdmissions(hospitalId: string | undefined, filters: {
     status?: string;
     wardId?: string;
     page?: number;
     limit?: number;
   } = {}) {
     const { status, wardId, page = 1, limit = 25 } = filters;
-    const where: any = { hospitalId };
+    const where: any = {};
+    if (hospitalId) where.hospitalId = hospitalId;
     if (status) where.status = status;
     if (wardId) where.wardId = wardId;
 
@@ -151,9 +155,13 @@ export class IPDService {
     return { admissions, total, page, limit };
   }
 
-  async getAdmissionById(admissionId: string, hospitalId: string) {
+  async getAdmissionById(admissionId: string, hospitalId?: string) {
+    // hospitalId may be undefined for SUPER_ADMIN cross-hospital reads;
+    // omit it from the where-clause so we can fetch by id alone.
+    const where: any = { id: admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
     const admission = await prisma.admission.findFirst({
-      where: { id: admissionId, hospitalId },
+      where,
       include: {
         patient:  { select: { id: true, firstName: true, lastName: true, uhid: true, mobile: true, gender: true, dob: true, bloodGroup: true } },
         ward:     { include: { beds: true } },
@@ -330,9 +338,11 @@ export class IPDService {
 
   // ── IPD Daily Rounds ─────────────────────────────────────────────────────
 
-  async getAdmissionRounds(admissionId: string, hospitalId: string) {
-    // Verify admission belongs to this hospital
-    const admission = await prisma.admission.findFirst({ where: { id: admissionId, hospitalId } });
+  async getAdmissionRounds(admissionId: string, hospitalId?: string) {
+    // hospitalId may be undefined for SUPER_ADMIN cross-hospital reads.
+    const where: any = { id: admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
+    const admission = await prisma.admission.findFirst({ where });
     if (!admission) throw new Error('Admission not found');
 
     return prisma.encounter.findMany({
@@ -790,9 +800,11 @@ export class IPDService {
 
   // ── Get itemized bill preview for an admission ──────────────────────────
 
-  async getAdmissionBill(admissionId: string, hospitalId: string) {
+  async getAdmissionBill(admissionId: string, hospitalId?: string) {
+    const where: any = { id: admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
     const admission = await prisma.admission.findFirst({
-      where: { id: admissionId, hospitalId },
+      where,
       select: {
         admittedAt: true, dischargedAt: true,
         dailyCharges: true, advancePaid: true, admissionNumber: true,
@@ -944,9 +956,11 @@ export class IPDService {
 
   // ── Discharge Summary data (for PDF generation) ─────────────────────────
 
-  async getDischargeSummary(admissionId: string, hospitalId: string) {
+  async getDischargeSummary(admissionId: string, hospitalId?: string) {
+    const where: any = { id: admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
     const admission = await (prisma.admission as any).findFirst({
-      where: { id: admissionId, hospitalId },
+      where,
       include: {
         patient: {
           select: {
@@ -1089,9 +1103,11 @@ export class IPDService {
 
   // ── Ward overview for Ward Manager ───────────────────────────────────────
 
-  async getWardOverview(hospitalId: string) {
+  async getWardOverview(hospitalId?: string) {
+    const where: any = { isActive: true };
+    if (hospitalId) where.hospitalId = hospitalId;
     const wards = await prisma.ward.findMany({
-      where:   { hospitalId, isActive: true },
+      where,
       include: {
         beds: {
           include: {
@@ -1310,9 +1326,11 @@ export class IPDService {
 
   // ── Transfer History ────────────────────────────────────────────────────────
 
-  async getTransferHistory(admissionId: string, hospitalId: string) {
+  async getTransferHistory(admissionId: string, hospitalId?: string) {
+    const where: any = { admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
     return (prisma as any).bedTransfer.findMany({
-      where: { admissionId, hospitalId },
+      where,
       include: {
         fromWard: { select: { name: true, type: true } },
         fromBed:  { select: { bedNumber: true } },
@@ -1325,9 +1343,11 @@ export class IPDService {
 
   // ── Bed Analytics ───────────────────────────────────────────────────────────
 
-  async getBedAnalytics(hospitalId: string) {
+  async getBedAnalytics(hospitalId?: string) {
+    const where: any = { isActive: true };
+    if (hospitalId) where.hospitalId = hospitalId;
     const wards = await prisma.ward.findMany({
-      where: { hospitalId, isActive: true },
+      where,
       include: {
         beds: true,
         admissions: { where: { status: 'ADMITTED' } },

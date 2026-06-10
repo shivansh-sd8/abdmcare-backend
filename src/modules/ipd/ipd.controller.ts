@@ -7,9 +7,13 @@ function ok(res: Response, data: any) {
 }
 
 /**
- * Resolve the hospitalId for the current request:
+ * Resolve the hospitalId for write operations.
  *  - SUPER_ADMIN: query.hospitalId or body.hospitalId (must be provided)
  *  - everyone else: JWT-bound hospitalId (cannot be overridden)
+ *
+ * Use this for any operation that creates / modifies a row tied to a specific
+ * hospital — you can't admit a patient or create a ward without naming which
+ * hospital it belongs to.
  */
 function resolveHospitalId(req: Request): string {
   const user = (req as any).user;
@@ -26,11 +30,32 @@ function resolveHospitalId(req: Request): string {
   return user.hospitalId;
 }
 
+/**
+ * Scope the hospitalId for read-only listings.
+ *  - SUPER_ADMIN with no explicit ?hospitalId → undefined (= all hospitals)
+ *  - SUPER_ADMIN with explicit ?hospitalId → that hospital
+ *  - everyone else → JWT-bound hospitalId
+ *
+ * Services receiving the result MUST treat undefined as "no hospital filter".
+ * This is the pattern the EHR module already uses.
+ */
+function scopeHospitalId(req: Request): string | undefined {
+  const user = (req as any).user;
+  if (!user) throw new AppError('Unauthorized', 401);
+  if (user.role === 'SUPER_ADMIN') {
+    return (req.query?.hospitalId as string) ||
+           (req.body?.hospitalId as string) ||
+           undefined;
+  }
+  if (!user.hospitalId) throw new AppError('Your account is not linked to a hospital', 403);
+  return user.hospitalId;
+}
+
 // ── Ward ─────────────────────────────────────────────────────────────────────
 
 export async function listWards(req: Request, res: Response, next: NextFunction) {
   try {
-    const hospitalId = resolveHospitalId(req);
+    const hospitalId = scopeHospitalId(req);
     const data = await ipdService.listWards(hospitalId);
     ok(res, data);
   } catch (e) { next(e); }
@@ -91,7 +116,7 @@ export async function deleteWard(req: Request, res: Response, next: NextFunction
 
 export async function listAdmissions(req: Request, res: Response, next: NextFunction) {
   try {
-    const hospitalId = resolveHospitalId(req);
+    const hospitalId = scopeHospitalId(req);
     const { status, wardId, page, limit } = req.query as any;
     const data = await ipdService.listAdmissions(hospitalId, {
       status,
@@ -105,7 +130,7 @@ export async function listAdmissions(req: Request, res: Response, next: NextFunc
 
 export async function getAdmission(req: Request, res: Response, next: NextFunction) {
   try {
-    const hospitalId = resolveHospitalId(req);
+    const hospitalId = scopeHospitalId(req);
     const data = await ipdService.getAdmissionById(req.params.admissionId, hospitalId);
     ok(res, data);
   } catch (e) { next(e); }
@@ -139,7 +164,7 @@ export async function dischargePatient(req: Request, res: Response, next: NextFu
 
 export async function getWardOverview(req: Request, res: Response, next: NextFunction) {
   try {
-    const hospitalId = resolveHospitalId(req);
+    const hospitalId = scopeHospitalId(req);
     const data = await ipdService.getWardOverview(hospitalId);
     ok(res, data);
   } catch (e) { next(e); }
@@ -149,7 +174,7 @@ export async function getWardOverview(req: Request, res: Response, next: NextFun
 
 export async function getAdmissionRounds(req: Request, res: Response, next: NextFunction) {
   try {
-    const hospitalId = resolveHospitalId(req);
+    const hospitalId = scopeHospitalId(req);
     const data = await ipdService.getAdmissionRounds(req.params.admissionId, hospitalId);
     ok(res, data);
   } catch (e) { next(e); }
@@ -232,7 +257,7 @@ export async function collectPayment(req: Request, res: Response, next: NextFunc
 
 export async function getAdmissionBill(req: Request, res: Response, next: NextFunction) {
   try {
-    const hospitalId = resolveHospitalId(req);
+    const hospitalId = scopeHospitalId(req);
     const data = await ipdService.getAdmissionBill(req.params.admissionId, hospitalId);
     ok(res, data);
   } catch (e) { next(e); }
@@ -240,7 +265,7 @@ export async function getAdmissionBill(req: Request, res: Response, next: NextFu
 
 export async function getDischargeSummary(req: Request, res: Response, next: NextFunction) {
   try {
-    const hospitalId = resolveHospitalId(req);
+    const hospitalId = scopeHospitalId(req);
     const data = await ipdService.getDischargeSummary(req.params.admissionId, hospitalId);
     ok(res, data);
   } catch (e) { next(e); }
@@ -275,7 +300,7 @@ export async function transferBed(req: Request, res: Response, next: NextFunctio
 
 export async function getTransferHistory(req: Request, res: Response, next: NextFunction) {
   try {
-    const hospitalId = resolveHospitalId(req);
+    const hospitalId = scopeHospitalId(req);
     const data = await ipdService.getTransferHistory(req.params.admissionId, hospitalId);
     ok(res, data);
   } catch (e) { next(e); }
@@ -283,7 +308,7 @@ export async function getTransferHistory(req: Request, res: Response, next: Next
 
 export async function getBedAnalytics(req: Request, res: Response, next: NextFunction) {
   try {
-    const hospitalId = resolveHospitalId(req);
+    const hospitalId = scopeHospitalId(req);
     const data = await ipdService.getBedAnalytics(hospitalId);
     ok(res, data);
   } catch (e) { next(e); }
