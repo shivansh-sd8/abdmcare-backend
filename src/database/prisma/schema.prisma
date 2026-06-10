@@ -696,10 +696,12 @@ model Hospital {
   lastPaymentDate DateTime?
   totalRevenue Decimal  @default(0) @db.Decimal(12, 2)
   
-  // ABDM Integration (per-hospital so each tenant can act as its own
-  // HIP/HIU bridge. When any of these are unset the system falls back to
-  // the global env-level ABDM_* credentials so existing single-tenant
-  // deployments keep working unchanged).
+  // ─── ABDM Integration (facility-level identifiers) ────────────────────
+  // Each tenant acts as its own HIP/HIU bridge. Identifiers come from the
+  // ABDM Health Facility Registry (HFR) — `hfrFacilityId` is the canonical
+  // HFR Facility ID, while `hipId` / `hiuId` are the bridge-side service
+  // identifiers (typically equal to the HFR ID for a facility that's both
+  // a HIP and a HIU). HPR ids belong on Doctor (per-clinician), NOT here.
   hipId            String?  @unique
   hipName          String?
   hiuId            String?  @unique
@@ -708,7 +710,6 @@ model Hospital {
   abdmClientSecret String?
   abdmCallbackUrl  String?
   hfrFacilityId    String?  @unique
-  hprId            String?
   abdmEnabled      Boolean  @default(false)
   abdmRegisteredAt DateTime?
   

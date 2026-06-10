@@ -17,6 +17,15 @@ export const abdmConfig = {
   abhaUrl: process.env.ABDM_ABHA_URL || 'https://abhasbx.abdm.gov.in/abha/api',
   phrUrl: process.env.ABDM_PHR_URL || 'https://abhasbx.abdm.gov.in/abha/api/v3/phr/web',
   facilityUrl: process.env.ABDM_FACILITY_URL || 'https://apihspsbx.abdm.gov.in/v4/int',
+  // Public deep-link host the ABHA / PHR app expects inside a Health Facility
+  // QR. Per ABDM spec the QR contents must be a URL of the form
+  //   https://phrsbx.abdm.gov.in/share-profile?hip-id={HFR_ID}&counter-id={CTR}
+  // Sandbox: phrsbx.abdm.gov.in   Production: phr.abdm.gov.in
+  scanShareBaseUrl:
+    process.env.ABDM_SCAN_SHARE_BASE_URL ||
+    (process.env.ABDM_CM_ID === 'abdm'
+      ? 'https://phr.abdm.gov.in'
+      : 'https://phrsbx.abdm.gov.in'),
 
   // ── Client credentials ─────────────────────────────────────────────────────
   clientId: process.env.ABDM_CLIENT_ID || '',

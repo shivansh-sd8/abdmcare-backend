@@ -344,6 +344,8 @@ class PaymentService {
         id: e.id, type: 'OPD', patient: e.patient, doctor: e.doctor,
         date: e.visitDate, consultation, lab, medicine, scan, ward: 0,
         total: effectiveTotal, discount, paid, outstanding: Math.max(0, effectiveTotal - paid),
+        discountReason: e.discountReason || null,
+        discountApprovedBy: e.discountApprovedBy || null,
         status: e.paymentStatus || 'PENDING', diagnosis: e.finalDiagnosis || e.diagnosis,
       });
     });
@@ -382,6 +384,8 @@ class PaymentService {
         consultation: roundConsultation, lab: roundLab, medicine: roundMedicine, scan: roundScan,
         wardCharges, wardRate, days, advancePaid, discount,
         total, paid: totalReceived, outstanding: Math.max(0, total - totalReceived),
+        discountReason: a.discountReason || null,
+        discountApprovedBy: a.discountApprovedBy || null,
         status: a.paymentStatus || 'PENDING', diagnosis: a.diagnosis, admissionNumber: a.admissionNumber,
       });
     });

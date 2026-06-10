@@ -66,7 +66,7 @@ interface HospitalOnboardingData {
   abdmClientSecret?: string;
   abdmCallbackUrl?: string;
   hfrFacilityId?: string;
-  hprId?: string;
+  // NOTE: HPR IDs live on Doctor, not Hospital. Don't add `hprId` here.
 }
 
 interface UpdateHospitalData {
@@ -107,7 +107,6 @@ interface UpdateHospitalData {
   abdmClientSecret?: string;
   abdmCallbackUrl?: string;
   hfrFacilityId?: string;
-  hprId?: string;
   abdmEnabled?: boolean;
   defaultOpdCharge?: number;
   operatingHours?: any;
@@ -237,7 +236,6 @@ export class HospitalService {
           abdmClientSecret: data.abdmClientSecret || null,
           abdmCallbackUrl: data.abdmCallbackUrl || null,
           hfrFacilityId: data.hfrFacilityId || null,
-          hprId: data.hprId || null,
 
           // Default OPD charge
           defaultOpdCharge: data.defaultOpdCharge != null ? data.defaultOpdCharge : null,

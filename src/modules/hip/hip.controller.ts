@@ -188,30 +188,75 @@ export class HipController {
   });
 
   // ── M1: Facility QR & Received Shares ──────────────────────────────────────
+  //
+  // ABDM spec requires the QR payload to be a *URL* (not JSON). Format:
+  //   {scanShareBase}/share-profile?hip-id={HFR_ID}&counter-id={CTR}
+  //
+  // Identifiers come strictly from the database (per-hospital). There is NO
+  // env fallback — a hospital that hasn't been registered with HFR cannot
+  // generate a working facility QR, and we want that failure to surface
+  // clearly rather than silently succeed with a stale single-tenant value.
   getFacilityQrData = asyncHandler(async (req: Request, res: Response) => {
     const currentUser = (req as any).user;
-    let hipId = abdmConfig.hip.id;
-    let hipName = abdmConfig.hip.name;
 
-    if (currentUser?.hospitalId) {
-      const hospital = await prisma.hospital.findUnique({
-        where: { id: currentUser.hospitalId },
-        select: { hipId: true, name: true },
-      });
-      if (hospital?.hipId) {
-        hipId = hospital.hipId;
-        hipName = hospital.name;
-      }
+    // SUPER_ADMIN may pass ?hospitalId=... to inspect a specific tenant; for
+    // every other role we lock to their own hospital.
+    const targetHospitalId =
+      currentUser?.role === 'SUPER_ADMIN'
+        ? ((req.query?.hospitalId as string) || currentUser?.hospitalId)
+        : currentUser?.hospitalId;
+
+    if (!targetHospitalId) {
+      throw new AppError('Hospital context missing on this account', 400);
     }
 
-    const data = {
-      hipId,
-      hipName,
-      callbackUrl: abdmConfig.callbackUrl,
-      scanAndShareUrl: `${abdmConfig.callbackUrl}/api/v3/hip/patient/share`,
-      counter: Date.now().toString(36),
-    };
-    ResponseHandler.success(res, 'Facility QR data', data);
+    const hospital = await prisma.hospital.findUnique({
+      where: { id: targetHospitalId },
+      select: {
+        id: true,
+        name: true,
+        hipId: true,
+        hiuId: true,
+        hfrFacilityId: true,
+        abdmEnabled: true,
+        abdmRegisteredAt: true,
+      },
+    });
+
+    if (!hospital) {
+      throw new AppError('Hospital not found', 404);
+    }
+
+    // The QR uses the HFR Facility ID. When deployments only set hipId we
+    // accept that as a synonym (HFR id and HIP id are typically equal).
+    const facilityId = hospital.hfrFacilityId || hospital.hipId;
+    if (!facilityId) {
+      throw new AppError(
+        'This hospital is not registered with HFR yet. Add an HFR Facility ID (or HIP ID) to enable the facility QR.',
+        409,
+      );
+    }
+
+    // Counter id identifies the physical scanning station. We expose a stable
+    // short identifier per hospital (so all stations of the same facility map
+    // back consistently in callbacks). Facilities can override this later.
+    const counterId = (hospital.id || '').slice(0, 8) || 'main';
+
+    const shareProfileUrl = `${abdmConfig.scanShareBaseUrl}/share-profile?hip-id=${encodeURIComponent(facilityId)}&counter-id=${encodeURIComponent(counterId)}`;
+
+    ResponseHandler.success(res, 'Facility QR data', {
+      hipId: hospital.hipId || facilityId,
+      hipName: hospital.name,
+      hfrFacilityId: hospital.hfrFacilityId || null,
+      hiuId: hospital.hiuId || null,
+      abdmEnabled: hospital.abdmEnabled,
+      abdmRegisteredAt: hospital.abdmRegisteredAt,
+      counterId,
+      // The string the QR encodes — clients should render this verbatim.
+      shareProfileUrl,
+      // Backwards-compat alias used by older clients; same value.
+      scanAndShareUrl: shareProfileUrl,
+    });
   });
 
   getReceivedShares = asyncHandler(async (req: Request, res: Response) => {
