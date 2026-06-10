@@ -145,7 +145,7 @@ export class DocumentService {
   generateDownloadToken(documentId: string, expiresInMinutes = 60 * 24): string {
     const expiresAt = Date.now() + expiresInMinutes * 60 * 1000;
     const payload = `${documentId}:${expiresAt}`;
-    const hmac = crypto.createHmac('sha256', process.env.JWT_SECRET || 'medisync-doc-secret')
+    const hmac = crypto.createHmac('sha256', process.env.JWT_SECRET || 'abhaayushman-doc-secret')
       .update(payload)
       .digest('hex');
     const token = Buffer.from(`${payload}:${hmac}`).toString('base64url');
@@ -162,7 +162,7 @@ export class DocumentService {
         return { documentId, valid: false };
       }
 
-      const expectedHmac = crypto.createHmac('sha256', process.env.JWT_SECRET || 'medisync-doc-secret')
+      const expectedHmac = crypto.createHmac('sha256', process.env.JWT_SECRET || 'abhaayushman-doc-secret')
         .update(`${documentId}:${expiresAtStr}`)
         .digest('hex');
 

@@ -167,7 +167,7 @@ export async function sendAppointmentConfirmation(data: {
 }): Promise<SMSResult> {
   return sendSMS({
     to:      data.mobile,
-    message: `Dear ${data.patientName}, your appointment with ${data.doctorName} at ${data.hospitalName} is confirmed for ${data.date} at ${data.time}. Please arrive 15 mins early. - MediSync`,
+    message: `Dear ${data.patientName}, your appointment with ${data.doctorName} at ${data.hospitalName} is confirmed for ${data.date} at ${data.time}. Please arrive 15 mins early. - AbhaAyushman`,
   });
 }
 
@@ -181,7 +181,7 @@ export async function sendCheckInNotification(data: {
   const token = data.tokenNumber ? ` Your token: ${data.tokenNumber}.` : '';
   return sendSMS({
     to:      data.mobile,
-    message: `Dear ${data.patientName}, you have been checked in for ${data.doctorName} at ${data.hospitalName}.${token} - MediSync`,
+    message: `Dear ${data.patientName}, you have been checked in for ${data.doctorName} at ${data.hospitalName}.${token} - AbhaAyushman`,
   });
 }
 
@@ -193,7 +193,7 @@ export async function sendDischargeNotification(data: {
 }): Promise<SMSResult> {
   return sendSMS({
     to:      data.mobile,
-    message: `Dear ${data.patientName}, you have been discharged from ${data.hospitalName} (Admission: ${data.admissionNumber}). Thank you for choosing us. - MediSync`,
+    message: `Dear ${data.patientName}, you have been discharged from ${data.hospitalName} (Admission: ${data.admissionNumber}). Thank you for choosing us. - AbhaAyushman`,
   });
 }
 
@@ -204,7 +204,7 @@ export async function sendOTP(data: {
 }): Promise<SMSResult> {
   return sendSMS({
     to:      data.mobile,
-    message: `Your MediSync OTP for ${data.purpose || 'verification'} is ${data.otp}. Valid for 10 minutes. Do not share it with anyone.`,
+    message: `Your AbhaAyushman OTP for ${data.purpose || 'verification'} is ${data.otp}. Valid for 10 minutes. Do not share it with anyone.`,
   });
 }
 

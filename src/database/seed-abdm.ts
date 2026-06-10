@@ -29,10 +29,10 @@ async function main() {
 
   // ── 1. Super Admin (no hospital scope) ──────────────────────────────────────
   const superAdmin = await prisma.user.upsert({
-    where: { email: 'superadmin@medisync.com' },
+    where: { email: 'superadmin@abhaayushman.com' },
     update: { password: await hash('Admin@123'), role: 'SUPER_ADMIN', isActive: true },
     create: {
-      email: 'superadmin@medisync.com',
+      email: 'superadmin@abhaayushman.com',
       username: 'superadmin',
       password: await hash('Admin@123'),
       firstName: 'Super',
@@ -304,7 +304,7 @@ async function main() {
   console.log('📋 Login Credentials');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   const creds: Array<[string, string, string]> = [
-    ['SUPER_ADMIN',    'superadmin@medisync.com',                      'Admin@123'],
+    ['SUPER_ADMIN',    'superadmin@abhaayushman.com',                  'Admin@123'],
     ['ADMIN',          'admin@shivansh-test-facility.com',             'Admin@123'],
     ['DOCTOR',         'aarav.mehta@shivansh-test-facility.com',       'Doctor@123'],
     ['DOCTOR',         'isha.verma@shivansh-test-facility.com',        'Doctor@123'],

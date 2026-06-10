@@ -4,7 +4,7 @@ const options: swaggerJsdoc.Options = {
   definition: {
     openapi: '3.0.0',
     info: {
-      title: 'MediSync ABDM API',
+      title: 'AbhaAyushman ABDM API',
       version: '1.0.0',
       description: 'ABDM-compliant Hospital Management Information System API',
     },

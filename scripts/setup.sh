@@ -2,7 +2,7 @@
 
 set -e
 
-echo "🚀 MediSync ABDM - Setup Script"
+echo "🚀 AbhaAyushman ABDM - Setup Script"
 echo "================================"
 
 echo "📦 Installing dependencies..."

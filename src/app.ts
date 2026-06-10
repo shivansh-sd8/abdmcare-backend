@@ -88,7 +88,7 @@ app.get('/', (_req, res) => {
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   customCss: '.swagger-ui .topbar { display: none }',
-  customSiteTitle: 'MediSync ABDM API Docs',
+  customSiteTitle: 'AbhaAyushman ABDM API Docs',
 }));
 app.get('/api/docs.json', (_req, res) => res.json(swaggerSpec));
 

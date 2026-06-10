@@ -135,7 +135,7 @@ export class AppointmentService {
           doctorName:   `Dr. ${appointment.doctor.firstName} ${appointment.doctor.lastName}`,
           date:         apptDate,
           time:         apptTime,
-          hospitalName: 'MediSync Hospital',
+          hospitalName: 'AbhaAyushman Hospital',
         }).catch((e: any) => logger.warn('SMS send failed', { error: e.message }));
       }
 
@@ -580,7 +580,7 @@ export class AppointmentService {
           patientName:  `${appointment.patient.firstName} ${appointment.patient.lastName}`,
           doctorName:   `Dr. ${appointment.doctor.firstName} ${appointment.doctor.lastName}`,
           tokenNumber:  opdCardNumber,
-          hospitalName: 'MediSync Hospital',
+          hospitalName: 'AbhaAyushman Hospital',
         }).catch((e: any) => logger.warn('SMS send failed', { error: e.message }));
       }
 

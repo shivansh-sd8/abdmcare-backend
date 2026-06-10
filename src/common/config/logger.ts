@@ -91,7 +91,7 @@ if (process.env.NODE_ENV !== 'production') {
 const logger = winston.createLogger({
   level: logLevel,
   format: logFormat,
-  defaultMeta: { service: 'medisync-abdm' },
+  defaultMeta: { service: 'abhaayushman-abdm' },
   transports,
 });
 

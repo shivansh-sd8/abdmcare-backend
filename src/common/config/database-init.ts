@@ -12,10 +12,10 @@ async function main() {
   const hashedPassword = await bcrypt.hash('Admin@123', 10);
   
   const superAdmin = await prisma.user.upsert({
-    where: { email: 'superadmin@medisync.com' },
+    where: { email: 'superadmin@abhaayushman.com' },
     update: {},
     create: {
-      email: 'superadmin@medisync.com',
+      email: 'superadmin@abhaayushman.com',
       password: hashedPassword,
       username: 'superadmin',
       firstName: 'Super',
@@ -36,7 +36,7 @@ async function main() {
     where: { code: 'MGH001' },
     update: {},
     create: {
-      name: 'MediSync General Hospital',
+      name: 'AbhaAyushman General Hospital',
       code: 'MGH001',
       type: 'MULTI_SPECIALTY',
       addressLine1: '123 Healthcare Street',
@@ -46,7 +46,7 @@ async function main() {
       country: 'India',
       pincode: '400001',
       phone: '+91-22-12345678',
-      email: 'info@medisync-hospital.com',
+      email: 'info@abhaayushman-hospital.com',
       plan: 'PROFESSIONAL',
       status: 'ACTIVE',
       abdmEnabled: true,
@@ -69,7 +69,7 @@ async function main() {
   
   const hospitalAdmin = await prisma.user.create({
     data: {
-      email: 'admin@medisync-hospital.com',
+      email: 'admin@abhaayushman-hospital.com',
       password: adminPassword,
       username: 'hospitaladmin',
       firstName: 'Hospital',
@@ -92,7 +92,7 @@ async function main() {
   
   const receptionist = await prisma.user.create({
     data: {
-      email: 'receptionist@medisync-hospital.com',
+      email: 'receptionist@abhaayushman-hospital.com',
       password: receptionistPassword,
       username: 'receptionist',
       firstName: 'Front',
@@ -112,7 +112,7 @@ async function main() {
   // Create a Facility
   const facility = await prisma.facility.create({
     data: {
-      name: 'MediSync General Hospital',
+      name: 'AbhaAyushman General Hospital',
       type: 'HOSPITAL',
       address: {
         line1: '123 Healthcare Street',
@@ -122,7 +122,7 @@ async function main() {
       },
       contact: {
         phone: '+91-22-12345678',
-        email: 'info@medisync-hospital.com',
+        email: 'info@abhaayushman-hospital.com',
       },
     },
   });
@@ -153,7 +153,7 @@ async function main() {
   
   await prisma.user.create({
     data: {
-      email: 'doctor@medisync-hospital.com',
+      email: 'doctor@abhaayushman-hospital.com',
       password: doctorPassword,
       username: 'drsmith',
       firstName: 'John',
@@ -172,7 +172,7 @@ async function main() {
       qualification: 'MBBS, MD',
       registrationNo: 'MCI12345',
       mobile: '+91-9876543210',
-      email: 'doctor@medisync-hospital.com',
+      email: 'doctor@abhaayushman-hospital.com',
       hospitalId: hospital.id,
       departmentId: department.id,
     },
@@ -332,19 +332,19 @@ async function main() {
   console.log('📋 Login Credentials:');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('SUPER ADMIN:');
-  console.log('  Email: superadmin@medisync.com');
+  console.log('  Email: superadmin@abhaayushman.com');
   console.log('  Password: Admin@123');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('HOSPITAL ADMIN:');
-  console.log('  Email: admin@medisync-hospital.com');
+  console.log('  Email: admin@abhaayushman-hospital.com');
   console.log('  Password: Admin@123');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('RECEPTIONIST:');
-  console.log('  Email: receptionist@medisync-hospital.com');
+  console.log('  Email: receptionist@abhaayushman-hospital.com');
   console.log('  Password: Recep@123');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('DOCTOR:');
-  console.log('  Email: doctor@medisync-hospital.com');
+  console.log('  Email: doctor@abhaayushman-hospital.com');
   console.log('  Password: Doctor@123');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 }

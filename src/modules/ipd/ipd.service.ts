@@ -680,7 +680,7 @@ export class IPDService {
         where: { id: hospitalId },
         select: { name: true },
       });
-      const hospitalName = hospitalRecord?.name || 'MediSync Hospital';
+      const hospitalName = hospitalRecord?.name || 'AbhaAyushman Hospital';
       const patientName = `${admission.patient?.firstName || ''} ${admission.patient?.lastName || ''}`.trim();
       const baseUrl = process.env.APP_BASE_URL || 'http://localhost:5000';
 
@@ -706,7 +706,7 @@ export class IPDService {
 
             await smsService.sendSMS({
               to: admission.patient.mobile,
-              message: `Dear ${patientName}, you have been discharged from ${hospitalName} (Admission: ${admission.admissionNumber}). Download your discharge summary: ${downloadUrl} (valid 24hrs). Thank you. - MediSync`,
+              message: `Dear ${patientName}, you have been discharged from ${hospitalName} (Admission: ${admission.admissionNumber}). Download your discharge summary: ${downloadUrl} (valid 24hrs). Thank you. - AbhaAyushman`,
             });
           }
         })
