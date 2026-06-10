@@ -71,40 +71,15 @@ export class HipController {
           }
         }
 
-        // ── Persist patient + share BEFORE the ABDM ACK ────────────────────
-        // Two reasons to do this first:
-        //   1. The ACK is a network call that has previously failed with
-        //      transient ABDM-9999 errors; we don't want to lose the share
-        //      from our UI just because ABDM throws on its end.
-        //   2. The receptionist needs the row to appear in Received Shares
-        //      the instant the patient walks up to the counter, regardless
-        //      of whether ABDM has fully processed our ACK yet.
-        let existingPatient: any = null;
-        if (abhaNumber) {
-          const normalized = abhaNumber.replace(/-/g, '');
-          existingPatient = await this.hipService.findPatientByAbha(normalized);
-          if (!existingPatient) {
-            existingPatient = await this.hipService.createPatientFromScanShare(
-              profile,
-              normalized,
-              abhaAddr,
-              resolvedHospitalId,
-            );
-            logger.info('Scan & Share: new patient created', {
-              abhaNumber: normalized,
-              hospitalId: resolvedHospitalId,
-            });
-          } else {
-            logger.info('Scan & Share: returning patient found', {
-              abhaNumber: normalized,
-              patientId: existingPatient.id,
-            });
-          }
-        }
-
-        // Persist received share event for the front desk queue. Use the
-        // patient's hospitalId when the share matched an existing patient;
-        // fall back to the resolvedHospitalId from the inbound hipId.
+        // ── Persist the share BEFORE the ABDM ACK ──────────────────────────
+        // We deliberately do NOT auto-create a Patient row here anymore.
+        // Auto-creation produced half-formed Patient records (sparse mobile,
+        // empty address, machine UHID) and silently masked duplicates. The
+        // share now sits in the front-desk queue as PENDING and only becomes
+        // a Patient when the receptionist:
+        //   • clicks "Register as new patient", OR
+        //   • picks an existing patient to merge the ABHA into.
+        // Both paths run server-side via /received-shares/:id/convert.
         await this.hipService.saveReceivedShare({
           abhaNumber: abhaNumber.replace(/-/g, ''),
           abhaAddress: abhaAddr,
@@ -114,11 +89,11 @@ export class HipController {
           tokenNumber,
           requestId: inboundRequestId,
           rawProfile: profile,
-          hospitalId: existingPatient?.hospitalId || resolvedHospitalId,
+          hospitalId: resolvedHospitalId,
         });
-        logger.info('Scan & Share: received share persisted', {
+        logger.info('Scan & Share: received share persisted (PENDING)', {
           tokenNumber,
-          hospitalId: existingPatient?.hospitalId || resolvedHospitalId,
+          hospitalId: resolvedHospitalId,
         });
 
         // ── Now ACK ABDM ──────────────────────────────────────────────────
@@ -371,6 +346,22 @@ export class HipController {
     const currentUser = (req as any).user;
     const shares = await this.hipService.getReceivedShares(currentUser?.hospitalId);
     ResponseHandler.success(res, 'Received profile shares', shares);
+  });
+
+  getReceivedShareMatchCandidates = asyncHandler(async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    const result = await this.hipService.getMatchCandidatesForShare(req.params.id, currentUser);
+    ResponseHandler.success(res, 'Match candidates', result);
+  });
+
+  convertReceivedShare = asyncHandler(async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    const result = await this.hipService.convertReceivedShare(
+      req.params.id,
+      req.body,
+      currentUser,
+    );
+    ResponseHandler.success(res, `Share ${result.mode === 'IGNORE' ? 'ignored' : 'converted'}`, result);
   });
 
   // ── Internal APIs ──────────────────────────────────────────────────────────

@@ -57,6 +57,27 @@ router.get(
   hipController.getReceivedShares
 );
 
+// Find Patients in this hospital that look like a probable match for a
+// pending share (same mobile, same ABHA-already-linked, or same name+DOB).
+// The front desk uses this to offer "merge into existing" before creating a
+// brand new patient row.
+router.get(
+  '/received-shares/:id/match-candidates',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  hipController.getReceivedShareMatchCandidates
+);
+
+// Convert a PENDING share into a Patient — either by creating a new row or
+// merging the ABHA into an existing patient. Body:
+//   { mode: 'NEW' | 'MERGE' | 'IGNORE', existingPatientId?: string }
+router.post(
+  '/received-shares/:id/convert',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  [body('mode').isIn(['NEW', 'MERGE', 'IGNORE'])],
+  validate,
+  hipController.convertReceivedShare
+);
+
 router.post(
   '/link/generate-token',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),

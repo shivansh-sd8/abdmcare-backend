@@ -44,7 +44,15 @@ model Patient {
   
   isCrossHospital  Boolean       @default(false)
   isActive         Boolean       @default(true)
-  
+
+  // Where this patient row originated. Drives the "Incomplete profile" CTA on
+  // the Patient page and lets the front desk filter for rows that still need
+  // intake (typically SCAN_SHARE rows where ABDM only sent a sparse profile).
+  registrationSource PatientRegistrationSource @default(WALK_IN)
+  // Receptionist marks this true after they've filled in the missing fields
+  // (mobile, address, bloodGroup, emergency contact). Drives the banner.
+  profileCompleted Boolean       @default(true)
+
   // Relations
   abhaRecord              AbhaRecord?
   encounters              Encounter[]
@@ -828,6 +836,27 @@ enum Gender {
   OTHER
 }
 
+// How a Patient row first entered our system. Drives UX cues like the
+// "Incomplete profile" banner and registration-source filters in the patient
+// list. Add new values rather than renaming existing ones.
+enum PatientRegistrationSource {
+  WALK_IN          // standard front-desk registration
+  SCAN_SHARE       // patient scanned the facility QR via PHR app
+  ABHA_VERIFY      // created during a manual ABHA Verify lookup
+  REFERRAL         // imported via a referral / API integration
+  IMPORT           // bulk imported from legacy systems
+}
+
+// Lifecycle of a profile share received from ABDM. PENDING → CONVERTED (the
+// receptionist created or merged into a Patient) or IGNORED (front desk
+// dismissed it, e.g. wrong scan).
+enum ReceivedShareStatus {
+  PENDING
+  CONVERTED
+  IGNORED
+  EXPIRED
+}
+
 enum EncounterType {
   OPD
   IPD
@@ -1405,8 +1434,19 @@ model ReceivedShare {
   rawProfile     Json?
   receivedAt     DateTime @default(now())
   createdAt      DateTime @default(now())
+
+  // Lifecycle. PENDING shares need front-desk action (convert to a new
+  // Patient, merge into an existing one, or ignore). The Patient row is no
+  // longer auto-created — see hip.controller.handleProfileShare.
+  status            ReceivedShareStatus @default(PENDING)
+  convertedPatientId String?
+  convertedAt        DateTime?
+  convertedById      String?           // user.id of the receptionist who acted
+  notes              String?           // free text the receptionist may attach
+
   @@index([hospitalId])
   @@index([abhaNumber])
+  @@index([status])
   @@map("received_shares")
 }
 

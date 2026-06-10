@@ -45,6 +45,7 @@ interface UpdatePatientRequest {
   abhaId?: string;
   abhaNumber?: string;
   abhaAddress?: string;
+  profileCompleted?: boolean;
 }
 
 interface SearchPatientQuery {
@@ -281,6 +282,11 @@ export class PatientService {
       if (data.abhaId !== undefined)           updateData.abhaId = data.abhaId ? data.abhaId.replace(/-/g, '') : null;
       if (data.abhaNumber !== undefined)       updateData.abhaNumber = data.abhaNumber ? data.abhaNumber.replace(/-/g, '') : null;
       if (data.abhaAddress !== undefined)      updateData.abhaAddress = data.abhaAddress || null;
+      // Banner-driver flag — set true when the receptionist confirms the
+      // ABDM-supplied profile is complete (called from the Patient edit
+      // submit). registrationSource is intentionally NOT user-editable; it's
+      // historical metadata about how the row was created.
+      if (data.profileCompleted !== undefined) updateData.profileCompleted = !!data.profileCompleted;
 
       const updatedPatient = await prisma.patient.update({
         where: { id },

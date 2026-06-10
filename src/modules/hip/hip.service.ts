@@ -156,10 +156,22 @@ export class HipService {
     // the latter cover legacy data and the rare case where ABDM addresses a
     // share to a hipId we haven't mapped to a Hospital yet. Better to show
     // it at every front desk than to silently lose the patient.
+    //
+    // We surface PENDING + recently CONVERTED rows (last 24h) so the queue
+    // doesn't grow forever and the receptionist can still see what they
+    // converted today; IGNORED / EXPIRED rows stay hidden.
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const statusOr: any = {
+      OR: [
+        { status: 'PENDING' as any },
+        { status: 'CONVERTED' as any, convertedAt: { gte: cutoff } },
+      ],
+    };
+    const tenantOr: any = hospitalId
+      ? { OR: [{ hospitalId }, { hospitalId: null }] }
+      : null;
     const shares = await prisma.receivedShare.findMany({
-      where: hospitalId
-        ? { OR: [{ hospitalId }, { hospitalId: null }] }
-        : undefined,
+      where: tenantOr ? { AND: [tenantOr, statusOr] } : statusOr,
       orderBy: { receivedAt: 'desc' },
       take: 100,
     });
@@ -1257,6 +1269,314 @@ export class HipService {
     });
   }
 
+  /**
+   * Generate a UHID in the same series as the rest of the registration flow
+   * (`UH000001`+). Public so /received-shares/:id/convert can reuse it.
+   */
+  async nextUhid(): Promise<string> {
+    const prefix = 'UH';
+    const lastPatient = await prisma.patient.findFirst({
+      where: { uhid: { startsWith: prefix } },
+      orderBy: { createdAt: 'desc' },
+      select: { uhid: true },
+    });
+    const lastNumber = lastPatient?.uhid
+      ? parseInt(lastPatient.uhid.replace(prefix, ''), 10) || 0
+      : 0;
+    return `${prefix}${(lastNumber + 1).toString().padStart(6, '0')}`;
+  }
+
+  /**
+   * Parse the ABDM /patient/share profile into the columns we'd put on a
+   * Patient row. Centralised so both the convert API and any future bulk
+   * importer behave the same way.
+   *
+   * ABDM may redact DOB / mobile (e.g. `yearOfBirth: '19**'`); we never put
+   * a placeholder mobile or an "Invalid Date" into the DB — we leave those
+   * fields blank so the front desk fills them at intake.
+   */
+  parseScanShareProfile(profile: any) {
+    const fullName = profile?.name || `${profile?.firstName || ''} ${profile?.lastName || ''}`.trim();
+    const firstName = profile?.firstName || fullName.split(' ')[0] || 'Unknown';
+    const lastName = profile?.lastName || fullName.split(' ').slice(1).join(' ') || '';
+    const gender = (profile?.gender === 'M' ? 'MALE' : profile?.gender === 'F' ? 'FEMALE' : 'OTHER') as any;
+
+    const allDigits = (s: string) => s && /^\d+$/.test(s);
+    const yob = String(profile?.yearOfBirth || '');
+    const mob = String(profile?.monthOfBirth || '01');
+    const dob_ = String(profile?.dayOfBirth || '01');
+    const dob = (allDigits(yob) && allDigits(mob) && allDigits(dob_))
+      ? new Date(`${yob.padStart(4, '0')}-${mob.padStart(2, '0')}-${dob_.padStart(2, '0')}`)
+      : null;
+
+    const rawMobile: string = profile?.mobile || profile?.phoneNumber || '';
+    const mobile = /^\d{6,15}$/.test(rawMobile) ? rawMobile : '';
+
+    return {
+      firstName,
+      lastName,
+      fullName,
+      gender,
+      dob,
+      mobile,
+      address: {
+        line: profile?.address?.line || profile?.address || '',
+        district: profile?.address?.district || profile?.districtName || '',
+        state: profile?.address?.state || profile?.stateName || '',
+        pincode: profile?.address?.pinCode || profile?.pinCode || '',
+      },
+    };
+  }
+
+  /**
+   * Find Patients in the receptionist's hospital that probably refer to the
+   * same person as a PENDING ReceivedShare. Match priority:
+   *   1. Same ABHA number (almost certainly the same person — but we already
+   *      auto-link in that case, so we still surface it for visibility).
+   *   2. Same mobile number.
+   *   3. Same name (fuzzy) + DOB year (when both sides have a year).
+   * Returns at most 5 candidates, scored most-confident first.
+   */
+  async getMatchCandidatesForShare(shareId: string, currentUser?: any) {
+    const share = await prisma.receivedShare.findUnique({ where: { id: shareId } });
+    if (!share) throw new AppError('Share not found', 404);
+
+    const hospitalId = currentUser?.role !== 'SUPER_ADMIN'
+      ? currentUser?.hospitalId
+      : (share.hospitalId || undefined);
+
+    const where: any = {
+      isActive: true,
+      ...(hospitalId ? { hospitalId } : {}),
+    };
+
+    const profile = (share.rawProfile as any) || {};
+    const parsed = this.parseScanShareProfile(profile);
+    const ors: any[] = [];
+    if (share.abhaNumber) {
+      ors.push({ abhaNumber: share.abhaNumber });
+      ors.push({ abhaId: share.abhaNumber });
+    }
+    if (parsed.mobile) ors.push({ mobile: parsed.mobile });
+    if (share.mobile && /^\d{6,15}$/.test(share.mobile)) ors.push({ mobile: share.mobile });
+    if (parsed.firstName && parsed.firstName !== 'Unknown') {
+      ors.push({
+        AND: [
+          { firstName: { equals: parsed.firstName, mode: 'insensitive' } },
+          { lastName: { equals: parsed.lastName, mode: 'insensitive' } },
+        ],
+      });
+    }
+    if (!ors.length) return { share, candidates: [] };
+
+    const candidates = await prisma.patient.findMany({
+      where: { ...where, OR: ors },
+      take: 5,
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true, uhid: true, firstName: true, lastName: true, mobile: true,
+        gender: true, dob: true, abhaNumber: true, abhaAddress: true,
+        registrationSource: true, profileCompleted: true,
+      },
+    });
+
+    // Score so the strongest match floats up.
+    const dobYear = parsed.dob ? parsed.dob.getFullYear() : null;
+    const scored = candidates.map((c) => {
+      let score = 0;
+      const reasons: string[] = [];
+      if (share.abhaNumber && c.abhaNumber === share.abhaNumber) {
+        score += 100; reasons.push('same ABHA number');
+      }
+      if (parsed.mobile && c.mobile === parsed.mobile) {
+        score += 60; reasons.push('same mobile');
+      }
+      if (
+        parsed.firstName &&
+        parsed.firstName !== 'Unknown' &&
+        c.firstName?.toLowerCase() === parsed.firstName.toLowerCase() &&
+        c.lastName?.toLowerCase() === parsed.lastName.toLowerCase()
+      ) {
+        score += 30; reasons.push('same name');
+      }
+      if (dobYear && c.dob && new Date(c.dob).getFullYear() === dobYear) {
+        score += 10; reasons.push('same birth year');
+      }
+      return { ...c, score, reasons };
+    });
+    scored.sort((a, b) => b.score - a.score);
+
+    return { share, candidates: scored };
+  }
+
+  /**
+   * Convert a PENDING ReceivedShare into a Patient.
+   *
+   * Modes:
+   *   • NEW    — create a fresh Patient row, copying the ABDM-supplied
+   *             demographics. Generates a real UH###### UHID and tags the
+   *             row with registrationSource=SCAN_SHARE + profileCompleted=false
+   *             so the front desk knows to finish intake.
+   *   • MERGE  — attach the ABHA to an existing Patient (validated to be in
+   *             the receptionist's own hospital). Doesn't overwrite existing
+   *             demographics; only fills what was blank.
+   *   • IGNORE — mark the share as IGNORED (e.g. wrong scan, walk-away).
+   */
+  async convertReceivedShare(
+    shareId: string,
+    body: { mode: 'NEW' | 'MERGE' | 'IGNORE'; existingPatientId?: string; notes?: string },
+    currentUser: any,
+  ) {
+    const share = await prisma.receivedShare.findUnique({ where: { id: shareId } });
+    if (!share) throw new AppError('Share not found', 404);
+    if (share.status !== 'PENDING') {
+      throw new AppError(`This share has already been ${share.status.toLowerCase()}`, 409);
+    }
+
+    const myHospitalId = currentUser?.hospitalId;
+    if (
+      currentUser?.role !== 'SUPER_ADMIN' &&
+      share.hospitalId &&
+      share.hospitalId !== myHospitalId
+    ) {
+      throw new AppError('This share belongs to a different hospital', 403);
+    }
+
+    if (body.mode === 'IGNORE') {
+      await prisma.receivedShare.update({
+        where: { id: shareId },
+        data: {
+          status: 'IGNORED',
+          convertedAt: new Date(),
+          convertedById: currentUser?.id || null,
+          notes: body.notes || null,
+        },
+      });
+      return { mode: 'IGNORE', share };
+    }
+
+    const profile = (share.rawProfile as any) || {};
+    const parsed = this.parseScanShareProfile(profile);
+    const targetHospitalId = share.hospitalId || myHospitalId || null;
+
+    if (body.mode === 'MERGE') {
+      if (!body.existingPatientId) {
+        throw new AppError('existingPatientId is required for MERGE', 400);
+      }
+      const existing = await prisma.patient.findUnique({
+        where: { id: body.existingPatientId },
+      });
+      if (!existing) throw new AppError('Existing patient not found', 404);
+      if (
+        currentUser?.role !== 'SUPER_ADMIN' &&
+        existing.hospitalId &&
+        existing.hospitalId !== myHospitalId
+      ) {
+        throw new AppError('Cannot merge into a patient from another hospital', 403);
+      }
+
+      const merged = await prisma.patient.update({
+        where: { id: existing.id },
+        data: {
+          // Always link the ABHA — the whole point of the merge.
+          abhaNumber: share.abhaNumber || existing.abhaNumber,
+          abhaId: share.abhaNumber || existing.abhaId,
+          abhaAddress: share.abhaAddress || existing.abhaAddress,
+          // Fill blanks only — never overwrite existing data the receptionist
+          // already entered.
+          ...(existing.dob ? {} : (parsed.dob ? { dob: parsed.dob } : {})),
+          ...(existing.mobile && !existing.mobile.startsWith('SCAN-') ? {} : (parsed.mobile ? { mobile: parsed.mobile } : {})),
+        },
+      });
+
+      // Upsert the canonical AbhaRecord.
+      if (share.abhaNumber) {
+        await prisma.abhaRecord.upsert({
+          where: { abhaNumber: share.abhaNumber },
+          create: {
+            abhaNumber: share.abhaNumber,
+            abhaAddress: share.abhaAddress || null,
+            patientId: merged.id,
+            kycStatus: 'VERIFIED',
+            profileData: profile,
+          },
+          update: {
+            patientId: merged.id,
+            abhaAddress: share.abhaAddress || undefined,
+            profileData: profile,
+          },
+        });
+      }
+
+      await prisma.receivedShare.update({
+        where: { id: shareId },
+        data: {
+          status: 'CONVERTED',
+          convertedPatientId: merged.id,
+          convertedAt: new Date(),
+          convertedById: currentUser?.id || null,
+          notes: body.notes || null,
+        },
+      });
+
+      return { mode: 'MERGE', patient: merged, share };
+    }
+
+    // mode === 'NEW'
+    const uhid = await this.nextUhid();
+    const created = await prisma.patient.create({
+      data: {
+        uhid,
+        firstName: parsed.firstName,
+        lastName: parsed.lastName,
+        gender: parsed.gender,
+        dob: parsed.dob,
+        mobile: parsed.mobile, // empty string if ABDM didn't share — receptionist fills in
+        abhaNumber: share.abhaNumber || null,
+        abhaId: share.abhaNumber || null,
+        abhaAddress: share.abhaAddress || null,
+        address: parsed.address as any,
+        ...(targetHospitalId ? { hospitalId: targetHospitalId } : {}),
+        registrationSource: 'SCAN_SHARE' as any,
+        profileCompleted: false,
+      },
+    });
+
+    if (share.abhaNumber) {
+      await prisma.abhaRecord.upsert({
+        where: { abhaNumber: share.abhaNumber },
+        create: {
+          abhaNumber: share.abhaNumber,
+          abhaAddress: share.abhaAddress || null,
+          patientId: created.id,
+          kycStatus: 'VERIFIED',
+          profileData: profile,
+        },
+        update: {
+          patientId: created.id,
+          abhaAddress: share.abhaAddress || undefined,
+          profileData: profile,
+        },
+      });
+    }
+
+    await prisma.receivedShare.update({
+      where: { id: shareId },
+      data: {
+        status: 'CONVERTED',
+        convertedPatientId: created.id,
+        convertedAt: new Date(),
+        convertedById: currentUser?.id || null,
+        notes: body.notes || null,
+      },
+    });
+
+    return { mode: 'NEW', patient: created, share };
+  }
+
+  // Legacy entry-point kept (and still used by the old auto-create path's
+  // call-sites before the refactor). New code MUST call convertReceivedShare
+  // instead — this helper exists only as a thin wrapper for backwards-compat.
   async createPatientFromScanShare(
     profile: any,
     abhaNumber: string,
@@ -1264,44 +1584,24 @@ export class HipService {
     hospitalId?: string,
   ) {
     const normalized = abhaNumber.replace(/-/g, '');
-    const firstName = profile.firstName || profile.name?.split(' ')[0] || 'Unknown';
-    const lastName = profile.lastName || profile.name?.split(' ').slice(1).join(' ') || '';
-    const gender = (profile.gender === 'M' ? 'MALE' : profile.gender === 'F' ? 'FEMALE' : 'OTHER') as any;
-    const mobile = profile.mobile || profile.phoneNumber || `SCAN-${Date.now()}`;
-
-    // ABDM sends DOB parts as strings, sometimes redacted with '*' in the
-    // sandbox (e.g. yearOfBirth: '19**'). Skip the date if any part has a
-    // non-digit char, otherwise we'd create an "Invalid Date" Date object
-    // and Prisma would reject the row.
-    const yob = String(profile.yearOfBirth || '');
-    const mob = String(profile.monthOfBirth || '01');
-    const dob_ = String(profile.dayOfBirth || '01');
-    const allDigits = (s: string) => s && /^\d+$/.test(s);
-    const dob = (allDigits(yob) && allDigits(mob) && allDigits(dob_))
-      ? new Date(`${yob.padStart(4, '0')}-${mob.padStart(2, '0')}-${dob_.padStart(2, '0')}`)
-      : null;
+    const parsed = this.parseScanShareProfile(profile);
+    const uhid = await this.nextUhid();
 
     const patient = await prisma.patient.create({
       data: {
-        uhid: `UHID-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-        firstName,
-        lastName,
-        gender,
-        dob,
-        mobile,
+        uhid,
+        firstName: parsed.firstName,
+        lastName: parsed.lastName,
+        gender: parsed.gender,
+        dob: parsed.dob,
+        mobile: parsed.mobile,
         abhaNumber: normalized,
         abhaId: normalized,
         abhaAddress: abhaAddress || null,
-        // Tag the patient to the facility that received the share so they
-        // appear in that hospital's patient list and are gated by the
-        // multi-tenant filter.
         ...(hospitalId ? { hospitalId } : {}),
-        address: {
-          line: profile.address || '',
-          district: profile.districtName || '',
-          state: profile.stateName || '',
-          pincode: profile.pinCode || '',
-        },
+        address: parsed.address as any,
+        registrationSource: 'SCAN_SHARE' as any,
+        profileCompleted: false,
       },
     });
 
