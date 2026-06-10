@@ -38,7 +38,24 @@ export class HipController {
           }
         }
 
-        // Send on-share acknowledgement (absolute URL)
+        // Send on-share acknowledgement to ABDM.
+        //
+        // Wire format per the M3 Scan & Share Postman (`02 profile-on-share`):
+        //   {
+        //     acknowledgement: {
+        //       status: "SUCCESS",
+        //       abhaAddress, profile: { context, tokenNumber, expiry }
+        //     },
+        //     response: { requestId }
+        //   }
+        //
+        // Critical gotchas (both confirmed by ABDM-9999 errors in prod):
+        //   • `expiry` MUST be a string of digits — seconds, NOT an ISO date.
+        //     ABDM rejects with "Invalid expiry, it must contain only 0-9".
+        //   • The correlation envelope key is `response` (not `resp`). Sending
+        //     `resp` makes ABDM see `response = null` and reject with
+        //     "Response cannot be NULL".
+        // Token validity = 30 min = 1800 seconds.
         await abdmClient.post(abdmConfig.endpoints.scanAndShare.onShare, {
           acknowledgement: {
             status: 'SUCCESS',
@@ -46,11 +63,10 @@ export class HipController {
             profile: {
               context: payload?.metaData?.context || '',
               tokenNumber,
-              expiry: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+              expiry: '1800',
             },
           },
-          error: null,
-          resp: { requestId: payload?.requestId || '' },
+          response: { requestId: payload?.requestId || '' },
         });
         // Persist received share event for frontend polling
         await this.hipService.saveReceivedShare({

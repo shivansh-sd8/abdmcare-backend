@@ -307,8 +307,18 @@ export class ConsentService {
   }
 
   /**
-   * M3: Fetch consent artefact
-   * POST /api/hiecm/consent/v3/fetch
+   * Return the consent artefact + associated external records for display.
+   *
+   * ABDM's /consent/v3/fetch is asynchronous — it returns only an ACK, and the
+   * actual artefact body lands later on /api/v3/hiu/consents/on-fetch and is
+   * persisted in `Consent.artefactBody`. So this endpoint:
+   *   1. Reads the locally-stored artefact (the source of truth at read-time)
+   *   2. Optionally triggers a fresh ABDM fetch if no body has been received
+   *      yet AND the consent is GRANTED — fire-and-forget; UI re-polls.
+   *   3. Returns: { consent, artefact, records[], recordsCount, purged }
+   *
+   * Compliance: when `purgedAt` is set (revoked / expired), no record bodies
+   * are returned — the row is just a metadata stub showing the lifecycle ended.
    */
   async fetchConsentArtefact(consentId: string, currentUser?: { role?: string; hospitalId?: string }) {
     try {
@@ -326,20 +336,68 @@ export class ConsentService {
       ) {
         throw new AppError('Consent not found', 404);
       }
-      if (!consent.abdmConsentId) throw new AppError('ABDM consent ID not available', 400);
 
-      // The M3 consent/v3/fetch endpoint REQUIRES the X-HIU-ID routing header —
-      // without it the gateway cannot authorize the HIU role and responds 401
-      // (`WWW-Authenticate: Basic realm`). Note this call is ASYNC: ABDM returns
-      // an acknowledgement and delivers the artefact to the HIU on-fetch callback.
-      const response = await abdmClient.post(
-        abdmConfig.endpoints.consent.fetch,
-        { consentId: consent.abdmConsentId },
-        { 'X-HIU-ID': abdmConfig.hiu.id },
-      );
+      // Trigger a fresh ABDM artefact fetch only if we don't yet have a body
+      // and the consent is in a state where ABDM will respond. Fire-and-forget;
+      // the on-fetch callback persists the body and the UI can re-load.
+      if (
+        consent.status === 'GRANTED' &&
+        !!consent.abdmConsentId &&
+        !consent.artefactBody
+      ) {
+        abdmClient
+          .post(
+            abdmConfig.endpoints.consent.fetch,
+            { consentId: consent.abdmConsentId },
+            { 'X-HIU-ID': abdmConfig.hiu.id },
+          )
+          .then(() => logger.info('Consent artefact fetch (re)requested', { consentId: consent.consentId }))
+          .catch((err: any) => logger.warn('Consent artefact fetch failed', { message: err?.message }));
+      }
 
-      logger.info('Consent artefact fetch requested', { consentId: consent.consentId });
-      return { success: true, data: response };
+      // Pull external records linked under this consent. We block bodies once
+      // the consent has been purged (revoke/expire), even before the cascade
+      // fully completes — the read-time gate in HIU service uses the same rule.
+      const allKeys = [consent.id, consent.consentId, consent.abdmConsentId].filter(Boolean) as string[];
+      let records: any[] = [];
+      let recordsCount = 0;
+      if (allKeys.length && !consent.purgedAt) {
+        const found = await prisma.externalHealthRecord.findMany({
+          where: { consentId: { in: allKeys } },
+          orderBy: { receivedAt: 'desc' },
+          select: {
+            id: true,
+            sourceHipName: true,
+            sourceHipId: true,
+            recordType: true,
+            recordDate: true,
+            receivedAt: true,
+            parsedData: true,
+          },
+        });
+        records = found;
+        recordsCount = found.length;
+      } else if (allKeys.length && consent.purgedAt) {
+        // We still want to know if there were any records (now purged) so the
+        // UI can show "Purged on …" with the correct prior count. Cheap count.
+        recordsCount = await prisma.externalHealthRecord.count({
+          where: { consentId: { in: allKeys } },
+        });
+      }
+
+      return {
+        success: true,
+        data: {
+          consentId: consent.consentId,
+          abdmConsentId: consent.abdmConsentId,
+          status: consent.status,
+          purgedAt: consent.purgedAt,
+          artefact: consent.artefactBody || null,
+          artefactFetchedAt: consent.artefactFetchedAt,
+          records,
+          recordsCount,
+        },
+      };
     } catch (error: any) {
       logger.error('Failed to fetch consent artefact', error);
       rethrowServiceError(error);
@@ -428,7 +486,39 @@ export class ConsentService {
       include: { patient: { select: { id: true, firstName: true, lastName: true, abhaRecord: true } } },
       orderBy: { createdAt: 'desc' },
     });
-    return { success: true, data: consents };
+
+    // Annotate each consent with the count of stored external health records.
+    // This lets the UI show "X records pulled" right on the row, and renders a
+    // clear empty state ("No records pulled yet") on the details dialog so an
+    // operator can tell at a glance whether they still need to click Fetch.
+    const ids: string[] = [];
+    for (const c of consents) {
+      if (c.id) ids.push(c.id);
+      if (c.consentId && c.consentId !== c.id) ids.push(c.consentId);
+      if (c.abdmConsentId) ids.push(c.abdmConsentId);
+    }
+
+    let countsByKey: Record<string, number> = {};
+    if (ids.length) {
+      const grouped = await prisma.externalHealthRecord.groupBy({
+        by: ['consentId'],
+        where: { consentId: { in: ids } },
+        _count: { _all: true },
+      });
+      for (const g of grouped) {
+        if (g.consentId) countsByKey[g.consentId] = g._count._all;
+      }
+    }
+
+    const annotated = consents.map((c) => {
+      const recordsCount =
+        (countsByKey[c.id] || 0) +
+        (countsByKey[c.consentId] || 0) +
+        (c.abdmConsentId ? (countsByKey[c.abdmConsentId] || 0) : 0);
+      return { ...c, recordsCount };
+    });
+
+    return { success: true, data: annotated };
   }
 
   async getConsentStatusById(consentId: string, currentUser?: { role?: string; hospitalId?: string }) {
