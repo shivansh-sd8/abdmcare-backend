@@ -14,6 +14,7 @@ interface UpdateConsultationRequest {
   notes?: string;
   followUpDate?: string;
   admissionRequired?: boolean;
+  admissionReason?: string;
   referralRequired?: boolean;
   prescriptions?: Array<{
     medicineName: string;
@@ -322,6 +323,12 @@ class EncounterService {
           notes:                     data.notes,
           followUpDate:              data.followUpDate ? new Date(data.followUpDate) : undefined,
           admissionRequired:         data.admissionRequired,
+          // Store the doctor's admission reason; clear it when the flag is
+          // unset so we don't leave a dangling justification for an
+          // un-recommended admission.
+          admissionReason:           data.admissionRequired === false
+            ? null
+            : (data.admissionReason ?? undefined),
           referralRequired:          data.referralRequired,
         },
       });

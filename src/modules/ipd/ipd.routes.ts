@@ -40,9 +40,12 @@ router.post('/admissions/:admissionId/discharge',          authorize('SUPER_ADMI
 // Doctor marks patient clinically ready for discharge; receptionist then handles payment
 router.post('/admissions/:admissionId/discharge-ready',    authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), markDischargeReady);
 
-// IPD Daily Rounds — doctor adds ongoing notes/prescriptions/labs while patient is admitted
+// IPD Daily Rounds — doctor adds ongoing notes/prescriptions/labs while patient is admitted.
+// Nurses are allowed to *record vitals only* via this same endpoint; the
+// service layer rejects prescription/lab payloads from non-doctor roles so
+// scope of practice is preserved.
 router.get('/admissions/:admissionId/rounds',              authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), getAdmissionRounds);
-router.post('/admissions/:admissionId/rounds',             authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), createAdmissionRound);
+router.post('/admissions/:admissionId/rounds',             authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'), createAdmissionRound);
 
 // Discount (admin-only)
 router.patch('/admissions/:admissionId/discount',          authorize('SUPER_ADMIN', 'ADMIN'), applyDiscount);

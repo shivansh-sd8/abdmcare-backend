@@ -225,6 +225,11 @@ model Encounter {
   notes                    String?
   followUpDate             DateTime?
   admissionRequired        Boolean         @default(false)
+  // Clinical reason captured by the doctor when they tick "Recommend
+  // admission" during the consultation. Surfaced on the appointment row,
+  // patient profile and IPD admit dialog so the receptionist / admin doesn't
+  // have to ask the doctor again.
+  admissionReason          String?
   referralRequired         Boolean         @default(false)
   
   // OPD Token Flow Fields

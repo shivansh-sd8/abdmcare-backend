@@ -788,7 +788,24 @@ class EhrService {
 
     const round = (n: number) => Math.round(n * 100) / 100;
 
-    const activeAdmission = admissions.find((a: any) => a.status === 'ADMITTED') || null;
+    // "Active" includes ADMITTED and DISCHARGE_READY — a patient awaiting
+    // their final discharge bill is still in-house, the bed is still occupied,
+    // and the front desk needs to see them under "currently admitted".
+    const activeAdmission = admissions.find(
+      (a: any) => a.status === 'ADMITTED' || a.status === 'DISCHARGE_READY'
+    ) || null;
+
+    // Latest doctor-recommended-but-not-yet-admitted encounter. Drives the
+    // "Admit recommended" banner on the patient profile so admin/receptionist
+    // can act on the doctor's plan without opening every encounter. Once the
+    // patient is actively admitted we don't surface this — the activeAdmission
+    // alert covers it.
+    const pendingAdmissionRecommendation = !activeAdmission
+      ? (encounters.find((e: any) =>
+          e.admissionRequired === true &&
+          e.status !== 'CANCELLED'
+        ) || null)
+      : null;
 
     logger.info('Patient profile built', { patientId });
 
@@ -819,6 +836,7 @@ class EhrService {
       chargeItems,
       latestVitals: vitals[0] || null,
       activeAdmission,
+      pendingAdmissionRecommendation,
       encounters,
       prescriptions,
       vitals,

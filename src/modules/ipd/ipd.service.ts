@@ -283,6 +283,16 @@ export class IPDService {
       await prisma.bed.update({ where: { id: data.bedId }, data: { status: 'OCCUPIED' } });
     }
 
+    // Clear the doctor's "admission recommended" flag on the originating OPD
+    // encounter — the recommendation has been acted on, so the warning badge
+    // should disappear from appointment / encounter / patient profile rows.
+    if (data.encounterId) {
+      await prisma.encounter.updateMany({
+        where: { id: data.encounterId, admissionRequired: true },
+        data:  { admissionRequired: false },
+      });
+    }
+
     // If advance was paid, record a payment entry
     if (data.advancePaid && data.advancePaid > 0) {
       await prisma.payment.create({
@@ -502,7 +512,7 @@ export class IPDService {
     paymentCollected?: number;
     paymentMethod?: string;   // CASH, UPI, CARD, BANK_TRANSFER
     transactionRef?: string;
-  }, userRole?: string) {
+  }, _userRole?: string) {
     const admission = await prisma.admission.findFirst({
       where:   { id: admissionId, hospitalId },
       include: { patient: { select: { firstName: true, lastName: true, mobile: true } } },
@@ -513,12 +523,15 @@ export class IPDService {
       throw new Error('Patient is already discharged');
     }
 
-    // Require doctor to mark discharge-ready first, unless SUPER_ADMIN force-discharge
-    if (admission.status === 'ADMITTED' && userRole !== 'SUPER_ADMIN') {
+    // Discharge-ready is a hard prerequisite for *every* role — including
+    // SUPER_ADMIN. Clinical sign-off must always come from a doctor before
+    // billing settles. If a force-override is ever needed, that should be a
+    // separate, audited endpoint — not a quiet bypass here.
+    if (admission.status === 'ADMITTED') {
       throw new Error('Doctor must mark patient as discharge-ready before discharge can proceed');
     }
 
-    if (!['ADMITTED', 'DISCHARGE_READY'].includes(admission.status)) {
+    if (admission.status !== 'DISCHARGE_READY') {
       throw new Error(`Cannot discharge from status: ${admission.status}`);
     }
 

@@ -159,15 +159,44 @@ export async function createAdmissionRound(req: Request, res: Response, next: Ne
   try {
     const hospitalId = resolveHospitalId(req);
     const user       = (req as any).user;
+    const role       = user?.role;
+    const db = (await import('../../common/config/database')).default;
+
     let doctorId = req.body.doctorId || user.doctorId;
-    if (!doctorId && user.role === 'DOCTOR') {
-      const db = (await import('../../common/config/database')).default;
+    if (!doctorId && role === 'DOCTOR') {
       const doctor = await db.doctor.findFirst({ where: { email: user.email } });
       doctorId = doctor?.id;
     }
+
+    // Nurses are allowed to record vitals/observations on an admission — they
+    // don't have a doctorId, so we attribute the round encounter to the
+    // admission's primary doctor (the one who admitted via OPD encounter, or
+    // the most recent doctor of an existing IPD round). This keeps the audit
+    // trail and discharge-summary attribution sensible.
+    if (!doctorId && role === 'NURSE') {
+      const admission = await db.admission.findFirst({
+        where:  { id: req.params.admissionId, hospitalId },
+        select: {
+          encounter: { select: { doctorId: true } },
+          rounds:    { select: { doctorId: true }, orderBy: { visitDate: 'desc' }, take: 1 },
+        },
+      });
+      doctorId = admission?.rounds?.[0]?.doctorId || admission?.encounter?.doctorId;
+    }
+
     if (!doctorId) throw new AppError('doctorId is required', 400);
+
+    // Server-side scope-of-practice guard: nurses can record vitals + notes,
+    // but cannot prescribe or order labs. Strip those payloads.
+    const sanitizedBody: any = { ...req.body, doctorId };
+    if (role === 'NURSE') {
+      delete sanitizedBody.prescriptions;
+      delete sanitizedBody.labOrders;
+      sanitizedBody.recordedBy = `Nurse: ${user.name || user.email}`;
+    }
+
     const data = await ipdService.createAdmissionRound(
-      req.params.admissionId, hospitalId, { ...req.body, doctorId }
+      req.params.admissionId, hospitalId, sanitizedBody
     );
     res.status(201).json({ success: true, data });
   } catch (e) { next(e); }

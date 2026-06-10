@@ -279,6 +279,16 @@ export class AppointmentService {
           include: {
             patient: true,
             doctor: true,
+            // Pull just the disposition fields the row badges need so the
+            // appointment list can show "Admission recommended" without a
+            // second roundtrip per row.
+            encounter: {
+              select: {
+                id: true, status: true,
+                admissionRequired: true, admissionReason: true,
+                finalDiagnosis: true, provisionalDiagnosis: true,
+              },
+            },
           },
           orderBy: {
             scheduledAt: 'desc',
