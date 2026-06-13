@@ -113,12 +113,44 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     // (Previously each entry used its own ephemeral keypair while the push
     // advertised a different keypair — the HIU could never decrypt.)
     const ownKeyPair = EncryptionService.generateECDHKeyPair();
-    const sessionKey = EncryptionService.deriveSharedSecret(
-      ownKeyPair.privateKey,
-      keyMaterial.dhPublicKey.keyValue,
-      ownKeyPair.nonce,
-      keyMaterial.nonce,
-    );
+
+    // Diagnostics: log the inbound key shape so on encoding mismatches we can
+    // see exactly what the HIU sent (length, leading bytes, claimed curve).
+    // Do NOT log the full key — that would disclose the peer's session pubkey
+    // even though it's ephemeral; head bytes are enough to debug.
+    try {
+      const peerB64 = keyMaterial.dhPublicKey?.keyValue;
+      const peerBytes = peerB64 ? Buffer.from(peerB64, 'base64') : Buffer.alloc(0);
+      const head = peerBytes.subarray(0, Math.min(8, peerBytes.length)).toString('hex');
+      logger.info('Worker: HIU keyMaterial received', {
+        transactionId,
+        cryptoAlg: keyMaterial.cryptoAlg,
+        curve: keyMaterial.curve,
+        keyValueLength: peerB64?.length || 0,
+        keyBytesLength: peerBytes.length,
+        keyHead: head,
+        nonceLength: keyMaterial.nonce ? Buffer.from(keyMaterial.nonce, 'base64').length : 0,
+      });
+    } catch {
+      // diagnostic only
+    }
+
+    let sessionKey: Buffer;
+    try {
+      sessionKey = EncryptionService.deriveSharedSecret(
+        ownKeyPair.privateKey,
+        keyMaterial.dhPublicKey.keyValue,
+        ownKeyPair.nonce,
+        keyMaterial.nonce,
+      );
+    } catch (e: any) {
+      logger.error('Worker: ECDH derive failed — peer key encoding rejected', {
+        transactionId,
+        error: e?.message,
+        keyValuePrefix: keyMaterial.dhPublicKey?.keyValue?.slice(0, 16),
+      });
+      throw e;
+    }
     const sessionKeyMaterial = {
       cryptoAlg: 'ECDH',
       curve: 'Curve25519',

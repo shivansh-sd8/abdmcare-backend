@@ -144,28 +144,95 @@ export class EncryptionService {
   // 32-byte key: SEQUENCE(42){ SEQUENCE(5){ OID 2b656e } BITSTRING(33){00 + key} }.
   private static readonly X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
 
+  // ASN.1 SPKI prefix for an X448 (1.3.101.111) public key wrapping a raw
+  // 56-byte key: SEQUENCE(46){ SEQUENCE(5){ OID 2b656f } BITSTRING(57){00 + key} }.
+  private static readonly X448_SPKI_PREFIX = Buffer.from('3042300506032b656f033900', 'hex');
+
+  /**
+   * Best-effort decode of a peer's public key. ABDM-aligned HIUs/HIPs are
+   * supposed to send a base64-encoded SPKI DER, but in practice the wild west
+   * of certified vendors emits at least seven different shapes:
+   *
+   *   1. base64( SPKI DER )                  — what Node's crypto exports
+   *   2. base64( raw 32 bytes )              — "Curve25519/32byte random key"
+   *   3. base64( 0x00 ‖ raw 32 bytes )       — Java BigInteger "sign byte"
+   *   4. base64url( ... )                    — JWK-style without padding
+   *   5. hex( SPKI DER ) | hex( raw )        — some BouncyCastle wrappers
+   *   6. base64( ASCII-hex( SPKI / raw ) )   — double-encoded by accident
+   *   7. PEM (BEGIN PUBLIC KEY ... END)
+   *
+   * Returns the decoded KEY BYTES (DER or raw 32 bytes), the encoding that
+   * worked, and a short diagnostic string. Throws AppError-equivalent only
+   * when nothing matches.
+   */
+  private static decodePeerKey(peerPublicKeyB64: string): { bytes: Buffer; encoding: string } {
+    const trimmed = peerPublicKeyB64.trim().replace(/^"|"$/g, '');
+    if (trimmed.includes('BEGIN')) {
+      // PEM — let createPublicKey handle it directly downstream by signalling
+      // through a special encoding tag.
+      return { bytes: Buffer.from(trimmed, 'utf8'), encoding: 'pem' };
+    }
+
+    // Pure hex string? (only 0-9a-fA-F, even length, sane size for an X25519
+    // key in any envelope: 32, 33, 44, 65, 91 bytes ⇒ 64..182 hex chars).
+    if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0 && trimmed.length >= 64 && trimmed.length <= 256) {
+      return { bytes: Buffer.from(trimmed, 'hex'), encoding: 'hex' };
+    }
+
+    // base64 / base64url (with or without padding).
+    const b64 = trimmed.replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
+    const padded = b64 + '==='.slice((b64.length + 3) % 4);
+    let raw = Buffer.from(padded, 'base64');
+
+    // Some senders accidentally double-encode: base64( ASCII hex( bytes ) ).
+    // Detect it (every decoded byte is a valid hex character) and undo.
+    const looksLikeAsciiHex =
+      raw.length >= 64 &&
+      raw.length % 2 === 0 &&
+      raw.every(b => (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x46) || (b >= 0x61 && b <= 0x66));
+    if (looksLikeAsciiHex) {
+      try {
+        const inner = Buffer.from(raw.toString('utf8'), 'hex');
+        return { bytes: inner, encoding: 'base64-of-asciihex' };
+      } catch {
+        // fall through
+      }
+    }
+
+    return { bytes: raw, encoding: 'base64' };
+  }
+
   /**
    * Build an X25519 public KeyObject from however ABDM/peers encode it.
    * ABDM sends the RAW 32-byte key (base64) per "Curve25519/32byte random key";
-   * our own generated keys are SPKI DER (44 bytes). Also tolerate a leading 0x00
-   * byte and PEM. Parsing a raw key as SPKI DER throws "asn1 ... too long".
+   * our own generated keys are SPKI DER (44 bytes). Also tolerate a leading
+   * 0x00 byte, PEM, hex, base64url, ASCII-hex-of-bytes, and X448. Parsing
+   * mismatched bytes as SPKI DER throws "asn1 ... wrong tag".
    */
   private static toX25519PublicKey(peerPublicKeyB64: string): crypto.KeyObject {
-    if (peerPublicKeyB64.includes('BEGIN')) {
-      return crypto.createPublicKey({ key: peerPublicKeyB64, format: 'pem' });
+    if (!peerPublicKeyB64 || typeof peerPublicKeyB64 !== 'string') {
+      throw new Error('Peer public key is empty or not a string');
     }
-    const raw = Buffer.from(peerPublicKeyB64, 'base64');
 
-    // Already SPKI DER (starts with SEQUENCE tag and is longer than a raw key).
+    const decoded = this.decodePeerKey(peerPublicKeyB64);
+
+    if (decoded.encoding === 'pem') {
+      return crypto.createPublicKey({ key: decoded.bytes.toString('utf8'), format: 'pem' });
+    }
+
+    const raw = decoded.bytes;
+
+    // Path 1: full SPKI DER (any supported curve). Length > 32 + leading
+    // SEQUENCE tag is a very strong signal.
     if (raw.length > 32 && raw[0] === 0x30) {
       try {
         return crypto.createPublicKey({ key: raw, format: 'der', type: 'spki' });
       } catch {
-        // fall through to raw handling
+        // fall through
       }
     }
 
-    // Raw key bytes — some encoders prepend a single 0x00 byte (33 bytes total).
+    // Path 2: raw 32-byte X25519 key, optionally with a Java sign byte.
     let rawKey = raw;
     if (rawKey.length === 33 && rawKey[0] === 0x00) rawKey = rawKey.subarray(1);
     if (rawKey.length === 32) {
@@ -173,8 +240,29 @@ export class EncryptionService {
       return crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
     }
 
-    // Last resort: let crypto attempt SPKI DER and surface a clear error.
-    return crypto.createPublicKey({ key: raw, format: 'der', type: 'spki' });
+    // Path 3: raw 56-byte X448 key (rare but in NRCeS reference SDK options).
+    if (rawKey.length === 56) {
+      const spki = Buffer.concat([this.X448_SPKI_PREFIX, rawKey]);
+      return crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
+    }
+
+    // Path 4: X9.63 uncompressed point for NIST curves (some legacy HIPs use
+    // P-256). 65 bytes starting with 0x04 ⇒ secp256r1.
+    if (rawKey.length === 65 && rawKey[0] === 0x04) {
+      const spki = Buffer.concat([
+        Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'),
+        rawKey,
+      ]);
+      return crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
+    }
+
+    // Nothing fit — surface a diagnostic so the operator can tell ABDM/the
+    // peer exactly what we received instead of a bare "wrong tag".
+    const head = raw.subarray(0, Math.min(8, raw.length)).toString('hex');
+    throw new Error(
+      `Peer public key in unrecognised encoding (${decoded.encoding}, ${raw.length} bytes, head=${head}). ` +
+        `Expected base64 of SPKI DER (44 bytes for X25519) or raw 32-byte X25519 key.`,
+    );
   }
 
   /**
