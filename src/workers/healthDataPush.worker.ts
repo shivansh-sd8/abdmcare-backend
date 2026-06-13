@@ -255,13 +255,48 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       throw e;
     }
 
+    // ABDM HIU public-key wire format
+    // ────────────────────────────────────────────────────────────────────────
+    // The HIU side (Fidelius / BouncyCastle) parses incoming public keys with
+    //
+    //   KeyFactory.getInstance("EC")
+    //            .generatePublic(new X509EncodedKeySpec(decodedKey))
+    //
+    // which strictly requires an X.509 SubjectPublicKeyInfo DER, NOT a raw
+    // uncompressed point. Sending the 65-byte raw point (`04||X||Y`) — which
+    // is what `ownKeyPair.publicKey` is — yields the very specific error
+    //   ABDM-9999: "encoded key spec not recognized
+    //               failed to construct sequence from byte[]
+    //               corrupted stream - out of bounds length found  ${rand} >= 65"
+    // because BC reads the leading `0x04` as ASN.1 OCTET STRING tag and the
+    // following byte (a random byte from the X-coordinate) as a DER length —
+    // hence the apparent "length" varying across attempts (90/108/126…).
+    //
+    // We pre-compute the SPKI-wrapped form during keypair generation
+    // (`x509PublicKey`); send that on the wire. Salt/IV derivation still uses
+    // the underlying uncompressed point, so this is purely an outbound
+    // encoding swap. Our own `decodePeerPoint` already accepts both raw and
+    // SPKI on inbound for forward-compatibility with HIUs that send raw.
+    const outboundKeyValue = ownKeyPair.x509PublicKey || ownKeyPair.publicKey;
+    const outboundKeyBytes = Buffer.from(outboundKeyValue, 'base64');
+    const outboundEncoding =
+      outboundKeyBytes.length === 65 && outboundKeyBytes[0] === 0x04 ? 'raw-uncompressed'
+      : outboundKeyBytes[0] === 0x30 ? 'spki-der'
+      : 'unknown';
+    logger.info('Worker: outbound dhPublicKey wire format', {
+      transactionId,
+      encoding: outboundEncoding,
+      keyValueLength: outboundKeyValue.length,
+      keyBytesLength: outboundKeyBytes.length,
+      keyHead: outboundKeyBytes.subarray(0, 8).toString('hex'),
+    });
     const sessionKeyMaterial = {
       cryptoAlg: 'ECDH',
       curve: 'Curve25519',
       dhPublicKey: {
         expiry: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
         parameters: 'Curve25519/32byte random key',
-        keyValue: ownKeyPair.publicKey,
+        keyValue: outboundKeyValue,
       },
       nonce: ownKeyPair.nonce,
     };
