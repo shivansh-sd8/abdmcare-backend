@@ -11,7 +11,18 @@ const router = Router();
 // ─────────────────────────────────────────────────────────────────────────────
 // ABDM V3 CALLBACKS (verified via ABDM JWT from /v3/certs JWKS)
 // ─────────────────────────────────────────────────────────────────────────────
+// HIP pushes encrypted bundles directly to this URL (the dataPushUrl we
+// register on /cm/request). One row per page; final page closes the keypair.
 router.post('/data/notification', verifyAbdmCallback, hiuController.receiveHealthInformation);
+
+// Async response from CM after our /cm/request has been forwarded to the HIP.
+// Carries the gateway-issued `hiRequest.transactionId` we need to map to our
+// in-flight ConsentKeyPair before the data/notification push starts.
+router.post(
+  '/health-information/on-request',
+  verifyAbdmCallback,
+  hiuController.handleHealthInformationOnRequest,
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL APIs (auth required)

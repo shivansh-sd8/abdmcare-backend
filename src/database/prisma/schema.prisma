@@ -1465,13 +1465,28 @@ model ReceivedShare {
   @@map("received_shares")
 }
 
+// HIU-side ECDH keypair held while a data flow is in-flight.
+//
+// Lookup keys (in priority order, see hiu.service.ts:receiveHealthInformation):
+//   • `consentId`     — the abdm consent UUID (always known when sending /cm/request)
+//   • `requestId`     — our REQUEST-ID header on /cm/request; matched by the
+//                       gateway in /health-information/on-request callbacks
+//   • `transactionId` — the gateway-issued transaction id on the on-request
+//                       callback; also the one and only id present on the
+//                       subsequent /data/notification push from the HIP. We
+//                       MUST be able to correlate by transactionId because the
+//                       data push body never carries a consent reference.
 model ConsentKeyPair {
-  id         String   @id @default(uuid())
-  consentId  String   @unique
-  privateKey String
-  nonce      String
-  createdAt  DateTime @default(now())
+  id            String   @id @default(uuid())
+  consentId     String   @unique
+  requestId     String?  @unique
+  transactionId String?  @unique
+  privateKey    String
+  nonce         String
+  createdAt     DateTime @default(now())
   @@index([consentId])
+  @@index([requestId])
+  @@index([transactionId])
   @@map("consent_key_pairs")
 }
 

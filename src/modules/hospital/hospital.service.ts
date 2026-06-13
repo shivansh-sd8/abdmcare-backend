@@ -270,6 +270,17 @@ export class HospitalService {
           hfrFacilityId: data.hfrFacilityId || null,
           // Per ABDM docs, abdmClientId/Secret/CallbackUrl are platform-level
           // (issued by NHA per integrator) — supplied via env, not per-row.
+          //
+          // The platform's bridge credentials (env-level) make every newly
+          // onboarded hospital ABDM-capable through the shared bridge: HIU
+          // outbound calls use abdmConfig.hiu.id, HIP outbound calls use
+          // abdmConfig.hip.id. So mark abdmEnabled=true at onboarding time
+          // unless those env vars are missing — that way the admin dashboard
+          // doesn't show "ABDM disabled" on every new tenant.
+          abdmEnabled: !!(process.env.ABDM_CLIENT_ID && process.env.ABDM_CALLBACK_URL),
+          abdmRegisteredAt: process.env.ABDM_CLIENT_ID && process.env.ABDM_CALLBACK_URL
+            ? new Date()
+            : null,
 
           // Default OPD charge
           defaultOpdCharge: data.defaultOpdCharge != null ? data.defaultOpdCharge : null,

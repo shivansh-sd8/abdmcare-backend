@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import prisma from '../../common/config/database';
 import abdmClient from '../../common/utils/abdm-client';
 import { abdmConfig } from '../../common/config/abdm';
@@ -100,16 +101,29 @@ export class HiuService {
 
       const ecdhKeyPair = EncryptionService.generateECDHKeyPair();
 
+      // Generate our own REQUEST-ID for the cm/request and persist it alongside
+      // the keypair. ABDM gateway echoes this id back in the /on-request
+      // callback (via response.requestId) and ALSO assigns a transactionId
+      // there which is the only id later present on the data/notification
+      // push. We use this 3-way mapping (consentId / requestId / transactionId)
+      // to look up the right private key when the encrypted data arrives.
+      const cmRequestId = crypto.randomUUID();
+
       await prisma.consentKeyPair.upsert({
         where: { consentId: consent.abdmConsentId },
         update: {
           privateKey: encryptPrivateKey(ecdhKeyPair.privateKey),
           nonce: ecdhKeyPair.nonce,
+          requestId: cmRequestId,
+          // Reset transactionId so a re-issued request doesn't keep a stale
+          // mapping from a previous attempt.
+          transactionId: null,
         },
         create: {
           consentId: consent.abdmConsentId,
           privateKey: encryptPrivateKey(ecdhKeyPair.privateKey),
           nonce: ecdhKeyPair.nonce,
+          requestId: cmRequestId,
         },
       });
 
@@ -131,13 +145,110 @@ export class HiuService {
         },
       };
 
-      await abdmClient.post(abdmConfig.endpoints.hiu.healthInfoRequest, requestPayload);
+      // Override REQUEST-ID with the one we just stored — gatewayHeaders
+      // would otherwise stamp a fresh random uuid we'd be unable to track.
+      await abdmClient.post(
+        abdmConfig.endpoints.hiu.healthInfoRequest,
+        requestPayload,
+        { 'REQUEST-ID': cmRequestId },
+      );
 
-      logger.info('HIU: Health information request sent', { consentId: consent.consentId });
+      logger.info('HIU: Health information request sent', {
+        consentId: consent.consentId,
+        cmRequestId,
+      });
       return { success: true, message: 'Health information request sent successfully' };
     } catch (error: any) {
       logger.error('HIU: Failed to request health information', error);
       rethrowServiceError(error);
+    }
+  }
+
+  /**
+   * Handle the gateway's `/health-information/on-request` callback.
+   *
+   * ABDM dispatches this asynchronously after our `/cm/request` is processed:
+   *   {
+   *     "requestId": "<gateway-uuid>",
+   *     "timestamp": "...",
+   *     "hiRequest": {
+   *       "transactionId": "<gateway-issued>",
+   *       "sessionStatus": "REQUESTED" | "ACKNOWLEDGED" | ...
+   *     },
+   *     "error": {...} | null,
+   *     "response": { "requestId": "<our-original-REQUEST-ID>" }
+   *   }
+   *
+   * Job here:
+   *   1) Find the ConsentKeyPair whose requestId equals response.requestId.
+   *   2) Persist hiRequest.transactionId on it — the data/notification push
+   *      that follows carries ONLY this transactionId, not the consent id, so
+   *      this mapping is what lets us pick the right private key.
+   *
+   * Returns nothing; the route layer ACKs the gateway with 202.
+   */
+  async handleHealthInformationOnRequest(body: any) {
+    try {
+      const ourRequestId: string | undefined =
+        body?.response?.requestId || body?.resp?.requestId;
+      const transactionId: string | undefined =
+        body?.hiRequest?.transactionId || body?.transactionId;
+      const sessionStatus: string | undefined =
+        body?.hiRequest?.sessionStatus || body?.sessionStatus;
+
+      logger.info('HIU: health-information on-request received', {
+        ourRequestId,
+        transactionId,
+        sessionStatus,
+        hasError: !!body?.error,
+      });
+
+      if (body?.error) {
+        // Gateway rejected our cm/request. Drop the keypair so we don't hold
+        // dead state, but don't throw — the caller is the gateway and we
+        // already returned 202 from the route layer.
+        if (ourRequestId) {
+          await prisma.consentKeyPair
+            .updateMany({ where: { requestId: ourRequestId }, data: { transactionId: null } })
+            .catch(() => undefined);
+        }
+        logger.warn('HIU: gateway returned error on cm/request', {
+          ourRequestId,
+          error: body.error,
+        });
+        return;
+      }
+
+      if (!ourRequestId || !transactionId) {
+        logger.warn('HIU: on-request missing requestId/transactionId — cannot map', {
+          ourRequestId,
+          transactionId,
+        });
+        return;
+      }
+
+      // Stamp the transactionId on the matching keypair. updateMany skips
+      // gracefully if the row was already deleted (e.g. data already arrived
+      // and we cleaned up the keypair).
+      const updated = await prisma.consentKeyPair.updateMany({
+        where: { requestId: ourRequestId },
+        data: { transactionId },
+      });
+
+      if (updated.count === 0) {
+        logger.warn('HIU: on-request — no keypair matched our REQUEST-ID', {
+          ourRequestId,
+          transactionId,
+        });
+      } else {
+        logger.info('HIU: on-request mapped transactionId → keypair', {
+          ourRequestId,
+          transactionId,
+        });
+      }
+    } catch (error: any) {
+      // Never throw from a callback handler — gateway has already moved on.
+      logger.error('HIU: handleHealthInformationOnRequest failed', error);
     }
   }
 
@@ -202,22 +313,52 @@ export class HiuService {
   async receiveHealthInformation(data: any) {
     try {
       // The ABDM data push body carries `transactionId` + `entries` + `keyMaterial`
-      // but NOT the consent id by default. Our HIP includes `consentId` so the HIU
-      // can correlate the push to the stored decryption keypair. Accept every shape.
+      // and NOT a consent id (per the OpenAPI spec — including unknown fields
+      // breaks HIUs that run strict schema validation).
+      //
+      // Lookup priority for the matching ConsentKeyPair:
+      //   1. transactionId (always present on the data push, mapped by our
+      //      health-information/on-request handler when ABDM responded to /cm/request)
+      //   2. consent id, only if a non-spec extension HIP echoed it
+      //
+      // (1) is the canonical, spec-compliant path; (2) only matters for
+      // legacy / tightly-coupled deployments where HIP and HIU share state.
+      const transactionId: string | undefined = data.transactionId;
       const abdmConsentId =
         data.hiRequest?.consent?.id || data.consentId || data.consent?.id;
       const hipKeyMaterial = data.keyMaterial;
 
       logger.info('HIU: Receiving health information', {
-        transactionId: data.transactionId,
+        transactionId,
         consentId: abdmConsentId,
         entries: data.entries?.length || 0,
       });
       const decryptedEntries: any[] = [];
 
       let keyPairRecord: { privateKey: string; nonce: string } | null = null;
+      let resolvedConsentId: string | null = abdmConsentId || null;
 
-      if (abdmConsentId) {
+      // Try transactionId first — the spec-compliant correlation key.
+      if (transactionId) {
+        const record = await prisma.consentKeyPair.findUnique({
+          where: { transactionId },
+        });
+        if (record) {
+          keyPairRecord = {
+            privateKey: decryptPrivateKey(record.privateKey),
+            nonce: record.nonce,
+          };
+          resolvedConsentId = record.consentId;
+          logger.info('HIU: keypair resolved by transactionId', {
+            transactionId,
+            consentId: record.consentId,
+          });
+        }
+      }
+
+      // Fall back to consent id if some HIP did include it (or for retried
+      // pushes after we've already dropped the transactionId-keyed row).
+      if (!keyPairRecord && abdmConsentId) {
         const record = await prisma.consentKeyPair.findUnique({
           where: { consentId: abdmConsentId },
         });
@@ -226,6 +367,11 @@ export class HiuService {
             privateKey: decryptPrivateKey(record.privateKey),
             nonce: record.nonce,
           };
+          resolvedConsentId = record.consentId;
+          logger.info('HIU: keypair resolved by consentId fallback', {
+            consentId: abdmConsentId,
+            transactionId,
+          });
         }
       }
 
@@ -236,7 +382,10 @@ export class HiuService {
         }
 
         if (!keyPairRecord) {
-          logger.warn('HIU: No keypair found for consentId, storing raw', { abdmConsentId });
+          logger.warn('HIU: No keypair found, storing raw', {
+            transactionId,
+            consentId: abdmConsentId,
+          });
           decryptedEntries.push({ raw: entry, decrypted: false });
           continue;
         }
@@ -263,11 +412,23 @@ export class HiuService {
       const isLastPage =
         pageNumber == null || pageCount == null || pageNumber >= pageCount - 1;
 
-      if (abdmConsentId && isLastPage) {
-        await prisma.consentKeyPair.deleteMany({ where: { consentId: abdmConsentId } });
-        logger.info('HIU: Keypair deleted (last page)', { abdmConsentId, pageNumber, pageCount });
-      } else if (abdmConsentId) {
-        logger.info('HIU: Keypair retained for next page', { abdmConsentId, pageNumber, pageCount });
+      // Cleanup uses whichever id we successfully resolved. We prefer the
+      // resolvedConsentId (== ConsentKeyPair.consentId from the DB row),
+      // falling back to the transactionId in case a HIP pushed without one.
+      const cleanupWhere = resolvedConsentId
+        ? { consentId: resolvedConsentId }
+        : transactionId
+          ? { transactionId }
+          : null;
+      if (cleanupWhere && isLastPage) {
+        await prisma.consentKeyPair.deleteMany({ where: cleanupWhere });
+        logger.info('HIU: Keypair deleted (last page)', {
+          ...cleanupWhere, pageNumber, pageCount,
+        });
+      } else if (cleanupWhere) {
+        logger.info('HIU: Keypair retained for next page', {
+          ...cleanupWhere, pageNumber, pageCount,
+        });
       }
 
       // Find the patient linked to this consent and persist parsed records.
@@ -278,9 +439,12 @@ export class HiuService {
       let persistedCount = 0;
       const careContextRefs = new Set<string>();
       let authorisationDropped = false;
-      if (abdmConsentId) {
+      // Use whatever consent id we resolved (from keypair lookup OR the
+      // optional consent id in the body) to find the parent Consent row.
+      const lookupConsentId = resolvedConsentId || abdmConsentId || null;
+      if (lookupConsentId) {
         const consent = await prisma.consent.findFirst({
-          where: { abdmConsentId },
+          where: { abdmConsentId: lookupConsentId },
           select: { patientId: true, id: true, status: true, requesterHospitalId: true, purgedAt: true },
         });
 
@@ -293,7 +457,7 @@ export class HiuService {
         if (consent && !isAuthorised) {
           authorisationDropped = true;
           logger.warn('HIU: dropping incoming health data — consent no longer authorised', {
-            abdmConsentId,
+            abdmConsentId: lookupConsentId,
             consentStatus: consent.status,
             purged: !!consent.purgedAt,
           });
@@ -305,7 +469,7 @@ export class HiuService {
             await prisma.externalHealthRecord.create({
               data: {
                 patientId: consent.patientId,
-                consentId: abdmConsentId,
+                consentId: lookupConsentId!,
                 hospitalId: consent.requesterHospitalId || null,
                 sourceHipId: parsed.sourceHIP || null,
                 sourceHipName: parsed.sourceHIP || null,
@@ -338,7 +502,7 @@ export class HiuService {
       // what actually decrypted+persisted; a partial decrypt counts as FAILED
       // so the patient sees something went wrong. Fire-and-forget so a
       // notify failure doesn't bubble back into the data-push retry loop.
-      if (abdmConsentId && data.transactionId && !authorisationDropped) {
+      if (lookupConsentId && data.transactionId && !authorisationDropped) {
         const totalEntries = (data.entries || []).length;
         const allOk = totalEntries > 0 && persistedCount === totalEntries;
         const sessionStatus = allOk ? 'TRANSFERRED' : 'FAILED';
@@ -350,7 +514,7 @@ export class HiuService {
         setImmediate(async () => {
           try {
             await this.dataFlowNotify({
-              consentId: abdmConsentId,
+              consentId: lookupConsentId,
               transactionId: data.transactionId,
               status: sessionStatus,
               statusResponses,

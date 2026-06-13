@@ -25,6 +25,29 @@ export class HiuController {
     }
   );
 
+  // Async ack from the gateway after our /cm/request was forwarded to the HIP.
+  // The body carries `hiRequest.transactionId` and `response.requestId`; we
+  // pin the transactionId on the in-flight ConsentKeyPair so the subsequent
+  // /data/notification push (which only knows the transactionId) can resolve
+  // its decryption keypair.
+  handleHealthInformationOnRequest = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      // Per ABDM contract, callbacks must ACK fast (gateway times out at ~1s)
+      // so we 202 immediately and process the mapping after the response.
+      const echoRequestId =
+        (req.headers['request-id'] as string) ||
+        (req.headers['x-request-id'] as string) ||
+        (req as any).requestId;
+      res.status(202).json({
+        message: 'Accepted',
+        ...(echoRequestId ? { requestId: echoRequestId } : {}),
+      });
+      setImmediate(() => {
+        this.hiuService.handleHealthInformationOnRequest(req.body).catch(() => undefined);
+      });
+    }
+  );
+
   getPatientHealthRecords = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { patientId } = req.params;
