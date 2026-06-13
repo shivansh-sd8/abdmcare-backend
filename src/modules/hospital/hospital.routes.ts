@@ -17,7 +17,22 @@ const HOSPITAL_TYPES = [
 ];
 const PLAN_TYPES = ['FREE', 'BASIC', 'PROFESSIONAL', 'ENTERPRISE'];
 
+// ─── ABDM identifier formats (per HFR docs / sandbox samples) ──────────────
+// Real HFR Facility IDs are `IN<10 digits>` (e.g. IN3410000260, IN0610090166).
+// HIP IDs typically equal the HFR ID, with an optional `_<counter>` suffix
+// for sub-counters within a multi-counter facility (e.g. IN2710000362_1).
+// HIU IDs in production follow the HFR pattern; in sandbox they can be
+// arbitrary tokens (e.g. N_SBX_HIU_V3) — kept lenient here.
+const HFR_FACILITY_ID_RE = /^IN\d{10}$/;
+const HIP_ID_RE = /^IN\d{10}(?:_[A-Za-z0-9]{1,16})?$/;
+const HIU_ID_RE = /^[A-Za-z0-9_-]{4,40}$/;
+
 const createValidation = [
+  // Strip any client-provided code — server always generates it. We accept
+  // and ignore (`.customSanitizer(() => undefined)`) so older clients don't
+  // get a 422 for an extra field.
+  body('code').customSanitizer(() => undefined),
+
   body('name')
     .trim().notEmpty().withMessage('Hospital name is required')
     .isLength({ min: 2, max: 200 }).withMessage('Hospital name must be 2-200 characters'),
@@ -25,7 +40,7 @@ const createValidation = [
     .optional()
     .isIn(HOSPITAL_TYPES).withMessage(`Type must be one of: ${HOSPITAL_TYPES.join(', ')}`),
   body('email')
-    .trim().notEmpty().withMessage('Hospital email is required')
+    .trim().notEmpty().withMessage('Email is required')
     .isEmail().withMessage('Valid email address is required')
     .normalizeEmail(),
   body('phone')
@@ -36,7 +51,8 @@ const createValidation = [
     .matches(/^[6-9]\d{9}$/).withMessage('Valid 10-digit Indian phone number is required'),
   body('website')
     .optional({ values: 'falsy' })
-    .isURL().withMessage('Valid URL is required (e.g. https://example.com)'),
+    .isURL({ require_protocol: true, protocols: ['http', 'https'] })
+    .withMessage('Website must be a full URL (e.g. https://example.com)'),
   body('addressLine1')
     .trim().notEmpty().withMessage('Address Line 1 is required')
     .isLength({ min: 3, max: 500 }).withMessage('Address must be 3-500 characters'),
@@ -60,10 +76,12 @@ const createValidation = [
     .isLength({ min: 3, max: 50 }).withMessage('Registration number must be 3-50 characters'),
   body('gstNumber')
     .optional({ values: 'falsy' })
+    .customSanitizer((v) => (typeof v === 'string' ? v.toUpperCase() : v))
     .matches(/^\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}[Z]{1}[A-Z\d]{1}$/)
     .withMessage('Invalid GST number (e.g. 22AAAAA0000A1Z5)'),
   body('panNumber')
     .optional({ values: 'falsy' })
+    .customSanitizer((v) => (typeof v === 'string' ? v.toUpperCase() : v))
     .matches(/^[A-Z]{5}\d{4}[A-Z]{1}$/)
     .withMessage('Invalid PAN number (e.g. ABCDE1234F)'),
   body('licenseNumber')
@@ -73,29 +91,25 @@ const createValidation = [
     .optional({ values: 'falsy' })
     .isInt({ min: 1800, max: new Date().getFullYear() })
     .withMessage(`Established year must be between 1800 and ${new Date().getFullYear()}`),
-  body('ownerName')
-    .optional({ values: 'falsy' })
-    .isLength({ min: 2, max: 100 }).withMessage('Owner name must be 2-100 characters'),
-  body('ownerEmail')
-    .optional({ values: 'falsy' })
-    .isEmail().withMessage('Valid owner email is required')
-    .normalizeEmail(),
-  body('ownerPhone')
-    .optional({ values: 'falsy' })
-    .matches(/^[6-9]\d{9}$/).withMessage('Valid 10-digit Indian phone number is required'),
+
+  // ── Primary Admin (REQUIRED — atomic block) ──────────────────────────────
   body('adminUsername')
-    .optional({ values: 'falsy' })
+    .trim().notEmpty().withMessage('Admin username is required')
     .isLength({ min: 3, max: 50 }).withMessage('Admin username must be 3-50 characters')
     .matches(/^[a-zA-Z0-9_]+$/).withMessage('Username can only contain letters, numbers, and underscores'),
   body('adminPassword')
-    .optional({ values: 'falsy' })
-    .isLength({ min: 6 }).withMessage('Admin password must be at least 6 characters'),
+    .notEmpty().withMessage('Admin password is required')
+    .isLength({ min: 8, max: 128 }).withMessage('Admin password must be at least 8 characters'),
   body('adminFirstName')
-    .optional({ values: 'falsy' })
+    .trim().notEmpty().withMessage('Admin first name is required')
     .isLength({ min: 1, max: 50 }).withMessage('Admin first name must be 1-50 characters'),
   body('adminLastName')
-    .optional({ values: 'falsy' })
+    .trim().notEmpty().withMessage('Admin last name is required')
     .isLength({ min: 1, max: 50 }).withMessage('Admin last name must be 1-50 characters'),
+  body('adminPhone')
+    .trim().notEmpty().withMessage('Admin mobile is required')
+    .matches(/^[6-9]\d{9}$/).withMessage('Valid 10-digit Indian mobile number is required'),
+
   body('totalBeds')
     .optional({ values: 'falsy' })
     .isInt({ min: 0, max: 10000 }).withMessage('Total beds must be 0-10,000'),
@@ -114,9 +128,38 @@ const createValidation = [
   body('defaultOpdCharge')
     .optional({ values: 'falsy' })
     .isFloat({ min: 0, max: 100000 }).withMessage('Default OPD charge must be 0-1,00,000'),
+
+  // ── ABDM Integration (per-facility identifiers from HFR/NHA) ─────────────
+  body('hipId')
+    .optional({ values: 'falsy' })
+    .matches(HIP_ID_RE)
+    .withMessage('HIP ID must look like IN<10 digits> (e.g. IN3410000260) — optionally suffixed with _<counter>'),
+  body('hipName')
+    .optional({ values: 'falsy' })
+    .isLength({ min: 2, max: 200 }).withMessage('HIP display name must be 2-200 characters'),
+  body('hiuId')
+    .optional({ values: 'falsy' })
+    .matches(HIU_ID_RE)
+    .withMessage('HIU ID must be 4-40 chars (letters, digits, _ or -)'),
+  body('hiuName')
+    .optional({ values: 'falsy' })
+    .isLength({ min: 2, max: 200 }).withMessage('HIU display name must be 2-200 characters'),
+  body('hfrFacilityId')
+    .optional({ values: 'falsy' })
+    .matches(HFR_FACILITY_ID_RE)
+    .withMessage('HFR Facility ID must be IN followed by exactly 10 digits (e.g. IN3410000260)'),
+
+  // ── Stripped fields (silently ignored — superseded by other inputs) ──────
+  body('ownerName').customSanitizer(() => undefined),
+  body('ownerEmail').customSanitizer(() => undefined),
+  body('ownerPhone').customSanitizer(() => undefined),
+  body('abdmClientId').customSanitizer(() => undefined),
+  body('abdmClientSecret').customSanitizer(() => undefined),
+  body('abdmCallbackUrl').customSanitizer(() => undefined),
 ];
 
 const updateValidation = [
+  body('code').customSanitizer(() => undefined),
   body('name')
     .optional().trim().notEmpty().withMessage('Hospital name cannot be empty')
     .isLength({ min: 2, max: 200 }).withMessage('Hospital name must be 2-200 characters'),
@@ -135,7 +178,8 @@ const updateValidation = [
     .matches(/^[6-9]\d{9}$/).withMessage('Valid 10-digit Indian phone number is required'),
   body('website')
     .optional({ values: 'falsy' })
-    .isURL().withMessage('Valid URL is required'),
+    .isURL({ require_protocol: true, protocols: ['http', 'https'] })
+    .withMessage('Website must be a full URL (e.g. https://example.com)'),
   body('addressLine1')
     .optional().trim().notEmpty().withMessage('Address Line 1 cannot be empty')
     .isLength({ min: 3, max: 500 }).withMessage('Address must be 3-500 characters'),
@@ -150,22 +194,18 @@ const updateValidation = [
     .matches(/^\d{6}$/).withMessage('Pincode must be exactly 6 digits'),
   body('gstNumber')
     .optional({ values: 'falsy' })
+    .customSanitizer((v) => (typeof v === 'string' ? v.toUpperCase() : v))
     .matches(/^\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}[Z]{1}[A-Z\d]{1}$/)
     .withMessage('Invalid GST number (e.g. 22AAAAA0000A1Z5)'),
   body('panNumber')
     .optional({ values: 'falsy' })
+    .customSanitizer((v) => (typeof v === 'string' ? v.toUpperCase() : v))
     .matches(/^[A-Z]{5}\d{4}[A-Z]{1}$/)
     .withMessage('Invalid PAN number (e.g. ABCDE1234F)'),
   body('establishedYear')
     .optional({ values: 'falsy' })
     .isInt({ min: 1800, max: new Date().getFullYear() })
     .withMessage(`Year must be between 1800 and ${new Date().getFullYear()}`),
-  body('ownerEmail')
-    .optional({ values: 'falsy' })
-    .isEmail().withMessage('Valid owner email is required'),
-  body('ownerPhone')
-    .optional({ values: 'falsy' })
-    .matches(/^[6-9]\d{9}$/).withMessage('Valid 10-digit Indian phone number is required'),
   body('totalBeds')
     .optional({ values: 'falsy' })
     .isInt({ min: 0, max: 10000 }).withMessage('Total beds must be 0-10,000'),
@@ -184,6 +224,52 @@ const updateValidation = [
   body('defaultOpdCharge')
     .optional({ values: 'falsy' })
     .isFloat({ min: 0, max: 100000 }).withMessage('Default OPD charge must be 0-1,00,000'),
+
+  // ── Admin-side edits (optional on update; propagate to the linked user). ──
+  body('adminUsername')
+    .optional({ values: 'falsy' })
+    .isLength({ min: 3, max: 50 }).withMessage('Admin username must be 3-50 characters')
+    .matches(/^[a-zA-Z0-9_]+$/).withMessage('Username can only contain letters, numbers, and underscores'),
+  body('adminPassword')
+    .optional({ values: 'falsy' })
+    .isLength({ min: 8, max: 128 }).withMessage('Admin password must be at least 8 characters'),
+  body('adminFirstName')
+    .optional({ values: 'falsy' })
+    .isLength({ min: 1, max: 50 }).withMessage('Admin first name must be 1-50 characters'),
+  body('adminLastName')
+    .optional({ values: 'falsy' })
+    .isLength({ min: 1, max: 50 }).withMessage('Admin last name must be 1-50 characters'),
+  body('adminPhone')
+    .optional({ values: 'falsy' })
+    .matches(/^[6-9]\d{9}$/).withMessage('Valid 10-digit Indian mobile number is required'),
+
+  // ── ABDM Integration ─────────────────────────────────────────────────────
+  body('hipId')
+    .optional({ values: 'falsy' })
+    .matches(HIP_ID_RE)
+    .withMessage('HIP ID must look like IN<10 digits> (e.g. IN3410000260) — optionally suffixed with _<counter>'),
+  body('hipName')
+    .optional({ values: 'falsy' })
+    .isLength({ min: 2, max: 200 }).withMessage('HIP display name must be 2-200 characters'),
+  body('hiuId')
+    .optional({ values: 'falsy' })
+    .matches(HIU_ID_RE)
+    .withMessage('HIU ID must be 4-40 chars (letters, digits, _ or -)'),
+  body('hiuName')
+    .optional({ values: 'falsy' })
+    .isLength({ min: 2, max: 200 }).withMessage('HIU display name must be 2-200 characters'),
+  body('hfrFacilityId')
+    .optional({ values: 'falsy' })
+    .matches(HFR_FACILITY_ID_RE)
+    .withMessage('HFR Facility ID must be IN followed by exactly 10 digits (e.g. IN3410000260)'),
+
+  // ── Stripped fields (silently ignored — superseded by other inputs) ──────
+  body('ownerName').customSanitizer(() => undefined),
+  body('ownerEmail').customSanitizer(() => undefined),
+  body('ownerPhone').customSanitizer(() => undefined),
+  body('abdmClientId').customSanitizer(() => undefined),
+  body('abdmClientSecret').customSanitizer(() => undefined),
+  body('abdmCallbackUrl').customSanitizer(() => undefined),
 ];
 
 router.post(
