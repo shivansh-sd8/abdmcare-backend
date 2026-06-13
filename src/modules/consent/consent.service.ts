@@ -260,14 +260,16 @@ export class ConsentService {
         // already GRANTED/DENIED/REVOKED record (that caused the wrong consent
         // to change when a patient had multiple requests).
         let consent = await prisma.consent.findFirst({ where: { abdmConsentId } });
+        let resolvedPatientId: string | null = null;
+        const patientAddr: string | undefined = consentDetail?.patient?.id;
         if (!consent) {
-          const patientAddr: string | undefined = consentDetail?.patient?.id;
           if (patientAddr) {
             const patient = await prisma.patient.findFirst({
               where: { OR: [{ abhaAddress: patientAddr }, { abhaRecord: { abhaAddress: patientAddr } }] },
               select: { id: true },
             });
             if (patient) {
+              resolvedPatientId = patient.id;
               consent = await prisma.consent.findFirst({
                 // Only a REQUESTED consent (no artefact yet) is a safe match here.
                 where: { patientId: patient.id, abdmConsentId: null, status: 'REQUESTED' as any },
@@ -296,8 +298,80 @@ export class ConsentService {
             },
           });
           logger.info('HIP: consent artefact recorded', { consentId: consent.consentId, status, promoted: promote });
+        } else if (status === 'GRANTED' && resolvedPatientId) {
+          // No local Consent row exists for this artefact — this is the
+          // "HIU-initiated, HIP-side bookkeeping" case: a remote HIU asked
+          // ABDM for our patient's data, the patient granted consent, and
+          // ABDM is now telling our HIP to record the artefact so a follow-
+          // up /health-information/request can be served. Without this row
+          // the immediate hi-request lookup
+          //   prisma.consent.findFirst({ where: { abdmConsentId } })
+          // returns null and we 403 "Consent artefact not found" (seen in
+          // prod logs immediately after every "no local consent matched"
+          // warn). Insert a fresh GRANTED row so the data-flow path works.
+          try {
+            const purposeMap: Record<string, ConsentPurpose> = {
+              CAREMGT: ConsentPurpose.CARE_MANAGEMENT,
+              BTG: ConsentPurpose.BREAK_THE_GLASS,
+              PUBHLTH: ConsentPurpose.PUBLIC_HEALTH,
+              HPAYMT: ConsentPurpose.HEALTHCARE_PAYMENT,
+              DSRCH: ConsentPurpose.DISEASE_SPECIFIC_HEALTHCARE_RESEARCH,
+              PATRQT: ConsentPurpose.SELF_REQUESTED,
+              HQUALITY: ConsentPurpose.HEALTHCARE_QUALITY_AUDIT,
+            };
+            const purposeCode: string | undefined =
+              consentDetail?.purpose?.code || consentDetail?.purpose?.text;
+            const prismaPurpose = (purposeCode && purposeMap[purposeCode]) || ConsentPurpose.CARE_MANAGEMENT;
+            const artefactDateRange = consentDetail?.permission?.dateRange || {};
+            const artefactHiTypes: string[] = Array.isArray(consentDetail?.hiTypes)
+              ? consentDetail.hiTypes
+              : [];
+            const dataEraseAt: string | undefined = consentDetail?.permission?.dataEraseAt;
+            const requesterId: string =
+              consentDetail?.hiu?.id
+              || consentDetail?.requester?.identifier?.value
+              || consentDetail?.requester?.id
+              || `hiu:${abdmConsentId}`;
+            const requesterName: string | undefined =
+              consentDetail?.hiu?.name
+              || consentDetail?.requester?.name
+              || undefined;
+
+            const created = await prisma.consent.create({
+              data: {
+                consentId: `CR-${Date.now()}`,
+                patientId: resolvedPatientId,
+                requesterId,
+                requesterName,
+                purpose: prismaPurpose,
+                hiTypes: artefactHiTypes,
+                dateRange: artefactDateRange as any,
+                status: 'GRANTED' as any,
+                grantedAt: new Date(),
+                expiresAt: dataEraseAt ? new Date(dataEraseAt) : null,
+                abdmConsentId,
+                abdmRequestId: notification?.consentRequestId || null,
+              },
+            });
+            logger.info('HIP: consent artefact recorded', {
+              consentId: created.consentId,
+              status: 'GRANTED',
+              promoted: false,
+              created: true,
+            });
+          } catch (createErr: any) {
+            logger.error('HIP: failed to insert HIU-initiated consent artefact', {
+              abdmConsentId,
+              message: createErr?.message,
+            });
+          }
         } else {
-          logger.warn('HIP: no local consent matched notification', { abdmConsentId });
+          logger.warn('HIP: no local consent matched notification', {
+            abdmConsentId,
+            status,
+            patientResolved: !!resolvedPatientId,
+            patientAbhaAddress: patientAddr,
+          });
         }
       } else {
         logger.warn('HIP: consent notification missing consentId', { keys: Object.keys(payload || {}) });

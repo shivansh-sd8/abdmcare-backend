@@ -1,5 +1,6 @@
 import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID, COMPOSITION_TYPE } from '../coding-tables';
 import { buildComposition, SECTION_CODES, makeRefSection, makeTextSection, CompositionSection } from '../resources/composition';
+import { allergiesNarrative, immunizationsNarrative } from './narrative-helpers';
 import type { FHIRBundleInput } from '../fhir-builder';
 
 /**
@@ -42,6 +43,7 @@ export function buildImmunizationRecordBundle(input: FHIRBundleInput & {
       'Immunizations',
       SECTION_CODES.immunization,
       input.immunizationUUIDs.map(u => ({ uuid: u })),
+      immunizationsNarrative(input),
     ));
   } else {
     // Defensive: render a textual "no doses recorded" so the bundle still
@@ -59,6 +61,7 @@ export function buildImmunizationRecordBundle(input: FHIRBundleInput & {
       'Allergies',
       SECTION_CODES.allergies,
       input.allergyUUIDs.map(u => ({ uuid: u })),
+      allergiesNarrative(input.encounter),
     ));
   }
 

@@ -1,5 +1,6 @@
 import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID } from '../coding-tables';
 import { buildComposition, SECTION_CODES, makeRefSection, CompositionSection } from '../resources/composition';
+import { investigationsNarrative, vitalsNarrative } from './narrative-helpers';
 import type { FHIRBundleInput } from '../fhir-builder';
 
 export function buildDiagnosticReportBundle(input: FHIRBundleInput & {
@@ -25,12 +26,12 @@ export function buildDiagnosticReportBundle(input: FHIRBundleInput & {
 
   if (input.diagnosticUUIDs.length > 0) {
     sections.push(makeRefSection('Diagnostic Reports', SECTION_CODES.investigations,
-      input.diagnosticUUIDs.map(u => ({ uuid: u }))));
+      input.diagnosticUUIDs.map(u => ({ uuid: u })), investigationsNarrative(input)));
   }
 
   if (input.observationUUIDs.length > 0) {
     sections.push(makeRefSection('Observations', SECTION_CODES.vitalSigns,
-      input.observationUUIDs.map(u => ({ uuid: u }))));
+      input.observationUUIDs.map(u => ({ uuid: u })), vitalsNarrative(input.vitals)));
   }
 
   const compositionResult = buildComposition({

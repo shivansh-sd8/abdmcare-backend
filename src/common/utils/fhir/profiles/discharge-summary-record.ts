@@ -1,5 +1,12 @@
 import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID } from '../coding-tables';
 import { buildComposition, SECTION_CODES, makeTextSection, makeRefSection, CompositionSection } from '../resources/composition';
+import {
+  vitalsNarrative,
+  diagnosisNarrative,
+  allergiesNarrative,
+  medicationsNarrative,
+  investigationsNarrative,
+} from './narrative-helpers';
 import type { FHIRBundleInput } from '../fhir-builder';
 
 export function buildDischargeSummaryBundle(input: FHIRBundleInput & {
@@ -48,27 +55,27 @@ export function buildDischargeSummaryBundle(input: FHIRBundleInput & {
 
   if (input.allergyUUIDs.length > 0) {
     sections.push(makeRefSection('Allergies', SECTION_CODES.allergies,
-      input.allergyUUIDs.map(u => ({ uuid: u }))));
+      input.allergyUUIDs.map(u => ({ uuid: u })), allergiesNarrative(input.encounter)));
   }
 
   if (input.observationUUIDs.length > 0) {
     sections.push(makeRefSection('Vital Signs', SECTION_CODES.vitalSigns,
-      input.observationUUIDs.map(u => ({ uuid: u }))));
+      input.observationUUIDs.map(u => ({ uuid: u })), vitalsNarrative(input.vitals)));
   }
 
   if (input.conditionUUIDs.length > 0) {
     sections.push(makeRefSection('Discharge Diagnosis', SECTION_CODES.dischargeDiagnosis,
-      input.conditionUUIDs.map(u => ({ uuid: u }))));
+      input.conditionUUIDs.map(u => ({ uuid: u })), diagnosisNarrative(input.encounter)));
   }
 
   if (input.medicationUUIDs.length > 0) {
     sections.push(makeRefSection('Discharge Medications', SECTION_CODES.dischargeMedications,
-      input.medicationUUIDs.map(u => ({ uuid: u }))));
+      input.medicationUUIDs.map(u => ({ uuid: u })), medicationsNarrative(input)));
   }
 
   if (input.diagnosticUUIDs.length > 0) {
     sections.push(makeRefSection('Investigations', SECTION_CODES.investigations,
-      input.diagnosticUUIDs.map(u => ({ uuid: u }))));
+      input.diagnosticUUIDs.map(u => ({ uuid: u })), investigationsNarrative(input)));
   }
 
   if (input.encounter.followUpDate) {

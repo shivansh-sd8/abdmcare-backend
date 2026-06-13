@@ -1,5 +1,6 @@
 import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID } from '../coding-tables';
 import { buildComposition, SECTION_CODES, makeTextSection, makeRefSection, CompositionSection } from '../resources/composition';
+import { diagnosisNarrative, medicationsNarrative } from './narrative-helpers';
 import type { FHIRBundleInput } from '../fhir-builder';
 
 export function buildPrescriptionBundle(input: FHIRBundleInput & {
@@ -25,12 +26,12 @@ export function buildPrescriptionBundle(input: FHIRBundleInput & {
 
   if (input.conditionUUIDs.length > 0) {
     sections.push(makeRefSection('Diagnosis', SECTION_CODES.diagnosis,
-      input.conditionUUIDs.map(u => ({ uuid: u }))));
+      input.conditionUUIDs.map(u => ({ uuid: u })), diagnosisNarrative(input.encounter)));
   }
 
   if (input.medicationUUIDs.length > 0) {
     sections.push(makeRefSection('Medications', SECTION_CODES.medications,
-      input.medicationUUIDs.map(u => ({ uuid: u }))));
+      input.medicationUUIDs.map(u => ({ uuid: u })), medicationsNarrative(input)));
   }
 
   if (input.encounter.notes) {

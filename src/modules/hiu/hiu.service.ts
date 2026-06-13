@@ -36,8 +36,12 @@ export class HiuService {
   async requestHealthInformation(
     data: {
       consentId: string;
-      dateRangeFrom: string;
-      dateRangeTo: string;
+      // dateRange is OPTIONAL — defaults to the consent artefact's granted
+      // window (consent.dateRange) when not supplied, so the UI can fire a
+      // one-click pull without making the user re-pick dates that were
+      // already picked when consent was requested.
+      dateRangeFrom?: string;
+      dateRangeTo?: string;
       dataPushUrl?: string;
     },
     currentUser?: any,
@@ -51,6 +55,21 @@ export class HiuService {
       });
 
       if (!consent) throw new AppError('Consent not found', 404);
+
+      // Fall back to the consent's granted dateRange when the caller didn't
+      // pass explicit dates. This is the common case (auto-pull on grant /
+      // single-click pull from the UI). Spec: dateRange is part of
+      // permission so we'd be requesting outside the granted window if we
+      // sent something else — using the consent's window is always safe.
+      const consentRange = (consent.dateRange as { from?: string; to?: string } | null) || null;
+      const dateRangeFrom = data.dateRangeFrom || consentRange?.from;
+      const dateRangeTo = data.dateRangeTo || consentRange?.to;
+      if (!dateRangeFrom || !dateRangeTo) {
+        throw new AppError(
+          'No dateRange available — the consent has no granted dateRange yet (artefact body has not been fetched). Try again in a few seconds, or pass dateRange explicitly.',
+          400,
+        );
+      }
 
       // Multi-tenant guard: only the requesting hospital (or SUPER_ADMIN)
       // may pull data against this consent. The consent's
@@ -97,7 +116,7 @@ export class HiuService {
       const requestPayload = {
         hiRequest: {
           consent: { id: consent.abdmConsentId },
-          dateRange: { from: data.dateRangeFrom, to: data.dateRangeTo },
+          dateRange: { from: dateRangeFrom, to: dateRangeTo },
           dataPushUrl: data.dataPushUrl || `${abdmConfig.callbackUrl}/api/v3/hiu/data/notification`,
           keyMaterial: {
             cryptoAlg: 'ECDH',
@@ -256,6 +275,9 @@ export class HiuService {
       // revoke cascade can find it) and the consent's requesterHospitalId (so
       // a doctor at a different hospital can never see records pulled under
       // someone else's consent).
+      let persistedCount = 0;
+      const careContextRefs = new Set<string>();
+      let authorisationDropped = false;
       if (abdmConsentId) {
         const consent = await prisma.consent.findFirst({
           where: { abdmConsentId },
@@ -269,6 +291,7 @@ export class HiuService {
         const isAuthorised = consent && consent.status === 'GRANTED' && !consent.purgedAt;
 
         if (consent && !isAuthorised) {
+          authorisationDropped = true;
           logger.warn('HIU: dropping incoming health data — consent no longer authorised', {
             abdmConsentId,
             consentStatus: consent.status,
@@ -292,6 +315,9 @@ export class HiuService {
                 parsedData: parsed as any,
               },
             });
+            persistedCount++;
+            const ccRef = entry?.raw?.careContextReference || entry?.data?.careContextReference;
+            if (ccRef) careContextRefs.add(String(ccRef));
           }
         }
       }
@@ -300,7 +326,40 @@ export class HiuService {
         transactionId: data.transactionId,
         totalEntries: data.entries?.length || 0,
         decryptedCount: decryptedEntries.filter(e => e.decrypted).length,
+        persistedCount,
       });
+
+      // ── M3 compliance: notify CM that data was received ──────────────────
+      // Per the data-flow spec, after the HIU receives encrypted bundles it
+      // MUST POST /api/hiecm/data-flow/v3/health-information/notify with the
+      // session status (TRANSFERRED / FAILED) plus per-care-context hiStatus
+      // (OK / ERRORED). Without this the CM thinks delivery failed and
+      // surfaces a stuck "in progress" to the patient. We compute status from
+      // what actually decrypted+persisted; a partial decrypt counts as FAILED
+      // so the patient sees something went wrong. Fire-and-forget so a
+      // notify failure doesn't bubble back into the data-push retry loop.
+      if (abdmConsentId && data.transactionId && !authorisationDropped) {
+        const totalEntries = (data.entries || []).length;
+        const allOk = totalEntries > 0 && persistedCount === totalEntries;
+        const sessionStatus = allOk ? 'TRANSFERRED' : 'FAILED';
+        const statusResponses = Array.from(careContextRefs).map(ref => ({
+          careContextReference: ref,
+          hiStatus: allOk ? 'OK' : 'ERRORED',
+          ...(allOk ? {} : { description: 'Decryption or parsing failed for one or more entries' }),
+        }));
+        setImmediate(async () => {
+          try {
+            await this.dataFlowNotify({
+              consentId: abdmConsentId,
+              transactionId: data.transactionId,
+              status: sessionStatus,
+              statusResponses,
+            });
+          } catch (notifyErr: any) {
+            logger.warn('HIU: data-flow notify dispatch failed', { message: notifyErr?.message });
+          }
+        });
+      }
 
       return { success: true, message: 'Health information received successfully', entries: decryptedEntries };
     } catch (error: any) {

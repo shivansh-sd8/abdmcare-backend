@@ -658,6 +658,61 @@ export class HipService {
       const invByEnc = new Map(icounts.map(i => [i.encounterId!, i._count as any]));
       const immByEnc = new Map(immcounts.map(i => [i.encounterId!, i._count as any]));
 
+      // Resolve CareContext rows so discover can advertise the SAME persistent
+      // identifier (`careContextId`, e.g. "CC-...") that HIP-initiated linking
+      // and on_carecontext callbacks use. Previously we returned `encounter.id`
+      // here, which the CM then stored as the patient's care-context ref —
+      // later HIP-initiated link/carecontext sent `careContextId` for the same
+      // context, leaving the CM with two different refs and brittle string-
+      // match correlation. Use careContextId when a row exists; auto-create
+      // one for any encounter that is missing a CareContext (fresh installs)
+      // so the ref is stable from the moment we advertise it.
+      const ccRowsExisting = encIds.length
+        ? await prisma.careContext.findMany({
+            where: { encounterId: { in: encIds } },
+            select: { encounterId: true, careContextId: true, display: true },
+          })
+        : [];
+      const ccByEncId = new Map<string, { careContextId: string; display: string }>(
+        ccRowsExisting.map(r => [r.encounterId, { careContextId: r.careContextId, display: r.display }]),
+      );
+      const missingCcEncIds = winner.encounters
+        .filter(e => !ccByEncId.has(e.id))
+        .map(e => e.id);
+      if (missingCcEncIds.length) {
+        for (const enc of winner.encounters.filter(e => missingCcEncIds.includes(e.id))) {
+          const newId = `CC-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+          const display = sanitizeDisplay(`${enc.type} - ${new Date(enc.createdAt).toLocaleDateString()}`);
+          try {
+            await prisma.careContext.create({
+              data: {
+                careContextId: newId,
+                encounterId: enc.id,
+                patientId: winner.id,
+                display,
+                hipId: abdmConfig.hip.id,
+              },
+            });
+            ccByEncId.set(enc.id, { careContextId: newId, display });
+          } catch (e: any) {
+            // Race: another concurrent discover may have created the row.
+            // Re-read once before falling back to encounter.id.
+            const reread = await prisma.careContext.findFirst({
+              where: { encounterId: enc.id },
+              select: { careContextId: true, display: true },
+            });
+            if (reread) {
+              ccByEncId.set(enc.id, { careContextId: reread.careContextId, display: reread.display });
+            } else {
+              logger.warn('HIP discover: careContext upsert failed, falling back to encounter.id', {
+                encounterId: enc.id,
+                error: e?.message,
+              });
+            }
+          }
+        }
+      }
+
       // The CM allows ONE hiType per care context. We bucket the patient's
       // encounters into per-hiType groups so each context advertises the
       // correct type.
@@ -670,9 +725,10 @@ export class HipService {
           hasPrescription: !!prescByEnc.get(enc.id),
           hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
         });
+        const cc = ccByEncId.get(enc.id);
         return {
-          referenceNumber: enc.id,
-          display: sanitizeDisplay(`${enc.type} - ${new Date(enc.createdAt).toLocaleDateString()}`),
+          referenceNumber: cc?.careContextId || enc.id,
+          display: cc?.display || sanitizeDisplay(`${enc.type} - ${new Date(enc.createdAt).toLocaleDateString()}`),
           hiType,
         };
       });

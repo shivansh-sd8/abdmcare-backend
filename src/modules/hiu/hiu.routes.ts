@@ -24,8 +24,12 @@ router.post(
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
   [
     body('consentId').notEmpty().withMessage('Consent ID is required'),
-    body('dateRangeFrom').isISO8601().withMessage('Valid from date required'),
-    body('dateRangeTo').isISO8601().withMessage('Valid to date required'),
+    // dateRange is OPTIONAL — when not supplied, the service falls back to
+    // the consent's granted dateRange. This enables the UI's one-click pull
+    // (the user already picked dates when requesting consent, no reason to
+    // ask again).
+    body('dateRangeFrom').optional().isISO8601().withMessage('Valid from date required'),
+    body('dateRangeTo').optional().isISO8601().withMessage('Valid to date required'),
   ],
   validate,
   hiuController.requestHealthInformation

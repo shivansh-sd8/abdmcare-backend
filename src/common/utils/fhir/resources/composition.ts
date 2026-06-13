@@ -38,10 +38,42 @@ export function buildComposition(input: CompositionInput): { uuid: string; resou
 
   const typeCoding = input.typeCoding || COMPOSITION_TYPE.OPConsultRecord;
 
+  const sections = input.sections.filter(s => (s.entry && s.entry.length > 0) || s.text);
+
+  // ── Auto-generate Composition.text.div ──────────────────────────────────
+  // FHIR R4 / NRCeS profiles REQUIRE Composition.text. Without it the
+  // patient's PHR app and any HIU has no human-readable rendering of the
+  // document — they're stuck showing only the resource codes/displays.
+  // We assemble the document narrative by concatenating each section's own
+  // narrative (or its title + bullet of entries when no per-section
+  // narrative was supplied). This is what shows up as the "document body"
+  // when the bundle is rendered.
+  const docHeader = `<h2>${escapeHtml(input.title)}</h2>`
+    + (input.patientRef.display ? `<p><strong>Patient:</strong> ${escapeHtml(input.patientRef.display)}</p>` : '')
+    + (input.practitionerRef.display ? `<p><strong>Provider:</strong> ${escapeHtml(input.practitionerRef.display)}</p>` : '')
+    + `<p><strong>Date:</strong> ${escapeHtml(formatDateForNarrative(input.date))}</p>`;
+  const sectionsBody = sections
+    .map(s => {
+      // Use the per-section narrative if present. We deliberately skip ref-
+      // only sections without narrative — emitting raw `urn:uuid:...` lines
+      // is worse than nothing for a human reader and the receiver will still
+      // see the structured entries via the FHIR parser.
+      const innerDiv = s.text?.div ? stripOuterDiv(s.text.div) : '';
+      if (!innerDiv) return '';
+      return `<h3>${escapeHtml(s.title)}</h3>${innerDiv}`;
+    })
+    .filter(Boolean)
+    .join('');
+  const compositionDiv = `<div xmlns="http://www.w3.org/1999/xhtml">${docHeader}${sectionsBody}</div>`;
+
   const resource: FHIRResource = {
     resourceType: 'Composition',
     id: uuid,
     meta: { profile: [input.profileUrl] },
+    text: {
+      status: 'generated',
+      div: compositionDiv,
+    },
     status: 'final',
     type: {
       coding: [{
@@ -62,10 +94,25 @@ export function buildComposition(input: CompositionInput): { uuid: string; resou
     title: input.title,
     custodian: input.organizationRef,
     ...(input.encounterRef && { encounter: input.encounterRef }),
-    section: input.sections.filter(s => (s.entry && s.entry.length > 0) || s.text),
+    section: sections,
   };
 
   return { uuid, resource };
+}
+
+function formatDateForNarrative(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+  } catch {
+    return iso;
+  }
+}
+
+function stripOuterDiv(html: string): string {
+  return html
+    .replace(/^<div\s+xmlns=["']http:\/\/www\.w3\.org\/1999\/xhtml["']\s*>/i, '')
+    .replace(/<\/div>\s*$/i, '');
 }
 
 // Section code constants per NRCeS
@@ -162,16 +209,53 @@ export function makeRefSection(
   title: string,
   code: CompositionSection['code'],
   entries: Array<{ uuid: string }>,
+  narrativeHtml?: string,
 ): CompositionSection {
   return {
     title,
     code,
     entry: entries.map(e => ({ reference: urnUUID(e.uuid) })),
+    // FHIR R4: a section SHOULD have a narrative when it has entries — it's
+    // the human-readable summary so the patient and any HIU can render the
+    // document without resolving every reference. Profiles pass a small HTML
+    // table or list summarising the same data the entries describe.
+    ...(narrativeHtml ? {
+      text: {
+        status: 'generated',
+        div: `<div xmlns="http://www.w3.org/1999/xhtml">${narrativeHtml}</div>`,
+      },
+    } : {}),
   };
 }
 
+/**
+ * Build a small HTML table for a section's narrative. Used by profiles to
+ * give ref-based sections (Diagnoses, Medications, Investigations…) a
+ * human-readable rendering. Headers + rows are escaped for safety.
+ */
+export function buildNarrativeTable(headers: string[], rows: string[][]): string {
+  if (!rows.length) return '';
+  return `<table border="1" cellpadding="4" cellspacing="0">`
+    + `<thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>`
+    + `<tbody>${rows.map(r => `<tr>${r.map(c => `<td>${escapeHtml(c ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>`
+    + `</table>`;
+}
+
+/** Single bullet list — for sections where a 1-column table would feel heavy. */
+export function buildNarrativeList(items: string[]): string {
+  const filtered = items.filter(s => !!s && s.trim().length);
+  if (!filtered.length) return '';
+  return `<ul>${filtered.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`;
+}
+
+/** Free-text paragraph — escaped, with newlines preserved as <br>. */
+export function buildNarrativeText(text: string): string {
+  if (!text) return '';
+  return `<p>${escapeHtml(text).replace(/\n/g, '<br/>')}</p>`;
+}
+
 function escapeHtml(str: string): string {
-  return str
+  return String(str)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

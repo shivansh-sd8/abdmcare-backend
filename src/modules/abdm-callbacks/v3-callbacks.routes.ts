@@ -28,6 +28,14 @@ consentV3Routes.post('/hip/notify', verifyAbdmCallback, consentController.handle
 //   POST /api/v3/hiu/consent/request/on-init    → consentRequest.id assigned
 //   POST /api/v3/hiu/consent/request/on-status  → status query response
 //   POST /api/v3/hiu/consent/request/on-notify  → consent GRANTED/DENIED/REVOKED/EXPIRED
+//   POST /api/v3/hiu/consent/request/notify     → SAME payload as on-notify; ABDM
+//      gateway in production observed sending to /notify (no `on-` prefix), since
+//      this is a CM-INITIATED state-change push (mirrors the HIP-side
+//      /api/v3/consent/request/hip/notify which has always lived without `on-`).
+//      We register the handler at BOTH paths — the previous /on-notify-only
+//      registration silently fell through to the generic /api/v3/hiu router below
+//      which is `authenticate`-protected, so production was 401-ing and consent
+//      status was stuck on REQUESTED forever.
 // (The previous build listened at /api/v3/consent/request/hiu/on-notify — a path
 //  ABDM never calls — so consent status was stuck on REQUESTED forever.)
 export const hiuConsentV3Routes = Router();
@@ -82,32 +90,85 @@ hiuConsentV3Routes.post('/on-status', verifyAbdmCallback, asyncHandler(async (re
   res.status(202).json({ message: 'Acknowledged' });
 }));
 
-// on-notify: the authoritative consent grant/deny/revoke notification.
+// on-notify / notify: the authoritative consent grant/deny/revoke notification.
 // Body: { notification: { consentRequestId, status, consentArtefacts: [{ id }] } }
-hiuConsentV3Routes.post('/on-notify', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
+const hiuConsentNotifyHandler = asyncHandler(async (req: Request, res: Response) => {
   const payload = req.body || {};
   const notification = payload?.notification || {};
   const consentRequestId = notification.consentRequestId;
   const mappedStatus = HIU_STATUS_MAP[notification.status] || notification.status;
+  const inboundRequestId = (req.headers['request-id'] as string) || payload?.requestId;
   logger.info('V3 callback: HIU consent on-notify received', {
-    requestId: payload?.requestId,
+    requestId: inboundRequestId,
     consentRequestId,
     status: notification.status,
   });
 
   if (consentRequestId) {
     const artefacts = notification.consentArtefacts || [];
+    const firstArtefactId = artefacts[0]?.id;
     try {
-      await prisma.consent.updateMany({
-        where: { abdmRequestId: consentRequestId },
+      // Race-safe match: a prior /on-init may not yet have rewritten our local
+      // `abdmRequestId` from our outbound UUID to the CM's consentRequest.id,
+      // so a notify that arrives before init lands won't match by abdmRequestId
+      // alone. Fall back to abdmConsentId (consent artefact id) when present.
+      const updated = await prisma.consent.updateMany({
+        where: {
+          OR: [
+            { abdmRequestId: consentRequestId },
+            ...(firstArtefactId ? [{ abdmConsentId: firstArtefactId }] : []),
+          ],
+        },
         data: {
           status: mappedStatus,
-          ...(artefacts[0]?.id ? { abdmConsentId: artefacts[0].id } : {}),
+          ...(firstArtefactId ? { abdmConsentId: firstArtefactId } : {}),
           ...(mappedStatus === 'GRANTED' ? { grantedAt: new Date() } : {}),
           ...(mappedStatus === 'REVOKED' ? { revokedAt: new Date() } : {}),
         },
       });
-      logger.info('HIU consent on-notify: consent updated', { consentRequestId, status: mappedStatus });
+      logger.info('HIU consent on-notify: consent updated', {
+        consentRequestId,
+        status: mappedStatus,
+        rowsUpdated: updated.count,
+      });
+
+      // ── M3 compliance: outbound gateway ACK ───────────────────────────────
+      // ABDM expects the HIU to ack receipt of the state-change push at
+      //   POST /consent/v3/request/hiu/on-notify
+      // with `acknowledgement: [{ status, consentId }]`. Without this the CM
+      // retries the notification — the HIP side has always done this; the HIU
+      // path was missing it (orphan service method existed but unwired).
+      if (firstArtefactId) {
+        try {
+          const hiuService = (await import('../hiu/hiu.service')).default;
+          await hiuService.consentOnNotify({
+            requestId: inboundRequestId || consentRequestId,
+            consentIds: artefacts
+              .filter((a: any) => a?.id)
+              .map((a: any) => ({ status: 'ok', consentId: a.id })),
+          });
+        } catch (ackErr: any) {
+          logger.warn('HIU consent on-notify: outbound ACK failed', { message: ackErr?.message });
+        }
+      }
+
+      // ── On GRANT: auto-fetch artefact body so records can be requested ────
+      // Without the artefact body in our DB, the UI has nothing to show until
+      // a clinician manually clicks "Refresh". Fire-and-forget to keep the
+      // callback fast — the on-fetch handler will populate `artefactBody` /
+      // `artefactFetchedAt` / `expiresAt` when the body lands.
+      if (mappedStatus === 'GRANTED' && firstArtefactId) {
+        setImmediate(async () => {
+          try {
+            await abdmClient.post(abdmConfig.endpoints.consent.fetch, {
+              consentId: firstArtefactId,
+            });
+            logger.info('HIU consent on-notify: artefact fetch dispatched', { abdmConsentId: firstArtefactId });
+          } catch (fetchErr: any) {
+            logger.warn('HIU consent on-notify: artefact fetch failed', { message: fetchErr?.message });
+          }
+        });
+      }
 
       // ── M3 compliance: REVOKED / EXPIRED → purge data ─────────────────────
       // ABDM HIU Guidelines: once a consent is no longer GRANTED, the HIU MUST
@@ -151,7 +212,13 @@ hiuConsentV3Routes.post('/on-notify', verifyAbdmCallback, asyncHandler(async (re
   }
 
   res.status(202).json({ message: 'HIU consent notification acknowledged' });
-}));
+});
+
+// Mount the same handler at both paths to be defensive against ABDM gateway
+// variation (`/on-notify` per old M3 docs, `/notify` per current production
+// gateway behaviour observed in logs).
+hiuConsentV3Routes.post('/on-notify', verifyAbdmCallback, hiuConsentNotifyHandler);
+hiuConsentV3Routes.post('/notify', verifyAbdmCallback, hiuConsentNotifyHandler);
 
 // ── HIU on-fetch (consent artefact body delivery) ────────────────────────────
 // ABDM spec (ndhm-hiu §/v0.5/consents/on-fetch): after the HIU calls
@@ -218,6 +285,44 @@ hiuConsentsOnFetchRoutes.post('/on-fetch', verifyAbdmCallback, asyncHandler(asyn
       },
     });
     logger.info('HIU on-fetch: artefact persisted', { abdmConsentId, rowsUpdated: updated.count });
+
+    // ── Auto-fire health-information request ──────────────────────────────
+    // Now that we have the granted dateRange in the DB, the user's "fetch
+    // records" step is fully derivable — there's no human input needed.
+    // Pull data immediately so records appear in the patient profile without
+    // a clinician hunting for a "Request Records" button. We guard against
+    // re-pulling: if any records already exist for this consent OR the
+    // keypair is in flight (set by the previous request and not yet wiped),
+    // skip — the user can manually re-pull from the UI.
+    setImmediate(async () => {
+      try {
+        const consent = await prisma.consent.findFirst({
+          where: { abdmConsentId },
+          select: { id: true, status: true, purgedAt: true },
+        });
+        if (!consent || consent.status !== 'GRANTED' || consent.purgedAt) {
+          return;
+        }
+        const [recordCount, keyPair] = await Promise.all([
+          prisma.externalHealthRecord.count({ where: { consentId: abdmConsentId } }),
+          prisma.consentKeyPair.findUnique({ where: { consentId: abdmConsentId } }),
+        ]);
+        if (recordCount > 0 || keyPair) {
+          logger.info('HIU on-fetch: auto-pull skipped (already pulled or in-flight)', {
+            abdmConsentId,
+            recordCount,
+            inFlight: !!keyPair,
+          });
+          return;
+        }
+        const hiuService = (await import('../hiu/hiu.service')).default;
+        await hiuService.requestHealthInformation({ consentId: consent.id });
+        logger.info('HIU on-fetch: auto-pull dispatched', { abdmConsentId, localConsentId: consent.id });
+      } catch (autoErr: any) {
+        // Non-fatal: the user can manually re-pull from the UI.
+        logger.warn('HIU on-fetch: auto-pull failed', { abdmConsentId, message: autoErr?.message });
+      }
+    });
   } catch (err: any) {
     logger.error('HIU on-fetch: failed to persist artefact', { error: err?.message, abdmConsentId });
   }
