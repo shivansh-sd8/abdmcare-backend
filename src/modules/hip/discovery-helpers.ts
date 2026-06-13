@@ -278,3 +278,16 @@ export function profileToHiType(profile: ProfileName): AbdmHiType {
     case 'HealthDocumentRecord': return 'HealthDocumentRecord';
   }
 }
+
+/** Reverse of `profileToHiType`. */
+export function hiTypeToProfile(hiType: AbdmHiType): ProfileName {
+  switch (hiType) {
+    case 'OPConsultation': return 'OPConsultRecord';
+    case 'DischargeSummary': return 'DischargeSummaryRecord';
+    case 'Prescription': return 'PrescriptionRecord';
+    case 'DiagnosticReport': return 'DiagnosticReportRecord';
+    case 'ImmunizationRecord': return 'ImmunizationRecord';
+    case 'WellnessRecord': return 'WellnessRecord';
+    case 'HealthDocumentRecord': return 'HealthDocumentRecord';
+  }
+}

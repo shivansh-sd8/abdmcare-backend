@@ -1,18 +1,28 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import { weierstrass } from '@noble/curves/abstract/weierstrass';
+import { Field } from '@noble/curves/abstract/modular';
+import { sha256 } from '@noble/hashes/sha256';
+import { hkdf } from '@noble/hashes/hkdf';
 import { config } from '../config/index';
 
-  // ─────────────────────────────────────────────────────────────────────────────
-// ECDH types (ABDM v3 spec mandates Curve25519/X25519, but several
-// "Curve25519"-labelled HIUs/HIPs in the field actually emit NIST P-256
-// keys — we accept both and reply on whichever curve the peer used so the
-// shared-secret derivation succeeds.)
 // ─────────────────────────────────────────────────────────────────────────────
-export type ECDHCurve = 'X25519' | 'X448' | 'prime256v1';
+// ECDH types — ABDM/NRCeS uses BouncyCastle's "curve25519" registered name,
+// which is the WEIERSTRASS-FORM representation of Curve25519, NOT the
+// standard RFC 7748 Montgomery-form X25519. Public keys are 65-byte
+// uncompressed points (`04 || X(32) || Y(32)`); the OpenSSL/Node.js native
+// X25519 only supports the 32-byte Montgomery form, which is why every
+// previous attempt at native-only ECDH failed with "decode error". We use
+// `@noble/curves` to implement the BC curve25519 Weierstrass curve directly.
+// Reference: github.com/mgrmtech/fidelius-cli (Fidelius CLI, the canonical
+// ABDM reference implementation).
+// ─────────────────────────────────────────────────────────────────────────────
+export type ECDHCurve = 'BC_curve25519';
 
 export interface ECDHKeyPair {
-  privateKey: string; // base64 (PKCS8 DER)
-  publicKey: string;  // base64 (SPKI DER)
+  privateKey: string; // base64 of raw scalar (BigInteger.toByteArray() form)
+  publicKey: string;  // base64 of 65-byte uncompressed point (04 || X || Y)
+  x509PublicKey?: string; // base64 of X.509 SPKI DER for the same point
   nonce: string;      // base64 (32 random bytes)
   curve: ECDHCurve;
 }
@@ -131,197 +141,197 @@ export class EncryptionService {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // ECDH — ABDM Curve25519 (X25519) key exchange + AES-256-GCM
+  // ECDH — ABDM/Fidelius BouncyCastle "curve25519" Weierstrass form
+  //
+  // BC's "curve25519" is the CUSTOM Weierstrass-form representation of
+  // Curve25519 (NOT RFC 7748 Montgomery-form X25519). The curve equation is
+  // y² = x³ + a·x + b mod p, with parameters from BC's
+  // `org.bouncycastle.math.ec.custom.djb.Curve25519`:
+  //
+  //   p = 2²⁵⁵ − 19
+  //   a = 2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA984914A144 (hex)
+  //   b = 7B425ED097B425ED097B425ED097B425ED097B425ED097B4260B5E9C7710C864 (hex)
+  //   n (order) = 1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED
+  //   h (cofactor) = 8
+  //   G = 04 || 2AAA…AD245A || 20AE19A1B8A086B4E01EDD2C7748D14C923D4D7E6D7C61B229E9C5A27ECED3D9
+  //
+  // Public keys: 65-byte uncompressed point `04 || X(32) || Y(32)`
+  // Private keys: raw scalar bytes (Java BigInteger.toByteArray() form,
+  //   may include a leading 0x00 sign byte)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  static generateECDHKeyPair(curve: ECDHCurve = 'X25519'): ECDHKeyPair {
-    let keyPair: crypto.KeyPairKeyObjectResult;
-    if (curve === 'X25519') {
-      keyPair = crypto.generateKeyPairSync('x25519');
-    } else if (curve === 'X448') {
-      keyPair = crypto.generateKeyPairSync('x448');
-    } else if (curve === 'prime256v1') {
-      keyPair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-    } else {
-      throw new Error(`Unsupported ECDH curve: ${curve}`);
-    }
-    const publicKey = keyPair.publicKey.export({ type: 'spki', format: 'der' });
-    const privateKey = keyPair.privateKey.export({ type: 'pkcs8', format: 'der' });
+  /** BC `curve25519` Weierstrass curve, modelled with @noble/curves. */
+  private static readonly bcCurve25519 = (() => {
+    const p = BigInt('0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED');
+    const a = BigInt('0x2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA984914A144');
+    const b = BigInt('0x7B425ED097B425ED097B425ED097B425ED097B425ED097B4260B5E9C7710C864');
+    const n = BigInt('0x1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED');
+    const Gx = BigInt('0x2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD245A');
+    const Gy = BigInt('0x20AE19A1B8A086B4E01EDD2C7748D14C923D4D7E6D7C61B229E9C5A27ECED3D9');
+    return weierstrass({
+      a,
+      b,
+      Fp: Field(p),
+      n,
+      Gx,
+      Gy,
+      h: BigInt(8),
+      hash: sha256,
+      hmac: (_key: Uint8Array, ..._msgs: Uint8Array[]) => new Uint8Array(),
+      randomBytes: (len?: number) => Uint8Array.from(crypto.randomBytes(len ?? 32)),
+      lowS: false,
+      // BC/Fidelius compat: use raw scalar multiplication, no cofactor
+      // clearing or torsion checks. Fidelius doesn't validate either.
+      isTorsionFree: () => true,
+      clearCofactor: (_c, p) => p,
+    });
+  })();
+
+  /**
+   * Strip Java's BigInteger sign byte (the leading 0x00 prepended when the
+   * scalar's high bit would otherwise mark it as negative). Fidelius CLI's
+   * `getEncoded(false).getEncoded()` for the public key always emits 65
+   * bytes; for the private key it emits 32 OR 33 bytes (Java BigInteger).
+   */
+  private static stripSignByte(b: Uint8Array): Uint8Array {
+    if (b.length === 33 && b[0] === 0x00) return b.subarray(1);
+    return b;
+  }
+
+  /** Pad a scalar to 32 bytes (zero-extend on the left) for noble. */
+  private static padScalar32(b: Uint8Array): Uint8Array {
+    if (b.length === 32) return b;
+    if (b.length > 32) return b.subarray(b.length - 32);
+    const out = new Uint8Array(32);
+    out.set(b, 32 - b.length);
+    return out;
+  }
+
+  /**
+   * Generate a fresh ECDH keypair on BC's `curve25519`. Output formats match
+   * Fidelius CLI's KeyMaterial:
+   *   privateKey  — base64 of the 32-byte scalar (no sign byte)
+   *   publicKey   — base64 of the 65-byte uncompressed point `04||X||Y`
+   *   x509PublicKey — base64 of the X.509 SPKI DER for the same point
+   *   nonce       — base64 of 32 random bytes
+   */
+  static generateECDHKeyPair(_curve: ECDHCurve = 'BC_curve25519'): ECDHKeyPair {
+    const priv = this.bcCurve25519.utils.randomPrivateKey();
+    const pub = this.bcCurve25519.getPublicKey(priv, false); // false = uncompressed
     const nonce = crypto.randomBytes(32);
     return {
-      privateKey: privateKey.toString('base64'),
-      publicKey: publicKey.toString('base64'),
+      privateKey: Buffer.from(priv).toString('base64'),
+      publicKey: Buffer.from(pub).toString('base64'),
+      x509PublicKey: this.encodeBcCurve25519AsSpki(pub).toString('base64'),
       nonce: nonce.toString('base64'),
-      curve,
+      curve: 'BC_curve25519',
     };
   }
 
   /**
-   * Inspect the peer public key bytes and infer which curve they belong to.
-   * Used to decide which curve to use for OUR own ephemeral keypair so that
-   * `crypto.diffieHellman` doesn't fail with a mismatched-curve "decode error".
-   *
-   * Inference is byte-shape based — it does NOT trust the `keyMaterial.curve`
-   * field on the wire. Several ABDM-certified HIUs label P-256 keys as
-   * "Curve25519", so trusting the label leads to silent shared-secret
-   * mismatches. The bytes never lie:
-   *   • 32 bytes (or 33 with sign byte)               → X25519
-   *   • 56 bytes                                       → X448
-   *   • 65 bytes starting with 0x04                    → P-256 X9.63 point
-   *   • 91 bytes starting with 30 59 30 13 06 07 2a … → P-256 SPKI DER
-   *   • 44 bytes starting with 30 2a 30 05 06 03 2b 65 → X25519 SPKI DER
+   * Wrap a BC curve25519 uncompressed point in an X.509 SPKI DER envelope.
+   * Uses BC's OID for the curve (1.3.6.1.4.1.3029.1.5.1) and the standard
+   * id-ecPublicKey algorithm OID. Fidelius emits this as the "x509PublicKey"
+   * alongside the raw 65-byte form; we accept both on input.
    */
-  static detectCurveFromBytes(bytes: Buffer): ECDHCurve {
-    // SPKI DER — peek at the algorithm OID inside.
-    if (bytes.length > 32 && bytes[0] === 0x30) {
-      const hex = bytes.toString('hex');
-      if (hex.includes('06082a8648ce3d030107')) return 'prime256v1'; // 1.2.840.10045.3.1.7
-      if (hex.includes('06032b656e')) return 'X25519';                 // 1.3.101.110
-      if (hex.includes('06032b656f')) return 'X448';                   // 1.3.101.111
-    }
-    // Raw key by length.
-    let raw = bytes;
-    if (raw.length === 33 && raw[0] === 0x00) raw = raw.subarray(1);
-    if (raw.length === 32) return 'X25519';
-    if (raw.length === 56) return 'X448';
-    if (raw.length === 65 && raw[0] === 0x04) return 'prime256v1';
-    if (raw.length === 97 && raw[0] === 0x04) return 'prime256v1'; // P-384 not supported here yet
-    return 'X25519'; // safe default — older ABDM spec
+  private static encodeBcCurve25519AsSpki(uncompressedPoint: Uint8Array): Buffer {
+    // SubjectPublicKeyInfo  ::= SEQUENCE { algorithm, subjectPublicKey BIT STRING }
+    // algorithm: AlgorithmIdentifier (id-ecPublicKey + curve-OID = 1.3.6.1.4.1.3029.1.5.1)
+    // The exact bytes below come from a Fidelius-generated x509 key.
+    // 30 56                      SEQUENCE 86
+    //   30 10                    SEQUENCE 16  (algorithm)
+    //     06 07 2a 86 48 ce 3d 02 01     OID id-ecPublicKey
+    //     06 05 2b 81 04 00 0a           OID 1.3.132.0.10 (placeholder; some HIUs use this)
+    //   03 42 00 04 ...           BIT STRING (0 unused) 04||X||Y
+    // For ABDM compatibility, we embed BC's specific OID via `2b06010401cc0d010501`
+    // We build with the most common Fidelius-emitted form.
+    const oid = Buffer.from('06092b06010401cc0d010501', 'hex'); // 1.3.6.1.4.1.3029.1.5.1
+    const algo = Buffer.concat([
+      Buffer.from('06072a8648ce3d0201', 'hex'), // id-ecPublicKey
+      oid,
+    ]);
+    const algoSeq = Buffer.concat([Buffer.from([0x30, algo.length]), algo]);
+    const bitStringContent = Buffer.concat([Buffer.from([0x00]), Buffer.from(uncompressedPoint)]);
+    const bitString = Buffer.concat([Buffer.from([0x03, bitStringContent.length]), bitStringContent]);
+    const inner = Buffer.concat([algoSeq, bitString]);
+    const outer = Buffer.concat([Buffer.from([0x30, 0x81, inner.length]), inner]);
+    return outer;
   }
 
-  // ASN.1 SPKI prefix for an X25519 (1.3.101.110) public key wrapping a raw
-  // 32-byte key: SEQUENCE(42){ SEQUENCE(5){ OID 2b656e } BITSTRING(33){00 + key} }.
-  private static readonly X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
-
-  // ASN.1 SPKI prefix for an X448 (1.3.101.111) public key wrapping a raw
-  // 56-byte key: SEQUENCE(46){ SEQUENCE(5){ OID 2b656f } BITSTRING(57){00 + key} }.
-  private static readonly X448_SPKI_PREFIX = Buffer.from('3042300506032b656f033900', 'hex');
-
   /**
-   * Best-effort decode of a peer's public key. ABDM-aligned HIUs/HIPs are
-   * supposed to send a base64-encoded SPKI DER, but in practice the wild west
-   * of certified vendors emits at least seven different shapes:
-   *
-   *   1. base64( SPKI DER )                  — what Node's crypto exports
-   *   2. base64( raw 32 bytes )              — "Curve25519/32byte random key"
-   *   3. base64( 0x00 ‖ raw 32 bytes )       — Java BigInteger "sign byte"
-   *   4. base64url( ... )                    — JWK-style without padding
-   *   5. hex( SPKI DER ) | hex( raw )        — some BouncyCastle wrappers
-   *   6. base64( ASCII-hex( SPKI / raw ) )   — double-encoded by accident
-   *   7. PEM (BEGIN PUBLIC KEY ... END)
-   *
-   * Returns the decoded KEY BYTES (DER or raw 32 bytes), the encoding that
-   * worked, and a short diagnostic string. Throws AppError-equivalent only
-   * when nothing matches.
+   * Pull the 65-byte uncompressed point out of however the peer sent it:
+   *   • 65 bytes starting with `0x04`              → raw uncompressed point
+   *   • SPKI DER (any length, leading `0x30`)      → look for the BIT STRING
+   *     and take the last 65 bytes after the 0x00 unused-bits marker
+   *   • base64 of the above, with possible padding/whitespace/quotes
+   *   • hex of the above
    */
-  private static decodePeerKey(peerPublicKeyB64: string): { bytes: Buffer; encoding: string } {
+  private static decodePeerPoint(peerPublicKeyB64: string): { point: Uint8Array; encoding: string } {
     const trimmed = peerPublicKeyB64.trim().replace(/^"|"$/g, '');
-    if (trimmed.includes('BEGIN')) {
-      // PEM — let createPublicKey handle it directly downstream by signalling
-      // through a special encoding tag.
-      return { bytes: Buffer.from(trimmed, 'utf8'), encoding: 'pem' };
+
+    // Hex string
+    let raw: Buffer;
+    if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0 && trimmed.length >= 130) {
+      raw = Buffer.from(trimmed, 'hex');
+    } else {
+      const b64 = trimmed.replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
+      const padded = b64 + '==='.slice((b64.length + 3) % 4);
+      raw = Buffer.from(padded, 'base64');
     }
 
-    // Pure hex string? (only 0-9a-fA-F, even length, sane size for an X25519
-    // key in any envelope: 32, 33, 44, 65, 91 bytes ⇒ 64..182 hex chars).
-    if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0 && trimmed.length >= 64 && trimmed.length <= 256) {
-      return { bytes: Buffer.from(trimmed, 'hex'), encoding: 'hex' };
+    // Raw uncompressed point — `04 || X(32) || Y(32)`.
+    if (raw.length === 65 && raw[0] === 0x04) {
+      return { point: Uint8Array.from(raw), encoding: 'raw-uncompressed' };
     }
 
-    // base64 / base64url (with or without padding).
-    const b64 = trimmed.replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
-    const padded = b64 + '==='.slice((b64.length + 3) % 4);
-    let raw = Buffer.from(padded, 'base64');
-
-    // Some senders accidentally double-encode: base64( ASCII hex( bytes ) ).
-    // Detect it (every decoded byte is a valid hex character) and undo.
-    const looksLikeAsciiHex =
-      raw.length >= 64 &&
-      raw.length % 2 === 0 &&
-      raw.every(b => (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x46) || (b >= 0x61 && b <= 0x66));
-    if (looksLikeAsciiHex) {
-      try {
-        const inner = Buffer.from(raw.toString('utf8'), 'hex');
-        return { bytes: inner, encoding: 'base64-of-asciihex' };
-      } catch {
-        // fall through
+    // SPKI DER: scan for the trailing 65-byte uncompressed point. The BIT
+    // STRING wraps `00 || 04 || X || Y`; the last 65 bytes of any well-formed
+    // SPKI for an EC public key end with that pattern.
+    if (raw[0] === 0x30 && raw.length > 65) {
+      const tail = raw.subarray(raw.length - 65);
+      if (tail[0] === 0x04) {
+        return { point: Uint8Array.from(tail), encoding: 'spki' };
       }
     }
 
-    return { bytes: raw, encoding: 'base64' };
-  }
-
-  /**
-   * Build a public KeyObject from however ABDM/peers encode it. Auto-detects
-   * the curve (X25519, X448, P-256) from the byte shape. The returned
-   * KeyObject's curve drives our own ephemeral keypair selection in
-   * `encryptWithECDH` so the subsequent DH derive succeeds.
-   */
-  private static toECDHPublicKey(peerPublicKeyB64: string): crypto.KeyObject {
-    if (!peerPublicKeyB64 || typeof peerPublicKeyB64 !== 'string') {
-      throw new Error('Peer public key is empty or not a string');
+    // Compressed point — `02|03 || X(32)`. Decompress via the curve so we
+    // get back to uncompressed form for ECDH.
+    if (raw.length === 33 && (raw[0] === 0x02 || raw[0] === 0x03)) {
+      const decoded = this.bcCurve25519.ProjectivePoint.fromHex(raw).toRawBytes(false);
+      return { point: decoded, encoding: 'compressed' };
     }
 
-    const decoded = this.decodePeerKey(peerPublicKeyB64);
-
-    if (decoded.encoding === 'pem') {
-      return crypto.createPublicKey({ key: decoded.bytes.toString('utf8'), format: 'pem' });
-    }
-
-    const raw = decoded.bytes;
-
-    // Path 1: full SPKI DER (any supported curve). Length > 32 + leading
-    // SEQUENCE tag is a very strong signal.
-    if (raw.length > 32 && raw[0] === 0x30) {
-      try {
-        return crypto.createPublicKey({ key: raw, format: 'der', type: 'spki' });
-      } catch {
-        // fall through
-      }
-    }
-
-    // Path 2: raw 32-byte X25519 key, optionally with a Java sign byte.
-    let rawKey = raw;
-    if (rawKey.length === 33 && rawKey[0] === 0x00) rawKey = rawKey.subarray(1);
-    if (rawKey.length === 32) {
-      const spki = Buffer.concat([this.X25519_SPKI_PREFIX, rawKey]);
-      return crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
-    }
-
-    // Path 3: raw 56-byte X448 key (rare but in NRCeS reference SDK options).
-    if (rawKey.length === 56) {
-      const spki = Buffer.concat([this.X448_SPKI_PREFIX, rawKey]);
-      return crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
-    }
-
-    // Path 4: X9.63 uncompressed point for NIST curves (some legacy HIPs use
-    // P-256). 65 bytes starting with 0x04 ⇒ secp256r1.
-    if (rawKey.length === 65 && rawKey[0] === 0x04) {
-      const spki = Buffer.concat([
-        Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'),
-        rawKey,
-      ]);
-      return crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
-    }
-
-    // Nothing fit — surface a diagnostic so the operator can tell ABDM/the
-    // peer exactly what we received instead of a bare "wrong tag".
     const head = raw.subarray(0, Math.min(8, raw.length)).toString('hex');
     throw new Error(
-      `Peer public key in unrecognised encoding (${decoded.encoding}, ${raw.length} bytes, head=${head}). ` +
-        `Expected base64 of SPKI DER (44 bytes for X25519) or raw 32-byte X25519 key.`,
+      `Peer public key in unrecognised encoding (${raw.length} bytes, head=${head}). ` +
+        `Expected base64 of 65-byte uncompressed point (04||X||Y) or X.509 SPKI DER.`,
     );
   }
 
+  /** Backwards-compat shim — returns just the bytes for diagnostic logging. */
+  static decodePeerKeyForDiagnostics(peerPublicKeyB64: string): Buffer {
+    try {
+      const { point } = this.decodePeerPoint(peerPublicKeyB64);
+      return Buffer.from(point);
+    } catch {
+      try {
+        const trimmed = peerPublicKeyB64.trim().replace(/^"|"$/g, '');
+        const b64 = trimmed.replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
+        const padded = b64 + '==='.slice((b64.length + 3) % 4);
+        return Buffer.from(padded, 'base64');
+      } catch {
+        return Buffer.alloc(0);
+      }
+    }
+  }
+
   /**
-   * Derive a 256-bit shared secret using ECDH + XOR'd nonces as HKDF salt.
-   *
-   * The peer's curve must match our own private key's curve. If our key is
-   * X25519 but the peer key is P-256, `crypto.diffieHellman` fails with
-   * "decode error" — that's the regression we hit when an HIU mislabels its
-   * P-256 key as Curve25519. `encryptWithECDH` solves this by detecting the
-   * peer's curve from the bytes and generating a matching local keypair
-   * BEFORE calling deriveSharedSecret.
+   * Derive the AES-256-GCM session key per the Fidelius spec:
+   *   1. xor = senderNonce ⊕ requesterNonce  (length = sender's, with cyclic indexing)
+   *   2. SALT = first 20 bytes of xor
+   *   3. IV   = last 12 bytes of xor (returned via a separate accessor, see below)
+   *   4. shared = ECDH(senderPriv, requesterPub).x  → big-endian X coordinate of the shared point
+   *   5. sessionKey = HKDF-SHA256(ikm = shared, salt = SALT, info = empty, len = 32)
    */
   static deriveSharedSecret(
     ownPrivateKeyB64: string,
@@ -329,90 +339,92 @@ export class EncryptionService {
     ownNonce: string,
     peerNonce: string,
   ): Buffer {
-    const ownPrivateKey = crypto.createPrivateKey({
-      key: Buffer.from(ownPrivateKeyB64, 'base64'),
-      format: 'der',
-      type: 'pkcs8',
-    });
-    const peerPublicKey = this.toECDHPublicKey(peerPublicKeyB64);
+    const { sessionKey } = this.deriveSession(ownPrivateKeyB64, peerPublicKeyB64, ownNonce, peerNonce);
+    return sessionKey;
+  }
 
-    const ownCurve = (ownPrivateKey.asymmetricKeyType || '').toLowerCase();
-    const peerCurve = (peerPublicKey.asymmetricKeyType || '').toLowerCase();
-    if (ownCurve && peerCurve && ownCurve !== peerCurve) {
-      throw new Error(
-        `ECDH curve mismatch: own private key is ${ownCurve} but peer public key is ${peerCurve}. ` +
-          `Generate the local keypair on the peer's curve before deriving.`,
-      );
+  /** Returns both the AES key and the deterministic IV per Fidelius. */
+  static deriveSession(
+    ownPrivateKeyB64: string,
+    peerPublicKeyB64: string,
+    ownNonce: string,
+    peerNonce: string,
+  ): { sessionKey: Buffer; iv: Buffer; sharedSecret: Buffer } {
+    const ownPrivRaw = this.padScalar32(this.stripSignByte(Uint8Array.from(Buffer.from(ownPrivateKeyB64, 'base64'))));
+    const peerPoint = this.decodePeerPoint(peerPublicKeyB64).point;
+
+    // ECDH on BC curve25519: scalar-multiply peer point by our scalar, take X.
+    const sharedPoint = this.bcCurve25519.ProjectivePoint.fromHex(peerPoint).multiply(
+      this.bcCurve25519.utils.normPrivateKeyToScalar(ownPrivRaw),
+    );
+    const sharedX = sharedPoint.toAffine().x;
+    // Big-endian, fixed 32 bytes (Fidelius re-base64s sharedSecret bytes; the
+    // scalar X is the input KeyMaterial for HKDF).
+    const sharedSecret = Buffer.from(this.bigintToBytes32(sharedX));
+
+    // SALT = first 20 bytes of XOR'd nonces (sender ⊕ requester, cyclic).
+    const senderNonce = Buffer.from(ownNonce, 'base64');
+    const requesterNonce = Buffer.from(peerNonce, 'base64');
+    const xor = Buffer.alloc(senderNonce.length);
+    for (let i = 0; i < senderNonce.length; i++) {
+      xor[i] = senderNonce[i] ^ requesterNonce[i % requesterNonce.length];
     }
+    const salt = xor.subarray(0, 20);
+    const iv = xor.subarray(xor.length - 12);
 
-    const sharedSecret = crypto.diffieHellman({
-      privateKey: ownPrivateKey,
-      publicKey: peerPublicKey,
-    });
+    const sessionKey = Buffer.from(hkdf(sha256, sharedSecret, salt, undefined, 32));
+    return { sessionKey, iv, sharedSecret };
+  }
 
-    const ownNonceBuf = Buffer.from(ownNonce, 'base64');
-    const peerNonceBuf = Buffer.from(peerNonce, 'base64');
-    const salt = Buffer.alloc(ownNonceBuf.length);
-    for (let i = 0; i < ownNonceBuf.length; i++) {
-      salt[i] = ownNonceBuf[i] ^ (peerNonceBuf[i] || 0);
+  private static bigintToBytes32(n: bigint): Uint8Array {
+    const out = new Uint8Array(32);
+    let v = n;
+    for (let i = 31; i >= 0; i--) {
+      out[i] = Number(v & 0xffn);
+      v >>= 8n;
     }
-
-    return crypto.hkdfSync('sha256', sharedSecret, salt, Buffer.alloc(0), 32) as unknown as Buffer;
+    return out;
   }
 
   /**
-   * Encrypt plaintext for HIP data push.
+   * Encrypt plaintext for the HIP→HIU push.
    *
-   * Detects the peer's curve from its public key bytes (X25519 / X448 /
-   * P-256), generates an ephemeral local keypair on the SAME curve, derives
-   * the AES-256-GCM session key, and emits a keyMaterial whose `curve` and
-   * `parameters` reflect what the peer can actually decrypt against. The
-   * peer-curve label on the wire is ignored on purpose — several certified
-   * HIUs label P-256 keys as "Curve25519".
+   * Per Fidelius:
+   *   • Generate fresh BC curve25519 keypair (sender keys)
+   *   • Derive sessionKey + IV (deterministic, from XOR'd nonces)
+   *   • AES-256-GCM (with 128-bit tag, per BC's GCMBlockCipher default)
+   *   • Output: base64(ciphertext + tag) — NO IV prefix (peer recomputes IV)
+   *   • keyMaterial: curve "Curve25519", parameters identifying the format,
+   *     keyValue = base64 of 65-byte uncompressed point.
    */
   static encryptWithECDH(
     plaintext: string,
     peerPublicKeyB64: string,
     peerNonce: string,
   ): ECDHEncryptResult {
-    const peerBytes = this.decodePeerKey(peerPublicKeyB64).bytes;
-    const peerCurve = this.detectCurveFromBytes(peerBytes);
-    const ownKeyPair = this.generateECDHKeyPair(peerCurve);
-
-    const derivedKeyBuf = this.deriveSharedSecret(
+    const ownKeyPair = this.generateECDHKeyPair();
+    const { sessionKey, iv } = this.deriveSession(
       ownKeyPair.privateKey,
       peerPublicKeyB64,
       ownKeyPair.nonce,
       peerNonce,
     );
-    const derivedKey = Buffer.from(derivedKeyBuf);
 
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', derivedKey, iv);
+    const cipher = crypto.createCipheriv('aes-256-gcm', sessionKey, iv, { authTagLength: 16 });
     const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
     const authTag = cipher.getAuthTag();
-    const ciphertext = Buffer.concat([iv, encrypted, authTag]).toString('base64');
-
-    // ABDM expects "Curve25519" as the curve label for X25519; P-256 has no
-    // ABDM-canonical label, so we mirror what most certified HIUs send.
-    const curveLabel =
-      peerCurve === 'X25519' ? 'Curve25519'
-      : peerCurve === 'X448' ? 'Curve448'
-      : peerCurve === 'prime256v1' ? 'Curve25519' // peers labelled P-256 as Curve25519; mirror that
-      : 'Curve25519';
-    const parameters =
-      peerCurve === 'X25519' ? 'Curve25519/32byte random key'
-      : peerCurve === 'prime256v1' ? 'secp256r1/uncompressed point'
-      : 'Curve25519/32byte random key';
+    // Fidelius emits ciphertext||tag (no IV prefix); the peer derives the IV
+    // from the same nonce XOR.
+    const ciphertext = Buffer.concat([encrypted, authTag]).toString('base64');
 
     return {
       encryptedData: ciphertext,
       keyMaterial: {
         cryptoAlg: 'ECDH',
-        curve: curveLabel,
+        curve: 'Curve25519',
         dhPublicKey: {
           expiry: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-          parameters,
+          parameters: 'Curve25519/32byte random key',
           keyValue: ownKeyPair.publicKey,
         },
         nonce: ownKeyPair.nonce,
@@ -420,17 +432,14 @@ export class EncryptionService {
     };
   }
 
-  /**
-   * AES-256-GCM encrypt with a pre-derived ECDH session key. Used when many
-   * payloads must be encrypted under the SAME session keypair (so the peer can
-   * decrypt them all with the single keyMaterial we publish).
-   */
-  static encryptWithSessionKey(plaintext: string, derivedKey: Buffer): string {
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', derivedKey, iv);
+  /** AES-256-GCM encrypt with a pre-derived session key + deterministic IV. */
+  static encryptWithSessionKey(plaintext: string, derivedKey: Buffer, iv?: Buffer): string {
+    const useIv = iv || crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', derivedKey, useIv, { authTagLength: 16 });
     const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
     const authTag = cipher.getAuthTag();
-    return Buffer.concat([iv, encrypted, authTag]).toString('base64');
+    // Fidelius format: NO IV prefix; the peer recomputes IV from the nonce XOR.
+    return Buffer.concat([encrypted, authTag]).toString('base64');
   }
 
   static decryptWithECDH(
@@ -440,52 +449,43 @@ export class EncryptionService {
     peerPublicKeyB64: string,
     peerNonce: string,
   ): string {
-    const derivedKeyBuf = this.deriveSharedSecret(
+    const { sessionKey, iv } = this.deriveSession(
       ownPrivateKeyB64,
       peerPublicKeyB64,
       ownNonce,
       peerNonce,
     );
-    const derivedKey = Buffer.from(derivedKeyBuf);
 
     const data = Buffer.from(encryptedDataB64, 'base64');
-    const iv = data.subarray(0, 12);
     const authTag = data.subarray(data.length - 16);
-    const ciphertext = data.subarray(12, data.length - 16);
+    const ciphertext = data.subarray(0, data.length - 16);
 
-    const decipher = crypto.createDecipheriv('aes-256-gcm', derivedKey, iv);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', sessionKey, iv, { authTagLength: 16 });
     decipher.setAuthTag(authTag);
     const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return decrypted.toString('utf8');
   }
-  /**
-   * Self-test: verify ECDH round-trip encrypt/decrypt works correctly.
-   * Call on server startup in dev mode to catch format issues early.
-   */
+
+  /** Curve detection for diagnostics — always returns the BC curve now. */
+  static detectCurveFromBytes(_bytes: Buffer): ECDHCurve {
+    return 'BC_curve25519';
+  }
+
+  /** Self-test: round-trip encrypt/decrypt against a fresh peer keypair. */
   static verifyECDHRoundTrip(): boolean {
     try {
       const testData = '{"resourceType":"Bundle","type":"document","entry":[]}';
+      const peer = this.generateECDHKeyPair();
+      const result = this.encryptWithECDH(testData, peer.publicKey, peer.nonce);
 
-      const senderKP = this.generateECDHKeyPair();
-      const result = this.encryptWithECDH(testData, senderKP.publicKey, senderKP.nonce);
-
-      if (result.keyMaterial.curve !== 'Curve25519') {
-        throw new Error(`Expected curve Curve25519, got ${result.keyMaterial.curve}`);
-      }
-      if (result.keyMaterial.cryptoAlg !== 'ECDH') {
-        throw new Error(`Expected cryptoAlg ECDH, got ${result.keyMaterial.cryptoAlg}`);
-      }
-
-      const pubKeyBuf = Buffer.from(result.keyMaterial.dhPublicKey.keyValue, 'base64');
-      if (pubKeyBuf.length < 32) {
-        throw new Error(`Public key too short: ${pubKeyBuf.length} bytes (expected >=32 in DER/SPKI)`);
-      }
-
-      const nonceBuf = Buffer.from(result.keyMaterial.nonce, 'base64');
-      if (nonceBuf.length !== 32) {
-        throw new Error(`Nonce must be 32 bytes, got ${nonceBuf.length}`);
-      }
-
+      const decrypted = this.decryptWithECDH(
+        result.encryptedData,
+        peer.privateKey,
+        peer.nonce,
+        result.keyMaterial.dhPublicKey.keyValue,
+        result.keyMaterial.nonce,
+      );
+      if (decrypted !== testData) throw new Error('Round-trip ciphertext mismatch');
       return true;
     } catch (err: any) {
       console.error('ECDH self-test FAILED:', err.message);

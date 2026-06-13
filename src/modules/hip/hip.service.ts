@@ -1066,6 +1066,11 @@ export class HipService {
         consentPatientId: consent.patientId,
         dataPushUrl: request.hiRequest.dataPushUrl,
         dateRange: effectiveDateRange,
+        // Forward the consented hiTypes so the worker can drop care contexts
+        // whose derived type is outside this scope. Per ABDM "Request Health
+        // Records" doc the HIP must only share data that "is in keeping with
+        // the terms of the artefact".
+        hiTypes: consentHiTypes,
         keyMaterial: request.hiRequest.keyMaterial,
       };
 

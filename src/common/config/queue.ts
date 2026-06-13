@@ -46,6 +46,15 @@ export interface HealthDataPushJobData {
   consentPatientId: string;
   dataPushUrl: string;
   dateRange: { from: string; to: string };
+  /**
+   * Permitted hiTypes from the consent artefact. The worker filters care
+   * contexts to those whose derived hiType is in this list so we never push
+   * records the user did not consent to. ABDM hiType strings only (e.g.
+   * 'OPConsultation', 'Prescription', 'DischargeSummary'). Empty/undefined
+   * means "no restriction" (legacy consents that pre-dated the hiTypes
+   * column).
+   */
+  hiTypes?: string[];
   keyMaterial: {
     cryptoAlg: string;
     curve: string;

@@ -6,11 +6,12 @@ import { AbdmClient } from '../common/utils/abdm-client';
 import EncryptionService from '../common/utils/encryption';
 import crypto from 'crypto';
 import { HealthDataPushJobData, createHealthDataPushWorker } from '../common/config/queue';
+import { deriveHiType, hiTypeToProfile, AbdmHiType } from '../modules/hip/discovery-helpers';
 
 const abdmClient = new AbdmClient();
 
 async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<void> {
-  const { transactionId, consentAbdmId, consentPatientId, dataPushUrl, dateRange, keyMaterial } = job.data;
+  const { transactionId, consentAbdmId, consentPatientId, dataPushUrl, dateRange, hiTypes, keyMaterial } = job.data;
 
   logger.info('Worker: Processing health data push', { transactionId, jobId: job.id });
 
@@ -52,7 +53,7 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     const fromDate = dateRange?.from ? new Date(dateRange.from) : null;
     const toDate = dateRange?.to ? new Date(dateRange.to) : null;
 
-    const validContexts = careContextsWithEnc.filter((cc) => {
+    const dateValidContexts = careContextsWithEnc.filter((cc) => {
       if (!cc.encounter) return false;
       const encDate = cc.encounter.visitDate || cc.encounter.createdAt;
       if (fromDate && encDate < fromDate) return false;
@@ -60,28 +61,69 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       return true;
     });
 
-    careContextRefs = (validContexts.length > 0 ? validContexts : careContextsWithEnc)
-      .map((cc) => cc.careContextId)
-      .filter(Boolean);
-
-    if (validContexts.length === 0) {
+    if (dateValidContexts.length === 0) {
       logger.warn('Worker: No encounters found in consent date range', { transactionId, from: dateRange?.from, to: dateRange?.to });
     }
 
     // Load vitals, investigations and immunizations separately (they link via
     // encounterId string, not a Prisma relation).
-    const encounterIds = validContexts.map((cc) => cc.encounter!.id);
+    const dateValidEncIds = dateValidContexts.map((cc) => cc.encounter!.id);
     const [allVitals, allInvestigations, allImmunizations] = await Promise.all([
-      encounterIds.length > 0
-        ? prisma.vitals.findMany({ where: { encounterId: { in: encounterIds } } })
+      dateValidEncIds.length > 0
+        ? prisma.vitals.findMany({ where: { encounterId: { in: dateValidEncIds } } })
         : Promise.resolve([]),
-      encounterIds.length > 0
-        ? prisma.investigation.findMany({ where: { encounterId: { in: encounterIds } } })
+      dateValidEncIds.length > 0
+        ? prisma.investigation.findMany({ where: { encounterId: { in: dateValidEncIds } } })
         : Promise.resolve([]),
-      encounterIds.length > 0
-        ? prisma.immunization.findMany({ where: { encounterId: { in: encounterIds } } })
+      dateValidEncIds.length > 0
+        ? prisma.immunization.findMany({ where: { encounterId: { in: dateValidEncIds } } })
         : Promise.resolve([]),
     ]);
+
+    // Per-care-context hiType derivation (same algorithm as discovery/link).
+    // The hiType drives both the consent-scope filter AND the FHIR profile
+    // chosen by the bundle builder.
+    const ccWithHiType = dateValidContexts.map((cc) => {
+      const enc = cc.encounter!;
+      const ccHiType = deriveHiType({
+        type: enc.type as any,
+        admissionId: enc.admissionId,
+        hasImmunization: allImmunizations.some((im) => im.encounterId === enc.id),
+        hasInvestigation: allInvestigations.some((inv) => inv.encounterId === enc.id),
+        hasPrescription:
+          (enc.prescriptions?.length || 0) > 0 ||
+          (enc as any).labOrders?.length > 0,
+        hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
+      });
+      return { cc, hiType: ccHiType };
+    });
+
+    // Apply consent.hiTypes filter — drop care contexts whose derived type
+    // is not in the consented scope. Empty/undefined hiTypes means "no
+    // restriction" (legacy consents that pre-dated the column).
+    const allowedHiTypes = (hiTypes && hiTypes.length > 0) ? new Set(hiTypes) : null;
+    const validContexts = (allowedHiTypes
+      ? ccWithHiType.filter(({ hiType }) => allowedHiTypes.has(hiType))
+      : ccWithHiType
+    );
+
+    careContextRefs = (validContexts.length > 0
+      ? validContexts.map((v) => v.cc)
+      : careContextsWithEnc
+    ).map((cc) => cc.careContextId).filter(Boolean);
+
+    if (allowedHiTypes && validContexts.length < ccWithHiType.length) {
+      logger.info('Worker: Filtered care contexts to consented hiTypes', {
+        transactionId,
+        consentedHiTypes: Array.from(allowedHiTypes),
+        beforeFilter: ccWithHiType.length,
+        afterFilter: validContexts.length,
+        droppedHiTypes: ccWithHiType
+          .filter(({ hiType }) => !allowedHiTypes.has(hiType))
+          .map(({ hiType }) => hiType),
+      });
+    }
+
 
     const vitalsByEnc = new Map<string, any[]>();
     for (const v of allVitals) {
@@ -110,40 +152,36 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     // Establish ONE ECDH session for the whole transfer. Every entry MUST be
     // encrypted with this single session key so the HIU can decrypt them all
     // using the one keyMaterial.dhPublicKey we publish in the push payload.
-    // (Previously each entry used its own ephemeral keypair while the push
-    // advertised a different keypair — the HIU could never decrypt.)
     //
-    // CRITICAL: detect the peer's actual curve from its key bytes, NOT from
-    // the curve label on the wire — several certified HIUs label P-256 keys
-    // as "Curve25519". If we generate X25519 locally while the peer is
-    // P-256, crypto.diffieHellman fails with "decode error" and the entire
-    // push job dies on every retry.
-    let peerBytes = Buffer.alloc(0);
-    let detectedCurve: 'X25519' | 'X448' | 'prime256v1' = 'X25519';
+    // ABDM/Fidelius spec: BouncyCastle "curve25519" Weierstrass form.
+    // Public keys are 65-byte uncompressed points (`04 || X(32) || Y(32)`).
+    // The session key is HKDF-SHA256(sharedSecret.x, salt = first 20 bytes of
+    // (senderNonce ⊕ requesterNonce)) and the AES-GCM IV is the LAST 12 bytes
+    // of the same XOR — i.e. fully deterministic from the nonces, NO IV
+    // prefix is sent on the wire. See `EncryptionService` for details.
     try {
       const peerB64 = keyMaterial.dhPublicKey?.keyValue;
-      peerBytes = peerB64 ? Buffer.from(peerB64, 'base64') : Buffer.alloc(0);
-      detectedCurve = EncryptionService.detectCurveFromBytes(peerBytes);
+      const peerBytes = peerB64 ? EncryptionService.decodePeerKeyForDiagnostics(peerB64) : Buffer.alloc(0);
       const head = peerBytes.subarray(0, Math.min(8, peerBytes.length)).toString('hex');
       logger.info('Worker: HIU keyMaterial received', {
         transactionId,
         cryptoAlg: keyMaterial.cryptoAlg,
         curveLabel: keyMaterial.curve,
-        detectedCurve,
         keyValueLength: peerB64?.length || 0,
         keyBytesLength: peerBytes.length,
         keyHead: head,
+        firstByte: peerBytes[0]?.toString(16),
         nonceLength: keyMaterial.nonce ? Buffer.from(keyMaterial.nonce, 'base64').length : 0,
       });
     } catch {
       // diagnostic only
     }
 
-    const ownKeyPair = EncryptionService.generateECDHKeyPair(detectedCurve);
+    const ownKeyPair = EncryptionService.generateECDHKeyPair();
 
-    let sessionKey: Buffer;
+    let session: { sessionKey: Buffer; iv: Buffer };
     try {
-      sessionKey = EncryptionService.deriveSharedSecret(
+      session = EncryptionService.deriveSession(
         ownKeyPair.privateKey,
         keyMaterial.dhPublicKey.keyValue,
         ownKeyPair.nonce,
@@ -153,34 +191,24 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       logger.error('Worker: ECDH derive failed', {
         transactionId,
         error: e?.message,
-        detectedCurve,
         keyValuePrefix: keyMaterial.dhPublicKey?.keyValue?.slice(0, 16),
       });
       throw e;
     }
-    // Mirror the peer's curve label so it can decrypt with its existing
-    // crypto stack. Many HIUs hard-code "Curve25519" as the curve label even
-    // when they're actually using P-256 — sending the literal "P-256"
-    // confuses them, so we echo "Curve25519" while shipping the right key.
-    const wireCurveLabel = keyMaterial.curve || 'Curve25519';
-    const wireParameters = detectedCurve === 'prime256v1'
-      ? 'secp256r1/uncompressed point'
-      : detectedCurve === 'X448'
-        ? 'Curve448/56byte random key'
-        : 'Curve25519/32byte random key';
+
     const sessionKeyMaterial = {
       cryptoAlg: 'ECDH',
-      curve: wireCurveLabel,
+      curve: 'Curve25519',
       dhPublicKey: {
         expiry: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-        parameters: wireParameters,
+        parameters: 'Curve25519/32byte random key',
         keyValue: ownKeyPair.publicKey,
       },
       nonce: ownKeyPair.nonce,
     };
 
     const makeEntry = (dataString: string, careContextReference: string) => {
-      const content = EncryptionService.encryptWithSessionKey(dataString, sessionKey);
+      const content = EncryptionService.encryptWithSessionKey(dataString, session.sessionKey, session.iv);
       return {
         content,
         media: 'application/fhir+json',
@@ -189,11 +217,18 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       };
     };
 
-    // Build one FHIR bundle + entry per care context
-    const entries: Array<{ content: string; media: string; checksum: string; careContextReference: string }> = [];
+    // Build one FHIR bundle + entry per care context. The profile is forced
+    // to the per-cc hiType so the BUNDLE we push matches the hiType we
+    // ADVERTISED on link/discover. NRCeS profiles (OPConsultRecord,
+    // DischargeSummaryRecord, PrescriptionRecord, DiagnosticReportRecord,
+    // ImmunizationRecord, WellnessRecord, HealthDocumentRecord) are accepted
+    // by ABDM-certified PHR apps; sending a mismatched profile causes the
+    // PHR app to silently drop the entry.
+    const entries: Array<{ content: string; media: string; checksum: string; careContextReference: string; hiType: AbdmHiType }> = [];
 
-    for (const cc of validContexts) {
+    for (const { cc, hiType } of validContexts) {
       const enc = cc.encounter!;
+      const profileOverride = hiTypeToProfile(hiType);
       try {
         const fhirBundle = buildFHIRBundle({
           patient: consent.patient,
@@ -220,23 +255,40 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
             reason: im.reason,
             notes: im.notes,
           })),
+          profileOverride,
         });
-        entries.push(makeEntry(JSON.stringify(fhirBundle), cc.careContextId));
+        entries.push({ ...makeEntry(JSON.stringify(fhirBundle), cc.careContextId), hiType });
       } catch (buildErr: any) {
         logger.warn('Worker: Failed to build FHIR bundle for encounter, using fallback', {
           encounterId: enc.id,
           error: buildErr.message,
         });
         const fallback = buildBasicFHIRBundle([enc]);
-        entries.push(makeEntry(JSON.stringify(fallback), cc.careContextId));
+        entries.push({ ...makeEntry(JSON.stringify(fallback), cc.careContextId), hiType });
       }
     }
 
-    // If no entries were built (e.g. no encounters in range), push an empty collection
+    // If no entries were built (e.g. no encounters in range OR all dropped
+    // by the consent-hiType filter), do NOT push a synthetic empty bundle —
+    // ABDM treats that as "data delivered" which misleads the user. Instead
+    // skip the push entirely and notify FAILED with reason "no records".
     if (entries.length === 0) {
-      const emptyBundle = buildBasicFHIRBundle([]);
-      entries.push(makeEntry(JSON.stringify(emptyBundle), careContextsWithEnc[0]?.careContextId || ''));
+      logger.info('Worker: No care contexts match consent scope, marking transfer as FAILED with no-data', {
+        transactionId,
+        dateRange,
+        consentedHiTypes: hiTypes,
+      });
+      throw new Error('No care contexts match the consent scope (date range + hiTypes)');
     }
+
+    logger.info('Worker: Built FHIR bundles per consented hiType', {
+      transactionId,
+      bundleCount: entries.length,
+      hiTypeBreakdown: entries.reduce((acc, e) => {
+        acc[e.hiType] = (acc[e.hiType] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>),
+    });
 
     // ABDM data push supports pagination (pageNumber is 0-indexed, pageCount is
     // the total number of pages). Split entries into bounded pages so large
@@ -251,6 +303,15 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     const pageCount = pages.length;
 
     for (let pageNumber = 0; pageNumber < pageCount; pageNumber++) {
+      // ABDM /v3/.../on-request expects entries in the shape
+      // `{ content, media, checksum, careContextReference }`. We carry hiType
+      // internally for diagnostics/notification but strip it from the wire.
+      const wireEntries = pages[pageNumber].map(({ content, media, checksum, careContextReference }) => ({
+        content,
+        media,
+        checksum,
+        careContextReference,
+      }));
       await abdmClient.post(dataPushUrl, {
         pageNumber,
         pageCount,
@@ -259,7 +320,7 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
         // its decryption keypair. The push is sent HIP→HIU directly (ABDM is not
         // in the push path), so this extra field is safe and only read by the HIU.
         consentId: consentAbdmId,
-        entries: pages[pageNumber],
+        entries: wireEntries,
         keyMaterial: sessionKeyMaterial,
       });
       logger.info('Worker: pushed data page', {

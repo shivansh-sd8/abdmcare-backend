@@ -129,23 +129,42 @@ export type ProfileName =
   | 'ImmunizationRecord'
   | 'WellnessRecord';
 
+/**
+ * Pick the right NRCeS FHIR profile for an encounter. Mirrors
+ * `deriveHiType()` in `modules/hip/discovery-helpers.ts` so the profile we
+ * BUILD on data push matches the hiType we ADVERTISED on link/discover. Any
+ * divergence between the two leads to consumers (PHR apps, HIUs) refusing
+ * the bundle because it doesn't match the consented hiType.
+ *
+ * Priority order (must match `deriveHiType`):
+ *   1. Immunization-only (dose + no diagnosis + no investigation) →
+ *      ImmunizationRecord
+ *   2. IPD with admission                                          →
+ *      DischargeSummaryRecord
+ *   3. Investigation-only (no diagnosis + no prescription)         →
+ *      DiagnosticReportRecord
+ *   4. Prescription-only (no diagnosis + no investigation)         →
+ *      PrescriptionRecord
+ *   5. Anything else (incl. OPD/TELE/EMERGENCY with diagnosis)     →
+ *      OPConsultRecord
+ */
 function selectProfile(input: FHIRBundleInput): ProfileName {
   if (input.profileOverride) return input.profileOverride;
 
   const enc = input.encounter;
 
-  // Immunization-only encounters (vaccination camps, well-baby clinic) — when
-  // we have at least one dose AND no clinical diagnosis or investigation, that
-  // is the canonical ImmunizationRecord.
   const hasImmunizations = (input.immunizations?.length || 0) > 0;
-  const hasClinicalContent = !!(
-    input.encounter.finalDiagnosis ||
-    input.encounter.diagnosis ||
-    (input.investigations?.length || 0) > 0 ||
+  const hasInvestigations = (input.investigations?.length || 0) > 0;
+  const hasPrescriptions =
     (input.prescriptions?.length || 0) > 0 ||
-    (input.encounterPrescriptions?.length || 0) > 0
+    (input.encounterPrescriptions?.length || 0) > 0;
+  const hasDiagnosis = !!(
+    enc.finalDiagnosis ||
+    enc.diagnosis ||
+    enc.provisionalDiagnosis
   );
-  if (hasImmunizations && !hasClinicalContent) {
+
+  if (hasImmunizations && !hasDiagnosis && !hasInvestigations) {
     return 'ImmunizationRecord';
   }
 
@@ -153,15 +172,17 @@ function selectProfile(input: FHIRBundleInput): ProfileName {
     return 'DischargeSummaryRecord';
   }
 
-  if (enc.type === 'OPD' || enc.type === 'TELECONSULTATION') {
-    return 'OPConsultRecord';
+  if (hasInvestigations && !hasDiagnosis && !hasPrescriptions) {
+    return 'DiagnosticReportRecord';
   }
 
-  if (enc.type === 'EMERGENCY') {
-    return 'OPConsultRecord';
+  if (hasPrescriptions && !hasDiagnosis && !hasInvestigations) {
+    return 'PrescriptionRecord';
   }
 
-  return 'HealthDocumentRecord';
+  // Default — covers OPD, TELECONSULTATION, EMERGENCY, and any encounter
+  // with a diagnosis.
+  return 'OPConsultRecord';
 }
 
 // ─── Main builder ────────────────────────────────────────────────────────────
