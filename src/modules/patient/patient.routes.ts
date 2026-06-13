@@ -84,7 +84,12 @@ router.get(
  */
 router.get(
   '/search',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  // Patient lookup is needed across the workflow:
+  // - Clinical (DOCTOR/NURSE) for charts
+  // - Front desk (RECEPTIONIST) for registration / billing
+  // - Lab + Pharmacy to identify the patient on a sample / Rx slip.
+  // Hospital scope is enforced in the service.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'),
   [
     query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
     query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100'),
@@ -113,13 +118,19 @@ router.get(
  */
 router.get(
   '/:id',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'),
+  // Full patient record (incl. encounters/admissions) is restricted to
+  // clinical + administrative roles. Lab and Pharmacy use the narrower
+  // /uhid/:uhid lookup or the EHR profile endpoint — they should not see
+  // the full encounter/admission history embedded in this response.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   patientController.getPatientById
 );
 
 router.get(
   '/uhid/:uhid',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  // UHID lookup is the safe identity endpoint — usable by everyone who
+  // has to act on a patient (samples, dispensing, etc.).
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'),
   patientController.getPatientByUHID
 );
 

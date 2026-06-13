@@ -40,6 +40,112 @@ interface UpdateConsultationRequest {
 
 class EncounterService {
 
+  /**
+   * Reconcile the pharmacy queue (Prescription rows) with the
+   * doctor's *current* Rx intent for this encounter (the
+   * EncounterPrescription rows).
+   *
+   * Why this exists: previously the OPD bridge only handled the
+   * happy path of "single PENDING prescription that we can update in
+   * place". The moment the pharmacist dispensed the first batch and
+   * the doctor re-opened the encounter to add more medicines, those
+   * new meds were silently dropped from the pharmacy queue — the
+   * existing Prescription was DISPENSED so the bridge skipped, and
+   * no new row was created. This helper fixes that and is the single
+   * source of truth for the OPD-to-pharmacy fan-out, called from
+   * both `updateConsultation` (auto-save / Save Progress) and
+   * `completeConsultation` (Complete & Finalise).
+   *
+   * Behaviour, per encounter:
+   *   • Already-DISPENSED meds stay on their original Prescription
+   *     row (we never re-queue or move them).
+   *   • The "queueable remainder" — meds the doctor has typed but
+   *     the pharmacy hasn't dispensed yet — lives on a single
+   *     PENDING Prescription row, which we update in place if one
+   *     exists, create if it doesn't, or delete if there's nothing
+   *     left to dispense.
+   *   • Idempotent: safe to call repeatedly with the same input.
+   *
+   * Medication identity is `name+dosage`, lower-cased. Two rows
+   * with "Paracetamol 500mg" + "After food" vs the same name +
+   * "Before food" are treated as the same medication for queueing
+   * (we update the latest instructions/frequency on the PENDING
+   * row), but a different dosage like "Paracetamol 650mg" is
+   * treated as a separate medication.
+   */
+  private async syncPrescriptionsToQueue(encounterId: string): Promise<void> {
+    const enc = await prisma.encounter.findUnique({
+      where: { id: encounterId },
+      include: {
+        prescriptions: true,
+        patient: { select: { hospitalId: true } },
+      },
+    });
+    if (!enc) return;
+
+    const sig = (m: { medicineName?: string; name?: string; dosage?: string }) =>
+      `${(m.medicineName || (m as any).name || '').trim().toLowerCase()}|${(m.dosage || '').trim().toLowerCase()}`;
+
+    const intent = enc.prescriptions.map((p) => ({
+      name:         p.medicineName,
+      dosage:       p.dosage,
+      frequency:    p.frequency,
+      duration:     p.duration,
+      instructions: p.instructions || '',
+      quantity:     (p as any).quantity ?? 1,
+      price:        (p as any).price ? Number((p as any).price) : null,
+    }));
+
+    const existing = await prisma.prescription.findMany({
+      where:   { encounterId, status: { not: 'CANCELLED' } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const dispensedSigs = new Set<string>();
+    for (const rx of existing) {
+      if (rx.status === 'DISPENSED') {
+        const meds = (rx.medications as any[]) || [];
+        for (const m of meds) dispensedSigs.add(sig(m));
+      }
+    }
+
+    const queueable = intent.filter((m) => !dispensedSigs.has(sig(m)));
+    const pending = existing.find((r) => r.status === 'PENDING');
+
+    if (queueable.length === 0) {
+      if (pending) {
+        await prisma.prescription.delete({ where: { id: pending.id } });
+        logger.info('Cleared empty PENDING prescription', { encounterId, prescriptionId: pending.id });
+      }
+      return;
+    }
+
+    if (pending) {
+      await prisma.prescription.update({
+        where: { id: pending.id },
+        data: {
+          medications: queueable,
+          diagnosis:   enc.finalDiagnosis || enc.diagnosis || (pending as any).diagnosis,
+          notes:       enc.notes || (pending as any).notes,
+        },
+      });
+      logger.info('Updated PENDING prescription', { encounterId, prescriptionId: pending.id, items: queueable.length });
+    } else {
+      const created = await prisma.prescription.create({
+        data: {
+          patientId:   enc.patientId,
+          doctorId:    enc.doctorId,
+          encounterId: enc.id,
+          admissionId: (enc as any).admissionId ?? undefined,
+          medications: queueable,
+          diagnosis:   enc.finalDiagnosis || enc.diagnosis || undefined,
+          notes:       enc.notes || undefined,
+        },
+      });
+      logger.info('Created new PENDING prescription', { encounterId, prescriptionId: created.id, items: queueable.length });
+    }
+  }
+
   // ── Recalculate encounter status from actual DB state ────────────────────
   // Handles race conditions where lab/pharmacy complete out-of-order.
   // Called by investigation/prescription services after completing items.
@@ -353,7 +459,10 @@ class EncounterService {
         },
       });
 
-      // Replace prescriptions: delete existing ones first, then recreate
+      // Replace prescriptions: delete existing ones first, then recreate.
+      // The EncounterPrescription table is the doctor's *current intent*
+      // — replacing it on every save is correct since the frontend
+      // always sends the full list (it loads existing on open).
       if (data.prescriptions !== undefined) {
         await prisma.encounterPrescription.deleteMany({ where: { encounterId: id } });
         if (data.prescriptions.length > 0) {
@@ -364,6 +473,9 @@ class EncounterService {
             })),
           });
         }
+        // Fan out to the pharmacy queue. Delta-aware: keeps already
+        // dispensed meds intact, adds the new ones to the PENDING row.
+        await this.syncPrescriptionsToQueue(id);
       }
 
       // Replace lab orders: delete existing ones first, then recreate
@@ -381,22 +493,31 @@ class EncounterService {
           });
         }
 
-        // Sync Investigation rows: add newly-ordered ones, remove cancelled ORDERED ones
-        const existingInvestigations = await prisma.investigation.findMany({
-          where: { encounterId: id, status: { in: ['ORDERED', 'SAMPLE_COLLECTED'] } },
-          select: { id: true, testName: true },
+        // Sync Investigation rows with the doctor's current lab intent.
+        //
+        // Two lookups, two purposes:
+        //   • `allInvestigations` (any non-cancelled status) feeds the
+        //     "what's already tracked?" check so we don't duplicate a
+        //     completed or in-progress investigation on every save.
+        //   • `cancellable` (still in early lifecycle) feeds the
+        //     removal logic so we never delete a test the lab tech has
+        //     already started or finished — those stay as history.
+        const allInvestigations = await prisma.investigation.findMany({
+          where: { encounterId: id, status: { not: 'CANCELLED' } },
+          select: { id: true, testName: true, status: true },
         });
         const newTestNames = new Set(data.labOrders.map(l => l.testName.toLowerCase()));
-        const existingTestNames = new Set(existingInvestigations.map(i => i.testName.toLowerCase()));
+        const allTrackedNames = new Set(allInvestigations.map(i => i.testName.toLowerCase()));
 
-        // Remove ORDERED investigations that are no longer in the list
-        const toRemove = existingInvestigations.filter(i => !newTestNames.has(i.testName.toLowerCase()));
+        const toRemove = allInvestigations.filter(i =>
+          !newTestNames.has(i.testName.toLowerCase()) &&
+          (['ORDERED', 'SAMPLE_COLLECTED'] as string[]).includes(i.status as string),
+        );
         if (toRemove.length > 0) {
           await prisma.investigation.deleteMany({ where: { id: { in: toRemove.map(i => i.id) } } });
         }
 
-        // Add new investigations for tests not yet tracked
-        const toAdd = data.labOrders.filter(o => !existingTestNames.has(o.testName.toLowerCase()));
+        const toAdd = data.labOrders.filter(o => !allTrackedNames.has(o.testName.toLowerCase()));
         if (toAdd.length > 0) {
           const enc = await prisma.encounter.findUnique({
             where: { id },
@@ -613,45 +734,9 @@ class EncounterService {
       }
 
       // ── Bridge EncounterPrescriptions → Prescription (pharmacy queue) ─────
-      // Upsert: update existing Prescription or create new one
-      if (encounter.prescriptions.length > 0) {
-        const medications = encounter.prescriptions.map((p) => ({
-          name:         p.medicineName,
-          dosage:       p.dosage,
-          frequency:    p.frequency,
-          duration:     p.duration,
-          instructions: p.instructions || '',
-          quantity:     p.quantity ?? 1,
-          price:        p.price ? Number(p.price) : null,
-        }));
-        const existingRx = await prisma.prescription.findFirst({ where: { encounterId: id } });
-        if (existingRx) {
-          // Update existing prescription medications (only if still PENDING — not yet dispensed)
-          if (existingRx.status === 'PENDING') {
-            await prisma.prescription.update({
-              where: { id: existingRx.id },
-              data: {
-                medications,
-                diagnosis: data?.diagnosis || encounter.diagnosis || undefined,
-                notes:     data?.notes    || encounter.notes    || undefined,
-              },
-            });
-          }
-        } else {
-          await prisma.prescription.create({
-            data: {
-              patientId:   encounter.patientId,
-              doctorId:    encounter.doctorId,
-              encounterId: id,
-              admissionId: (encounter as any).admissionId ?? undefined,
-              medications,
-              diagnosis:   data?.diagnosis || encounter.diagnosis || undefined,
-              notes:       data?.notes    || encounter.notes    || undefined,
-            },
-          });
-        }
-        logger.info('Synced Prescription record from EncounterPrescriptions', { encounterId: id });
-      }
+      // Single-source helper that handles the "doctor added more meds
+      // after the first batch was already dispensed" case correctly.
+      await this.syncPrescriptionsToQueue(id);
 
       // ── Zero-cost auto-complete ─────────────────────────────────────────────
       // If no labs, no Rx, and fee is 0 → skip BILLING_PENDING, go to COMPLETED
@@ -778,6 +863,8 @@ class EncounterService {
           description:   `OPD consultation payment — ${encounter.encounterId}`,
           paidAt:        new Date(),
           createdBy:     currentUser?.id,
+          collectedById: currentUser?.id,
+          collectedAt:   new Date(),
           items: {
             consultationFee:  Number(encounter.consultationFee  ?? 0),
             labCharges:       Number(encounter.labCharges       ?? 0),

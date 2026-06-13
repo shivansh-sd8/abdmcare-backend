@@ -144,8 +144,13 @@ export async function getAdmission(req: Request, res: Response, next: NextFuncti
 export async function admitPatient(req: Request, res: Response, next: NextFunction) {
   try {
     const hospitalId = resolveHospitalId(req);
-    const admittedBy = (req as any).user?.name;
-    const data = await ipdService.admitPatient(hospitalId, { ...req.body, admittedBy });
+    const user = (req as any).user;
+    const admittedBy = user?.name;
+    const data = await ipdService.admitPatient(hospitalId, {
+      ...req.body,
+      admittedBy,
+      collectedById: user?.id,
+    });
     res.status(201).json({ success: true, data });
   } catch (e) { next(e); }
 }
@@ -161,8 +166,13 @@ export async function updateAdmission(req: Request, res: Response, next: NextFun
 export async function dischargePatient(req: Request, res: Response, next: NextFunction) {
   try {
     const hospitalId = resolveHospitalId(req);
-    const userRole = (req as any).user?.role;
-    const data = await ipdService.dischargePatient(req.params.admissionId, hospitalId, req.body, userRole);
+    const user = (req as any).user;
+    const data = await ipdService.dischargePatient(
+      req.params.admissionId,
+      hospitalId,
+      { ...req.body, collectedById: user?.id },
+      user?.role,
+    );
     ok(res, data);
   } catch (e) { next(e); }
 }
@@ -255,7 +265,11 @@ export async function applyDiscount(req: Request, res: Response, next: NextFunct
 export async function collectPayment(req: Request, res: Response, next: NextFunction) {
   try {
     const hospitalId = resolveHospitalId(req);
-    const data = await ipdService.collectPayment(req.params.admissionId, hospitalId, req.body);
+    const user = (req as any).user;
+    const data = await ipdService.collectPayment(req.params.admissionId, hospitalId, {
+      ...req.body,
+      collectedById: user?.id,
+    });
     ok(res, data);
   } catch (e) { next(e); }
 }

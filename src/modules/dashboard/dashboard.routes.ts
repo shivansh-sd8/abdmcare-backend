@@ -13,7 +13,10 @@ router.use(authenticate);
 
 router.get(
   '/trends',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'),
+  // Operational consult/appointment volume — relevant to clinical staff
+  // and admins. Pharmacy and Lab have their own role-specific dashboards
+  // (pharmacy stock, lab queues), so they're not on this trend chart.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
   dashboardController.getDailyTrends,
 );
 
@@ -39,6 +42,24 @@ router.get(
   '/encounter-status',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
   dashboardController.getEncounterStatus,
+);
+
+// Staff-wise collection breakdown — visible to admins (who own the
+// reconciliation question) and to the receptionist responsible for cash,
+// so they can self-check at the end of a shift.
+router.get(
+  '/staff-collections',
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
+  dashboardController.getStaffCollections,
+);
+
+// Distinct list of users who have actually collected money — feeds the
+// "Collected by" filter on the Billing dashboard. Same audience as the
+// breakdown above.
+router.get(
+  '/payment-collectors',
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
+  dashboardController.listPaymentCollectors,
 );
 
 export default router;

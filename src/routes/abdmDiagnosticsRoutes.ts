@@ -8,19 +8,26 @@ import prisma from '../common/config/database';
 const router = Router();
 
 router.use(authenticate);
-router.use(authorize('SUPER_ADMIN', 'ADMIN'));
 
-router.get('/bridge-services', asyncHandler(async (_req: Request, res: Response) => {
+// ABDM bridge config + per-hospital registration are admin-level
+// (a hospital admin onboarding their own facility).
+// Platform-global ABDM endpoints (transaction-stats, raw bridge service
+// listing, raw config) are SUPER_ADMIN-only — they expose cross-hospital
+// infrastructure traffic and platform credentials.
+const ADMIN_ROLES = ['SUPER_ADMIN', 'ADMIN'] as const;
+const PLATFORM_ROLES = ['SUPER_ADMIN'] as const;
+
+router.get('/bridge-services', authorize(...PLATFORM_ROLES), asyncHandler(async (_req: Request, res: Response) => {
   const services = await abdmClient.getBridgeServices();
   res.json({ success: true, data: services });
 }));
 
-router.get('/bridge-service/:serviceId', asyncHandler(async (req: Request, res: Response) => {
+router.get('/bridge-service/:serviceId', authorize(...ADMIN_ROLES), asyncHandler(async (req: Request, res: Response) => {
   const services = await abdmClient.getBridgeServiceById(req.params.serviceId);
   res.json({ success: true, data: services });
 }));
 
-router.get('/config', asyncHandler(async (_req: Request, res: Response) => {
+router.get('/config', authorize(...ADMIN_ROLES), asyncHandler(async (_req: Request, res: Response) => {
   res.json({
     success: true,
     data: {
@@ -35,7 +42,7 @@ router.get('/config', asyncHandler(async (_req: Request, res: Response) => {
   });
 }));
 
-router.get('/transaction-stats', asyncHandler(async (_req: Request, res: Response) => {
+router.get('/transaction-stats', authorize(...PLATFORM_ROLES), asyncHandler(async (_req: Request, res: Response) => {
   // ABDM transactions are platform-wide infrastructure traffic — they aren't
   // tagged with a hospitalId, so the SUPER_ADMIN "viewing as" scope cannot
   // narrow them down. Always return the global counts.
@@ -68,7 +75,7 @@ router.get('/transaction-stats', asyncHandler(async (_req: Request, res: Respons
  *     "callbackUrl": "https://..."  // default: abdmConfig.callbackUrl
  *   }
  */
-router.post('/register-services', asyncHandler(async (req: Request, res: Response) => {
+router.post('/register-services', authorize(...ADMIN_ROLES), asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const hospital = await prisma.hospital.findUnique({ where: { id: user.hospitalId } });
   if (!hospital) {

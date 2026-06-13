@@ -11,6 +11,14 @@ interface CreatePaymentDTO {
   description?: string;
   items?: any;
   createdBy?: string;
+  /**
+   * The user who actually took the money. Should be the receptionist
+   * (or whoever) at the counter — falls back to `createdBy` when the
+   * caller didn't pass it explicitly.
+   */
+  collectedById?: string;
+  /** Marks the payment PAID immediately; useful for cash collections. */
+  markPaid?: boolean;
 }
 
 interface UpdatePaymentDTO {
@@ -18,6 +26,24 @@ interface UpdatePaymentDTO {
   transactionId?: string;
   paidAt?: Date;
 }
+
+/**
+ * Standard include shape for payments that surfaces the collector's name
+ * & role on every read so frontends and exports never have to do another
+ * lookup. Kept here (not duplicated per call site) so the receipt UI,
+ * payment list, and IPD/encounter responses all stay consistent.
+ */
+const collectorInclude = {
+  collectedBy: {
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      role: true,
+      email: true,
+    },
+  },
+} as const;
 
 class PaymentService {
   async createPayment(data: CreatePaymentDTO) {
@@ -46,6 +72,22 @@ class PaymentService {
 
     const receiptNumber = `RCP-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
 
+    // Two distinct flows merge here:
+    //
+    //   1. Counter-cash style (`markPaid: true`) — the staff is creating
+    //      and collecting in the same call, so attribute the collection to
+    //      them right now.
+    //   2. Bill-now-collect-later — admin/clinician records a charge but
+    //      the receptionist will physically take the money later. We
+    //      deliberately leave `collectedById` NULL on the row so the
+    //      eventual mark-as-paid call (which knows who's actually at the
+    //      counter) can stamp it without us pre-attributing to whoever
+    //      happened to type the bill.
+    const willMarkPaid = data.markPaid === true;
+    const collectorIdForRow = willMarkPaid
+      ? (data.collectedById || data.createdBy)
+      : undefined;
+
     const payment = await prisma.payment.create({
       data: {
         patientId: data.patientId,
@@ -57,7 +99,10 @@ class PaymentService {
         items: data.items,
         receiptNumber,
         createdBy: data.createdBy,
-        status: 'PENDING',
+        collectedById: collectorIdForRow,
+        collectedAt: willMarkPaid ? new Date() : undefined,
+        status: willMarkPaid ? 'PAID' : 'PENDING',
+        paidAt: willMarkPaid ? new Date() : undefined,
       },
       include: {
         patient: {
@@ -80,6 +125,7 @@ class PaymentService {
             scheduledAt: true,
           },
         },
+        ...collectorInclude,
       },
     });
 
@@ -94,8 +140,18 @@ class PaymentService {
     endDate?: Date;
     page?: number;
     limit?: number;
+    collectedById?: string;
   }) {
-    const { hospitalId, patientId, status, startDate, endDate, page = 1, limit = 50 } = filters;
+    const {
+      hospitalId,
+      patientId,
+      status,
+      startDate,
+      endDate,
+      page = 1,
+      limit = 50,
+      collectedById,
+    } = filters;
     const skip = (page - 1) * limit;
 
     const where: any = {};
@@ -103,6 +159,14 @@ class PaymentService {
     if (hospitalId) where.hospitalId = hospitalId;
     if (patientId) where.patientId = patientId;
     if (status) where.status = status;
+    // 'unattributed' is a synthetic value the UI sends so admins can
+    // surface receipts that pre-date the collector field (or were
+    // imported from outside). Treat it as "no collector linked".
+    if (collectedById === 'unattributed') {
+      where.collectedById = null;
+    } else if (collectedById) {
+      where.collectedById = collectedById;
+    }
 
     if (startDate || endDate) {
       where.createdAt = {};
@@ -137,6 +201,7 @@ class PaymentService {
               scheduledAt: true,
             },
           },
+          ...collectorInclude,
         },
       }),
       prisma.payment.count({ where }),
@@ -187,6 +252,7 @@ class PaymentService {
             },
           },
         },
+        ...collectorInclude,
       },
     });
 
@@ -216,12 +282,26 @@ class PaymentService {
       throw new AppError('Access denied: Payment belongs to different hospital', 403);
     }
 
+    // When this update is the moment a PENDING payment becomes PAID, the
+    // current user IS the collector — stamp them onto the row so dashboards
+    // and reports can credit the right person. We don't overwrite an
+    // existing collector (e.g. for a transactionId-only edit on an already
+    // paid row).
+    const becomingPaid =
+      data.status === 'PAID' && payment.status !== 'PAID';
+
     const updated = await prisma.payment.update({
       where: { id },
       data: {
         status: data.status as any,
         transactionId: data.transactionId || undefined,
         paidAt: data.paidAt,
+        ...(becomingPaid && currentUser?.id
+          ? {
+              collectedById: payment.collectedById ?? currentUser.id,
+              collectedAt: payment.collectedAt ?? new Date(),
+            }
+          : {}),
       },
       include: {
         patient: {
@@ -231,6 +311,7 @@ class PaymentService {
             uhid: true,
           },
         },
+        ...collectorInclude,
       },
     });
 
@@ -287,7 +368,10 @@ class PaymentService {
       }),
       prisma.payment.findMany({
         where: directFilter,
-        include: { patient: { select: patientSelect } },
+        include: {
+          patient: { select: patientSelect },
+          ...collectorInclude,
+        },
         orderBy: { createdAt: 'desc' },
         take: 500,
       }),
@@ -447,26 +531,36 @@ class PaymentService {
       }
     });
 
-    // Separate bills into primary (used for stats) and detail (for visibility only)
-    const primaryBills = allBills.filter(b => !b.isDetail);
-    const pendingBills = primaryBills.filter(b => b.status !== 'PAID' && b.outstanding > 0);
-
-    // Completed Payment rows (receipts) — not billed items, just records of money received
+    // Standalone pending payments (not linked to encounter/admission) ARE
+    // bills in their own right — admins type these up so the receptionist
+    // can later collect. We add them to `allBills` first so every
+    // downstream consumer (Billing analytics, "Outstanding by service",
+    // patient charge breakdown) sees them; they'll naturally also appear
+    // in `pendingBills` once we derive that below.
     const completedPayments = allPayments.filter((p: any) => p.status === 'PAID');
     const pendingPaymentRecords = allPayments.filter((p: any) => p.status === 'PENDING');
 
-    // Standalone pending payments (not linked to encounter/admission) are actual bills
     pendingPaymentRecords.forEach((p: any) => {
       const isReceipt = p.admissionId && admissionIds.has(p.admissionId);
-      if (!isReceipt) {
-        const amt = parseFloat(p.amount || '0');
-        pendingBills.push({
-          id: p.id, type: 'PAYMENT', patient: p.patient, date: p.createdAt,
-          total: amt, paid: 0, outstanding: amt,
-          description: p.description, status: 'PENDING',
-        });
-      }
+      if (isReceipt) return;
+      const amt = parseFloat(p.amount || '0');
+      if (amt <= 0) return;
+      allBills.push({
+        id: p.id,
+        type: 'PAYMENT',
+        patient: p.patient,
+        date: p.createdAt,
+        total: amt,
+        paid: 0,
+        outstanding: amt,
+        description: p.description,
+        status: 'PENDING',
+      });
     });
+
+    // Separate bills into primary (used for stats) and detail (for visibility only)
+    const primaryBills = allBills.filter(b => !b.isDetail);
+    const pendingBills = primaryBills.filter(b => b.status !== 'PAID' && b.outstanding > 0);
 
     // ── Patient-wise aggregation — primary sources only ──────────────────────
     const patientAgg: Record<string, any> = {};

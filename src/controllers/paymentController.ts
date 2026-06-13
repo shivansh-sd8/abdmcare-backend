@@ -16,6 +16,7 @@ class PaymentController {
         ...req.body,
         hospitalId,
         createdBy: currentUser?.id,
+        collectedById: currentUser?.id,
       });
 
       return res.status(201).json({
@@ -31,7 +32,7 @@ class PaymentController {
   async getAllPayments(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<Response | void> {
     try {
       const currentUser = req.user;
-      const { patientId, status, startDate, endDate, page, limit } = req.query;
+      const { patientId, status, startDate, endDate, page, limit, collectedById } = req.query;
 
       // Non-SUPER_ADMIN: their JWT hospital. SUPER_ADMIN with global "viewing
       // as" scope: that hospital. SUPER_ADMIN unscoped: explicit query param,
@@ -46,6 +47,7 @@ class PaymentController {
         endDate: endDate ? new Date(endDate as string) : undefined,
         page: page ? parseInt(page as string) : undefined,
         limit: limit ? parseInt(limit as string) : undefined,
+        collectedById: collectedById as string | undefined,
       });
 
       return res.status(200).json({

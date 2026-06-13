@@ -23,6 +23,7 @@ import documentRoutes from '../modules/document/document.routes';
 import immunizationRoutes from './immunizationRoutes';
 import enquiryRoutes from '../modules/enquiry/enquiry.routes';
 import dashboardRoutes from '../modules/dashboard/dashboard.routes';
+import reportRoutes from '../modules/reports/report.routes';
 
 const router = Router();
 
@@ -50,5 +51,6 @@ router.use('/documents', documentRoutes);
 router.use('/immunizations', immunizationRoutes);
 router.use('/enquiry', enquiryRoutes);
 router.use('/dashboard', dashboardRoutes);
+router.use('/reports', reportRoutes);
 
 export default router;

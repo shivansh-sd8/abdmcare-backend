@@ -228,6 +228,8 @@ export class IPDService {
     advanceMethod?: string;
     advanceTransactionRef?: string;
     notes?: string;
+    /** User who actually took the advance payment at the counter. */
+    collectedById?: string;
   }) {
     // Verify patient belongs to this hospital
     const patient = await prisma.patient.findUnique({
@@ -301,7 +303,9 @@ export class IPDService {
       });
     }
 
-    // If advance was paid, record a payment entry
+    // If advance was paid, record a payment entry. The user driving this
+    // request is the staff who took the cash, so attribute the collection
+    // to them — that's what shows up under "Staff collections" on reports.
     if (data.advancePaid && data.advancePaid > 0) {
       await prisma.payment.create({
         data: {
@@ -315,6 +319,9 @@ export class IPDService {
           transactionId: data.advanceTransactionRef || undefined,
           receiptNumber: generateReceiptNumber(),
           description:   `IPD Advance — ${admissionNumber}`,
+          createdBy:     data.collectedById,
+          collectedById: data.collectedById,
+          collectedAt:   new Date(),
         },
       });
     }
@@ -522,6 +529,8 @@ export class IPDService {
     paymentCollected?: number;
     paymentMethod?: string;   // CASH, UPI, CARD, BANK_TRANSFER
     transactionRef?: string;
+    /** Staff who actually collected the discharge settlement. */
+    collectedById?: string;
   }, _userRole?: string) {
     const admission = await prisma.admission.findFirst({
       where:   { id: admissionId, hospitalId },
@@ -649,6 +658,9 @@ export class IPDService {
           transactionId: data.transactionRef || undefined,
           receiptNumber: generateReceiptNumber(),
           description:   `IPD Discharge — ${admission.admissionNumber} (${days}d)`,
+          createdBy:     data.collectedById,
+          collectedById: data.collectedById,
+          collectedAt:   new Date(),
         },
       });
     }
@@ -759,6 +771,8 @@ export class IPDService {
     amount: number;
     paymentMethod: string;
     transactionRef?: string;
+    /** Staff who took the payment at the counter. */
+    collectedById?: string;
   }) {
     const admission = await prisma.admission.findFirst({
       where: { id: admissionId, hospitalId },
@@ -792,6 +806,14 @@ export class IPDService {
         transactionId: data.transactionRef || undefined,
         receiptNumber: generateReceiptNumber(),
         description:   `IPD Payment — ${admission.admissionNumber}`,
+        createdBy:     data.collectedById,
+        collectedById: data.collectedById,
+        collectedAt:   new Date(),
+      },
+      include: {
+        collectedBy: {
+          select: { id: true, firstName: true, lastName: true, role: true },
+        },
       },
     });
 

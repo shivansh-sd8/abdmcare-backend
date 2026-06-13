@@ -74,7 +74,11 @@ router.post(
 
 router.post(
   '/:id/check-in',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
+  // DOCTOR is allowed here because doctors check in walk-in / next-up
+  // patients themselves when no reception desk is staffed. The service
+  // layer further restricts a DOCTOR to appointments where they are the
+  // assigned doctor, so a doctor can never check in another doctor's row.
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'DOCTOR'),
   appointmentController.checkInAppointment
 );
 

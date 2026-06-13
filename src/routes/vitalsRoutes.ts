@@ -33,7 +33,9 @@ router.get(
 
 router.get(
   '/patient/:patientId/latest',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  // Pharmacist needs the latest vitals (allergies / age / weight) for
+  // safe dispensing decisions — read-only, hospital-scoped in service.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'PHARMACIST'),
   vitalsController.getLatestVitals
 );
 
@@ -45,13 +47,18 @@ router.get(
 
 router.put(
   '/:id',
-  authorize('DOCTOR', 'NURSE'),
+  // Admins must be able to correct mistakenly-recorded vitals (wrong
+  // patient, fat-fingered values) — clinical staff still own the
+  // primary write path.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
   vitalsController.updateVitals
 );
 
 router.delete(
   '/:id',
-  authorize('DOCTOR', 'SUPER_ADMIN'),
+  // ADMIN added so a hospital admin can purge a clearly bogus reading
+  // without escalating to the platform SUPER_ADMIN.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
   vitalsController.deleteVitals
 );
 

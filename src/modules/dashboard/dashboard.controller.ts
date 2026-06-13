@@ -48,6 +48,24 @@ class DashboardController {
       ResponseHandler.success(res, 'Encounter status retrieved', result?.data);
     },
   );
+
+  getStaffCollections = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const currentUser = (req as any).user;
+      const days = Number(req.query.days || 7);
+      const result = await dashboardService.getStaffCollections(currentUser, days);
+      ResponseHandler.success(res, 'Staff collections retrieved', result?.data);
+    },
+  );
+
+  listPaymentCollectors = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const currentUser = (req as any).user;
+      const days = Number(req.query.days || 90);
+      const result = await dashboardService.listPaymentCollectors(currentUser, days);
+      ResponseHandler.success(res, 'Payment collectors retrieved', result?.data);
+    },
+  );
 }
 
 export default new DashboardController();

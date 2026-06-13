@@ -651,7 +651,13 @@ export class AbhaService {
   // SECTION 10 — PATIENT LINKING (local DB)
   // ===========================================================================
 
-  async linkToPatient(abhaNumber: string, patientId: string, abhaAddress?: string, currentUser?: any) {
+  async linkToPatient(
+    abhaNumber: string,
+    patientId: string,
+    abhaAddress?: string,
+    currentUser?: any,
+    opts?: { verified?: boolean; profile?: any },
+  ) {
     try {
       const patient = await prisma.patient.findUnique({ where: { id: patientId } });
       if (!patient) throw new AppError('Patient not found', 404);
@@ -670,6 +676,25 @@ export class AbhaService {
       }
 
       const normalized = abhaNumber.replace(/-/g, '');
+
+      // KYC bookkeeping — distinguish "we have an ABHA number on file" from
+      // "we authenticated the holder against ABDM". The AbhaManagement
+      // Verify/Search → Mobile-OTP / Aadhaar / ABHA-number flows already do
+      // a real /profile/login/verify with ABDM and end up with an ABHA
+      // profile payload; in that case the caller passes verified:true.
+      // For raw "I just typed in this 14-digit number" links, opts is
+      // omitted and we keep the conservative PENDING default.
+      const verified = !!opts?.verified;
+      const profile = opts?.profile && typeof opts.profile === 'object' ? opts.profile : null;
+      const kycStatus = verified ? 'VERIFIED' : 'PENDING';
+      // Aadhaar-linked flag is true only when the upstream verify clearly
+      // came from an Aadhaar / KYC-bound flow. For mobile-OTP-only verify
+      // we know identity but not the Aadhaar binding, so leave it false.
+      const aadhaarLinked = verified && (profile?.aadhaarLinked === true);
+      // We can confidently set mobileLinked=true after any OTP verify,
+      // since ABDM only completes that flow against the registered mobile.
+      const mobileLinked = verified;
+
       // AbhaRecord is a global per-ABHA cache; patientId pointer is informational
       // (the same ABHA may be linked to multiple Patient rows across hospitals).
       // The authoritative per-hospital linkage lives on Patient.abhaNumber.
@@ -682,11 +707,32 @@ export class AbhaService {
         }),
         prisma.abhaRecord.upsert({
           where: { abhaNumber: normalized },
-          create: { abhaNumber: normalized, abhaAddress: abhaAddress || null, patientId, kycStatus: 'PENDING' },
-          update: { ...(abhaAddress && { abhaAddress }) }, // do NOT clobber existing patientId
+          create: {
+            abhaNumber: normalized,
+            abhaAddress: abhaAddress || null,
+            patientId,
+            kycStatus,
+            aadhaarLinked,
+            mobileLinked,
+            ...(profile ? { profileData: profile } : {}),
+          },
+          update: {
+            ...(abhaAddress && { abhaAddress }),
+            // Only ratchet the KYC state UP — never demote a previously
+            // VERIFIED record back to PENDING because a different hospital
+            // re-linked the same ABHA via "type the number" path.
+            ...(verified ? { kycStatus: 'VERIFIED', mobileLinked: true } : {}),
+            ...(verified && aadhaarLinked ? { aadhaarLinked: true } : {}),
+            ...(profile ? { profileData: profile } : {}),
+          },
         }),
       ]);
-      return { message: 'ABHA linked to patient successfully' };
+      return {
+        message: verified
+          ? 'ABHA verified and linked to patient'
+          : 'ABHA linked to patient successfully',
+        kycStatus,
+      };
     } catch (error: any) {
       logger.error('linkToPatient failed', error);
       rethrowServiceError(error);

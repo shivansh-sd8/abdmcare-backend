@@ -15,11 +15,13 @@ router.get(
   encounterController.getDoctorEncounters
 );
 
-// Get doctor's encounters
+// Get a specific doctor's roster of encounters. RECEPTIONIST is excluded
+// here — they have their own appointment + payment views; browsing a
+// clinician's full clinical roster isn't part of the front-desk workflow.
 router.get(
   '/doctor/:doctorId',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'RECEPTIONIST'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
   encounterController.getDoctorEncounters
 );
 

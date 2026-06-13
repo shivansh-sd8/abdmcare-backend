@@ -44,7 +44,10 @@ router.post('/admissions/:admissionId/discharge-ready',    authorize('SUPER_ADMI
 // Nurses are allowed to *record vitals only* via this same endpoint; the
 // service layer rejects prescription/lab payloads from non-doctor roles so
 // scope of practice is preserved.
-router.get('/admissions/:admissionId/rounds',              authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'), getAdmissionRounds);
+// Clinical ward-round notes — restricted to clinical + admin staff.
+// RECEPTIONIST stays on the admission summary / billing endpoints and
+// does not see SOAP-style ward notes.
+router.get('/admissions/:admissionId/rounds',              authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'), getAdmissionRounds);
 router.post('/admissions/:admissionId/rounds',             authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'), createAdmissionRound);
 
 // Discount (admin-only)

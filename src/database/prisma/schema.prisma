@@ -541,6 +541,14 @@ model Payment {
   
   paidAt          DateTime?
   createdBy       String?
+
+  // Who actually collected the money at the counter. Distinct from
+  // `createdBy` because in some flows (e.g. an admin generates a bill, the
+  // receptionist later collects) those are different people. We need a
+  // proper FK so admin reports / dashboards can group cleanly by staff.
+  collectedById   String?
+  collectedBy     User?         @relation("PaymentCollector", fields: [collectedById], references: [id])
+  collectedAt     DateTime?
   
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
@@ -550,6 +558,7 @@ model Payment {
   @@index([admissionId])
   @@index([status])
   @@index([createdAt])
+  @@index([collectedById])
   @@map("payments")
 }
 
@@ -801,6 +810,7 @@ model User {
   doctor        Doctor?
   notifications Notification[]
   auditLogs     AuditLog[]
+  paymentsCollected Payment[]  @relation("PaymentCollector")
   
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt

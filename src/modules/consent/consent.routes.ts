@@ -27,13 +27,19 @@ router.post(
   consentController.createConsentRequest
 );
 
-router.get('/', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getAllConsents);
+// Reads are open to clinical and front-desk staff so the nurse can
+// confirm consent before a procedure and the receptionist can answer
+// "is consent in place?" at check-in. Writes (request/revoke) stay
+// restricted to clinicians and admins.
+const READ_ROLES = ['SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'] as const;
 
-router.get('/stats', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getConsentStats);
+router.get('/', authorize(...READ_ROLES), consentController.getAllConsents);
 
-router.get('/patient/:patientId', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getPatientConsents);
+router.get('/stats', authorize(...READ_ROLES), consentController.getConsentStats);
 
-router.get('/:id/status', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getConsentStatus);
+router.get('/patient/:patientId', authorize(...READ_ROLES), consentController.getPatientConsents);
+
+router.get('/:id/status', authorize(...READ_ROLES), consentController.getConsentStatus);
 
 router.get('/:id/artefact', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.fetchConsentArtefact);
 

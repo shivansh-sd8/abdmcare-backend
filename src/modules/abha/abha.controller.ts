@@ -280,9 +280,15 @@ export class AbhaController {
   // ── Patient linking ────────────────────────────────────────────────────────
 
   linkToPatient = asyncHandler(async (req: Request, res: Response) => {
-    const { abhaNumber, patientId, abhaAddress } = req.body;
+    const { abhaNumber, patientId, abhaAddress, verified, profile } = req.body;
     const currentUser = (req as any).user;
-    const data = await abhaService.linkToPatient(abhaNumber, patientId, abhaAddress, currentUser);
+    const data = await abhaService.linkToPatient(
+      abhaNumber,
+      patientId,
+      abhaAddress,
+      currentUser,
+      { verified: !!verified, profile },
+    );
     res.json({ success: true, data });
   });
 

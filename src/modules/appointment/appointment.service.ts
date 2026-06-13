@@ -282,8 +282,12 @@ export class AppointmentService {
       // unscoped: cross-hospital).
       Object.assign(where, hospitalScope(currentUser));
 
-      if (query.doctorId && currentUser?.role === 'DOCTOR') {
-        where.doctorId = currentUser.id;
+      // Doctors are scoped to their own worklist — even if no explicit
+      // doctorId is in the query string, they only see their own
+      // appointments. We use currentUser.doctorId (the Doctor.id from the
+      // JWT) — currentUser.id is the User.id and won't match Appointment.doctorId.
+      if (currentUser?.role === 'DOCTOR' && currentUser.doctorId) {
+        where.doctorId = currentUser.doctorId;
       } else if (query.doctorId) {
         where.doctorId = query.doctorId;
       }
@@ -420,6 +424,26 @@ export class AppointmentService {
         }
         if (appointment.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Appointment belongs to a different hospital', 403);
+        }
+
+        // A doctor may only check in appointments where they are the
+        // assigned provider — they should never be able to claim another
+        // doctor's patient. The Doctor row is identified by either the
+        // canonical userId pointer or, as a defensive fallback, by email.
+        if (currentUser.role === 'DOCTOR') {
+          const doctorRow = await prisma.doctor.findFirst({
+            where: {
+              hospitalId: currentUser.hospitalId,
+              OR: [
+                { userId: currentUser.id },
+                ...(currentUser.email ? [{ email: currentUser.email as string }] : []),
+              ],
+            },
+            select: { id: true },
+          });
+          if (!doctorRow || appointment.doctorId !== doctorRow.id) {
+            throw new AppError('Access denied: you can only check in your own patients', 403);
+          }
         }
       }
 
@@ -605,7 +629,13 @@ export class AppointmentService {
       // expects the dashboard to switch days at IST midnight, not UTC.
       const { start: today, end: dayEnd } = istDayRange(0);
 
-      const hospitalFilter = hospitalScope(currentUser);
+      // Hospital scope first; for DOCTOR role we further narrow to their own
+      // appointments so the doctor dashboard "Today's queue / Completed today /
+      // Scheduled" reflect only their own worklist instead of the whole hospital.
+      const hospitalFilter: any = { ...hospitalScope(currentUser) };
+      if (currentUser?.role === 'DOCTOR' && currentUser.doctorId) {
+        hospitalFilter.doctorId = currentUser.doctorId;
+      }
 
       const todayWindow = { gte: today, lte: dayEnd };
       const [

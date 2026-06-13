@@ -47,7 +47,9 @@ router.put(
 
 router.delete(
   '/:id',
-  authorize('DOCTOR', 'SUPER_ADMIN'),
+  // ADMIN can delete an erroneously-issued prescription on the doctor's
+  // behalf without escalating to the platform SUPER_ADMIN.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
   prescriptionController.deletePrescription
 );
 

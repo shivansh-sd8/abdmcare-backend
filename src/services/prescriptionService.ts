@@ -107,10 +107,18 @@ class PrescriptionService {
     // hospitalId; if neither, all hospitals.
     const effectiveHospitalId = getEffectiveHospitalId(currentUser) || hospitalId;
 
+    // Doctors are restricted to their own prescriptions even when the
+    // controller didn't pass an explicit doctorId. Other roles can still
+    // pass doctorId through to filter or leave it blank for hospital-wide.
+    const effectiveDoctorId =
+      currentUser?.role === 'DOCTOR' && currentUser?.doctorId
+        ? (currentUser.doctorId as string)
+        : doctorId;
+
     const where: any = {};
-    if (patientId)  where.patientId  = patientId;
-    if (doctorId)   where.doctorId   = doctorId;
-    if (encounterId) where.encounterId = encounterId;
+    if (patientId)        where.patientId   = patientId;
+    if (effectiveDoctorId) where.doctorId   = effectiveDoctorId;
+    if (encounterId)      where.encounterId = encounterId;
     if (effectiveHospitalId) where.patient = { hospitalId: effectiveHospitalId };
 
     const [prescriptions, total] = await Promise.all([

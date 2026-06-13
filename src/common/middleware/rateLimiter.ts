@@ -19,7 +19,14 @@ export const createLimiter = (windowMs: number, max: number) => {
   });
 };
 
-export const abhaOtpLimiter = createLimiter(30 * 60 * 1000, 3);
+// ABHA OTP limiter — guards `/abha/login/request-otp` and similar endpoints.
+// We keep this separate from the general API limiter because OTP requests
+// are the part of ABDM most prone to runaway loops and abuse, but the prior
+// 3-per-30-min cap was too tight for real testing — receptionists hit it on
+// the second resend during a single linking session. We're still well below
+// ABDM's gateway-side per-mobile ceiling, so this is the front-line guard
+// only; the gateway remains the authoritative rate-limit.
+export const abhaOtpLimiter = createLimiter(15 * 60 * 1000, 20);
 
 export const loginLimiter = createLimiter(15 * 60 * 1000, 50);
 

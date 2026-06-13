@@ -21,6 +21,12 @@ export class DashboardService {
   async getDailyTrends(currentUser: any, days = 7) {
     try {
       const hospitalId = getEffectiveHospitalId(currentUser);
+      // Doctors only see their own trend lines on their dashboard. Patients
+      // / admissions / revenue rows still represent the hospital — these
+      // aren't doctor-attributable, so the chart treats those columns as 0
+      // for a doctor (the doctor dashboard reads only `appointments` and
+      // `encounters` anyway).
+      const isDoctor = currentUser?.role === 'DOCTOR' && !!currentUser?.doctorId;
       const N = Math.min(Math.max(days, 1), 30); // clamp 1..30
 
       const out: Array<{
@@ -57,6 +63,15 @@ export class DashboardService {
           encountersWhere.patient = { hospitalId };
           admissionsWhere.hospitalId = hospitalId;
           paymentsWhere.hospitalId = hospitalId;
+        }
+
+        // Doctor narrows down to their own activity. We only attach
+        // doctorId to the two series that actually have a doctor column;
+        // the others stay at the hospital level (they're not used by the
+        // doctor dashboard chart anyway).
+        if (isDoctor) {
+          appointmentsWhere.doctorId = currentUser.doctorId;
+          encountersWhere.doctorId = currentUser.doctorId;
         }
 
         const [patients, appointments, encounters, admissions, revenueAgg] =
@@ -245,6 +260,165 @@ export class DashboardService {
   }
 
   /**
+   * Staff-wise revenue collection in the last `days` days. Mirrors the
+   * "Collections by staff" section of the hospital report so the Admin
+   * dashboard, the daily collections card, and the formal report all
+   * agree on who took how much money.
+   *
+   * Granularity is intentionally lighter than the full report (no first/
+   * last collected timestamps, methods kept long-form) because this is
+   * meant for a quick at-a-glance widget, not a forensic audit trail.
+   */
+  async getStaffCollections(currentUser: any, days = 7) {
+    try {
+      const hospitalId = getEffectiveHospitalId(currentUser);
+      const N = Math.min(Math.max(days, 1), 90);
+      const since = istWindowStart(N);
+
+      const where: any = {
+        status: 'PAID',
+        createdAt: { gte: since },
+      };
+      if (hospitalId) where.hospitalId = hospitalId;
+
+      const payments = await prisma.payment.findMany({
+        where,
+        select: {
+          amount: true,
+          paymentMethod: true,
+          collectedById: true,
+          collectedBy: {
+            select: { id: true, firstName: true, lastName: true, role: true },
+          },
+        },
+        // Generous cap; for live dashboards a 90-day window with >25k
+        // collections per hospital is unrealistic, so we'd rather catch
+        // a runaway query than truncate silently.
+        take: 25000,
+      });
+
+      interface Acc {
+        collectorId: string | null;
+        name: string;
+        role: string | null;
+        paymentCount: number;
+        total: number;
+        cash: number;
+        digital: number;
+      }
+      const groups = new Map<string, Acc>();
+
+      for (const p of payments) {
+        const id = p.collectedById ?? null;
+        const key = id ?? '__unattributed__';
+        const acc: Acc = groups.get(key) ?? {
+          collectorId: id,
+          name: p.collectedBy
+            ? `${p.collectedBy.firstName} ${p.collectedBy.lastName}`.trim()
+            : 'Unattributed',
+          role: p.collectedBy?.role ?? null,
+          paymentCount: 0,
+          total: 0,
+          cash: 0,
+          digital: 0,
+        };
+        const amt = Number(p.amount || 0);
+        acc.paymentCount += 1;
+        acc.total += amt;
+        if (String(p.paymentMethod) === 'CASH') acc.cash += amt;
+        else acc.digital += amt;
+        groups.set(key, acc);
+      }
+
+      const round = (n: number) => Math.round(n * 100) / 100;
+      const data = Array.from(groups.values())
+        .map((g) => ({
+          collectorId: g.collectorId,
+          name: g.name,
+          role: g.role,
+          paymentCount: g.paymentCount,
+          total: round(g.total),
+          cash: round(g.cash),
+          digital: round(g.digital),
+        }))
+        .sort((a, b) => b.total - a.total);
+
+      return {
+        success: true,
+        data: {
+          windowDays: N,
+          since: since.toISOString(),
+          rows: data,
+          totalCollected: round(
+            data.reduce((s, r) => s + r.total, 0),
+          ),
+        },
+      };
+    } catch (error: any) {
+      logger.error('Failed to compute staff collections', error);
+      rethrowServiceError(error);
+    }
+  }
+
+  /**
+   * Distinct list of users who have collected at least one payment in the
+   * given window for the current hospital. Powers the "Collected by"
+   * filter dropdown on the Billing dashboard so the list never includes
+   * staff who have never rung anything up. Always appends a synthetic
+   * "Unattributed" entry when there are receipts with `collectedById = NULL`
+   * (legacy data, imports), because those would otherwise be invisible to
+   * the filter.
+   */
+  async listPaymentCollectors(currentUser: any, days = 90) {
+    try {
+      const hospitalId = getEffectiveHospitalId(currentUser);
+      // Default 90 days is wide enough to surface part-time / weekend
+      // staff without scanning the whole table; explicit ?days=0 means
+      // "everyone who has ever collected anything for this hospital".
+      const N = Math.max(0, Math.min(days, 365));
+      const where: any = { status: 'PAID' };
+      if (hospitalId) where.hospitalId = hospitalId;
+      if (N > 0) where.createdAt = { gte: istWindowStart(N) };
+
+      const rows = await prisma.payment.findMany({
+        where,
+        select: {
+          collectedById: true,
+          collectedBy: {
+            select: { id: true, firstName: true, lastName: true, role: true },
+          },
+        },
+        distinct: ['collectedById'],
+        // Bound the scan; even huge hospitals don't have thousands of
+        // distinct collectors in 90 days.
+        take: 500,
+      });
+
+      const collectors = rows
+        .filter((r) => r.collectedBy)
+        .map((r) => ({
+          id: r.collectedBy!.id,
+          name: `${r.collectedBy!.firstName} ${r.collectedBy!.lastName}`.trim(),
+          role: r.collectedBy!.role,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      const hasUnattributed = rows.some((r) => !r.collectedById);
+
+      return {
+        success: true,
+        data: {
+          collectors,
+          hasUnattributed,
+        },
+      };
+    } catch (error: any) {
+      logger.error('Failed to list payment collectors', error);
+      rethrowServiceError(error);
+    }
+  }
+
+  /**
    * Encounter status distribution in the last `days` days. Useful on the
    * Admin dashboard to spot bottlenecks (lots of LAB_PENDING etc.).
    */
@@ -256,6 +430,11 @@ export class DashboardService {
 
       const where: any = { createdAt: { gte: since } };
       if (hospitalId) where.patient = { hospitalId };
+      // Doctor dashboard's "where are encounters stuck?" should only show
+      // the doctor's own encounters, not the whole hospital's.
+      if (currentUser?.role === 'DOCTOR' && currentUser.doctorId) {
+        where.doctorId = currentUser.doctorId;
+      }
 
       const grouped = await prisma.encounter.groupBy({
         by: ['status'],

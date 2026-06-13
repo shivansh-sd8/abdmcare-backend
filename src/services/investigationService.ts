@@ -322,6 +322,10 @@ class InvestigationService {
       inProgress,
       completed,
       today,
+      // Convenience field for dashboards: "Pending labs" = anything ordered
+      // or already in-progress but not yet COMPLETED. The DoctorDashboard
+      // widget reads `pending`, which previously didn't exist and rendered 0.
+      pending: ordered + inProgress,
     };
   }
 }
