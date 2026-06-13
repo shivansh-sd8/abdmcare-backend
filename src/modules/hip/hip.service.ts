@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import prisma from '../../common/config/database';
-import abdmClient from '../../common/utils/abdm-client';
+import abdmClient, { resolveHipTenant, findHipTenant } from '../../common/utils/abdm-client';
 import { abdmConfig } from '../../common/config/abdm';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
@@ -124,6 +124,13 @@ interface HealthInformationRequest {
       nonce: string;
     };
   };
+  /**
+   * Gateway-stamped X-HIP-ID. On a multi-facility platform this is the only
+   * signal of which tenant must fulfill the request; the body has no hipId.
+   * Optional only for legacy single-tenant tests — production callers must
+   * supply it.
+   */
+  inboundHipId?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -289,7 +296,7 @@ export class HipService {
     name: string;
     gender: string;
     yearOfBirth: number;
-  }) {
+  }, tenantHospitalId: string) {
     // CRITICAL: abhaNumber MUST be the bare 14 digits with NO dashes. ABDM's
     // generate-token returns a generic HTTP 400 "Bad Request" when dashes are
     // present (verified live against the sandbox). Strip them defensively so a
@@ -304,9 +311,16 @@ export class HipService {
     // numeric conversion is lossless.
     const abhaNumberNumeric = Number(abhaNumber);
 
+    // Per-tenant HIP identity. Throws AppError(422) if the hospital row has no
+    // hipId — surfaced cleanly to the caller instead of silently using the
+    // platform-default hipId, which would attribute care-context links to the
+    // wrong tenant on a multi-facility deployment.
+    const tenant = await resolveHipTenant(tenantHospitalId);
+
     logger.info('HIP: [link] → generate-token request', {
       endpoint: abdmConfig.endpoints.hip.generateToken,
-      hipId: abdmConfig.hip.id,
+      hipId: tenant.hipId,
+      hospitalId: tenant.hospitalId,
       abhaNumber: maskAbha(abhaNumber),
       abhaAddress: params.abhaAddress,
       name: params.name,
@@ -327,19 +341,20 @@ export class HipService {
           gender: params.gender,
           yearOfBirth: params.yearOfBirth,
         },
-        { 'X-HIP-ID': abdmConfig.hip.id },
+        { 'X-HIP-ID': tenant.hipId },
+        tenant,
       );
       logger.info('HIP: [link] ← generate-token accepted by ABDM (awaiting on-generate-token callback)', {
         abhaNumber: maskAbha(abhaNumber),
         abhaAddress: params.abhaAddress,
-        hipId: abdmConfig.hip.id,
+        hipId: tenant.hipId,
       });
       return res;
     } catch (error: any) {
       logger.error('HIP: [link] ✗ generate-token failed', {
         abhaNumber: maskAbha(abhaNumber),
         abhaAddress: params.abhaAddress,
-        hipId: abdmConfig.hip.id,
+        hipId: tenant.hipId,
         ...describeAbdmError(error),
       });
       rethrowServiceError(error);
@@ -365,14 +380,17 @@ export class HipService {
       hiType: string;
       count: number;
     }>;
-  }) {
+  }, tenantHospitalId: string) {
     // abhaNumber must be bare 14 digits (no dashes) — same ABDM constraint as
     // generate-token. Strip defensively.
     const abhaNumber = (params.abhaNumber || '').replace(/-/g, '');
 
+    const tenant = await resolveHipTenant(tenantHospitalId);
+
     logger.info('HIP: [link] → link/carecontext request', {
       endpoint: abdmConfig.endpoints.hip.linkCareContext,
-      hipId: abdmConfig.hip.id,
+      hipId: tenant.hipId,
+      hospitalId: tenant.hospitalId,
       abhaNumber: maskAbha(abhaNumber),
       abhaAddress: params.abhaAddress,
       hasLinkToken: !!params.linkToken,
@@ -388,7 +406,7 @@ export class HipService {
     try {
       // ABDM V3 link/carecontext requires BOTH X-HIP-ID and X-LINK-TOKEN headers.
       // The X-LINK-TOKEN is the JWT returned via the on-generate-token callback.
-      const headers: Record<string, string> = { 'X-HIP-ID': abdmConfig.hip.id };
+      const headers: Record<string, string> = { 'X-HIP-ID': tenant.hipId };
       if (params.linkToken) headers['X-LINK-TOKEN'] = params.linkToken;
       else logger.warn('HIP: [link] hipInitiatedLink called WITHOUT a link token — ABDM will reject link/carecontext', {
         abhaAddress: params.abhaAddress,
@@ -414,6 +432,7 @@ export class HipService {
           patient: sanitizedPatient,
         },
         headers,
+        tenant,
       );
       logger.info('HIP: [link] ← link/carecontext submitted to ABDM (awaiting on_carecontext callback)', {
         abhaNumber: maskAbha(abhaNumber),
@@ -441,10 +460,13 @@ export class HipService {
     careContextReference: string;
     patientReference: string;
     hiTypes: string[];
-  }) {
+  }, tenantHospitalId: string) {
+    const tenant = await resolveHipTenant(tenantHospitalId);
+
     logger.info('HIP: [link] → link/context/notify request', {
       endpoint: abdmConfig.endpoints.hip.linkContextNotify,
-      hipId: abdmConfig.hip.id,
+      hipId: tenant.hipId,
+      hospitalId: tenant.hospitalId,
       abhaAddress: params.abhaAddress,
       patientReference: params.patientReference,
       careContextReference: params.careContextReference,
@@ -465,10 +487,11 @@ export class HipService {
             date: new Date().toISOString(),
             // ABDM notify spec requires the originating HIP id inside the
             // notification body (in addition to the X-HIP-ID header).
-            hip: { id: abdmConfig.hip.id },
+            hip: { id: tenant.hipId },
           },
         },
-        { 'X-HIP-ID': abdmConfig.hip.id },
+        { 'X-HIP-ID': tenant.hipId },
+        tenant,
       );
       logger.info('HIP: [link] ← link/context/notify sent to ABDM (awaiting links/context/on-notify callback)', {
         abhaAddress: params.abhaAddress,
@@ -489,16 +512,27 @@ export class HipService {
    * Send SMS deep-link notification to patient
    * POST /api/hiecm/hip/v3/link/patient/links/sms/notify2
    */
-  async smsNotify(phoneNo: string, hipName: string, hipId: string) {
+  async smsNotify(phoneNo: string, hipName: string, hipId: string, tenantHospitalId?: string) {
     try {
-      const res = await abdmClient.post(abdmConfig.endpoints.hip.smsNotify, {
-        requestId: crypto.randomUUID(),
-        timestamp: new Date().toISOString(),
-        notification: {
-          phoneNo,
-          hip: { name: hipName, id: hipId },
+      // tenantHospitalId is optional here for backwards compat with legacy
+      // admin tools that pass hipId/hipName directly. New callers should
+      // pass tenantHospitalId so the gateway sees the correct X-HIP-ID.
+      const tenant = tenantHospitalId ? await resolveHipTenant(tenantHospitalId) : null;
+      const headers: Record<string, string> = {};
+      if (tenant) headers['X-HIP-ID'] = tenant.hipId;
+      const res = await abdmClient.post(
+        abdmConfig.endpoints.hip.smsNotify,
+        {
+          requestId: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          notification: {
+            phoneNo,
+            hip: { name: tenant?.hipName || hipName, id: tenant?.hipId || hipId },
+          },
         },
-      });
+        Object.keys(headers).length ? headers : undefined,
+        tenant,
+      );
       logger.info('HIP: SMS notify sent', { phoneNo });
       return res;
     } catch (error: any) {
@@ -552,11 +586,28 @@ export class HipService {
         return errorResp;
       }
 
-      // Scope patient lookup by hospital if possible (multi-tenant isolation).
+      // Scope patient lookup by tenant. ABDM addresses HIP services by hipId,
+      // so an inbound discover with X-HIP-ID = X must only search patients
+      // whose hospital owns hipId X — never fall back to "all hospitals" if
+      // X is unknown, that would let one tenant discover another tenant's
+      // patients on a shared platform.
       let hospitalScope: { hospitalId: string } | undefined;
-      if ((request as any).hipId) {
-        const hospital = await prisma.hospital.findFirst({ where: { hipId: (request as any).hipId }, select: { id: true } });
-        if (hospital) hospitalScope = { hospitalId: hospital.id };
+      const inboundHipId: string | undefined = (request as any).hipId;
+      if (inboundHipId) {
+        const hospital = await prisma.hospital.findFirst({ where: { hipId: inboundHipId }, select: { id: true } });
+        if (hospital) {
+          hospitalScope = { hospitalId: hospital.id };
+        } else {
+          // Unknown hipId — treat as a not-found rather than searching
+          // platform-wide. Send a polite on-discover with code 1001.
+          const errorResp = {
+            transactionId: request.transactionId,
+            error: { code: 1001, message: 'Patient not found' },
+            response: { requestId: request.requestId },
+          };
+          await abdmClient.post(abdmConfig.endpoints.hip.onDiscover, errorResp);
+          return errorResp;
+        }
       }
 
       // Build candidate set: every patient that matches AT LEAST ONE verified
@@ -950,6 +1001,26 @@ export class HipService {
       });
       if (!patient) throw new AppError('Patient not found', 404);
 
+      // Tenant guard: if the inbound confirm carries an X-HIP-ID, the
+      // patient must live at the tenant that owns that hipId. Otherwise we
+      // could end up confirming a link for hospital A using a patient row
+      // from hospital B.
+      const inboundConfirmHipId: string | undefined = (request as any).hipId;
+      if (inboundConfirmHipId && patient.hospitalId) {
+        const tenantHospital = await prisma.hospital.findFirst({
+          where: { hipId: inboundConfirmHipId },
+          select: { id: true },
+        });
+        if (tenantHospital && tenantHospital.id !== patient.hospitalId) {
+          logger.warn('HIP: confirm link rejected — patient belongs to a different tenant than the inbound hipId', {
+            inboundHipId: inboundConfirmHipId,
+            tenantHospitalId: tenantHospital.id,
+            patientHospitalId: patient.hospitalId,
+          });
+          throw new AppError('Link reference not found or expired', 404);
+        }
+      }
+
       // Link the patient's pending/unlinked care contexts and mark them LINKED.
       const contexts = await prisma.careContext.findMany({
         where: { patientId: patient.id },
@@ -1006,18 +1077,35 @@ export class HipService {
    * ABDM calls your callback; HIP acknowledges back
    * POST /api/hiecm/consent/v3/request/hip/on-notify
    */
-  async handleConsentHipNotify(params: { requestId: string; consentId: string; status: string }) {
+  async handleConsentHipNotify(params: {
+    requestId: string;
+    consentId: string;
+    status: string;
+    inboundHipId?: string;
+  }) {
     try {
       // Per ABDM M2 spec the acknowledgement.status is the literal "ok"
       // (receipt acknowledgement), NOT the consent grant status. We log the
       // grant status separately for traceability.
-      await abdmClient.post(abdmConfig.endpoints.hip.consentOnNotify, {
-        acknowledgement: { status: 'ok', consentId: params.consentId },
-        response: { requestId: params.requestId },
-      });
+      const tenant = params.inboundHipId
+        ? await findHipTenant(params.inboundHipId)
+        : null;
+      const headers: Record<string, string> | undefined = tenant
+        ? { 'X-HIP-ID': tenant.hipId }
+        : undefined;
+      await abdmClient.post(
+        abdmConfig.endpoints.hip.consentOnNotify,
+        {
+          acknowledgement: { status: 'ok', consentId: params.consentId },
+          response: { requestId: params.requestId },
+        },
+        headers,
+        tenant,
+      );
       logger.info('HIP: consent on-notify acknowledged', {
         consentId: params.consentId,
         grantStatus: params.status,
+        hipId: tenant?.hipId,
       });
     } catch (error: any) {
       logger.error('HIP: consent on-notify failed', error);
@@ -1031,13 +1119,24 @@ export class HipService {
    */
   async handleHealthInformationRequest(request: HealthInformationRequest) {
     try {
-      logger.info('HIP: Health information request', { transactionId: request.transactionId });
-
-      // Acknowledge receipt
-      await abdmClient.post(abdmConfig.endpoints.hip.healthInfoOnRequest, {
-        hiRequest: { transactionId: request.transactionId, sessionStatus: 'ACKNOWLEDGED' },
-        response: { requestId: request.requestId },
+      logger.info('HIP: Health information request', {
+        transactionId: request.transactionId,
+        inboundHipId: request.inboundHipId,
       });
+
+      // Resolve the tenant hospital for this fulfill request. Strategy:
+      //   1. Prefer the gateway-stamped X-HIP-ID (the canonical multi-tenant
+      //      route key — see HIP services in HFR are addressed by hipId).
+      //   2. Fall back to the consent's authorising hipId (every artefact's
+      //      careContexts share one HIP, so the artefact body's first context
+      //      is authoritative). This handles legacy single-tenant deployments
+      //      that don't get a useful X-HIP-ID from the bridge.
+      //   3. Refuse to silently use the env-default hipId — that would route
+      //      every request to the platform's seeded tenant and serve another
+      //      facility's data, the exact bug the multi-tenant rewrite fixes.
+      let tenant = request.inboundHipId
+        ? await findHipTenant(request.inboundHipId)
+        : null;
 
       // Fetch consent using ABDM's consent ID and validate the artefact fully
       const consent = await prisma.consent.findFirst({
@@ -1057,6 +1156,46 @@ export class HipService {
       if (consent.expiresAt && new Date(consent.expiresAt) < new Date()) {
         throw new AppError('Consent has expired', 403);
       }
+
+      // If the gateway didn't give us a usable X-HIP-ID, derive the tenant
+      // from the artefact's authorised care contexts (each care context row
+      // stores the hipId it was linked under).
+      if (!tenant) {
+        const artefactBodyForTenant = (consent as any).artefactBody as
+          | { careContexts?: Array<{ careContextReference?: string }> }
+          | null
+          | undefined;
+        const firstCcRef = artefactBodyForTenant?.careContexts?.[0]?.careContextReference;
+        if (firstCcRef) {
+          const cc = await prisma.careContext.findFirst({
+            where: { careContextId: firstCcRef },
+            select: { hipId: true },
+          });
+          if (cc?.hipId) tenant = await findHipTenant(cc.hipId);
+        }
+      }
+
+      if (!tenant) {
+        // Final guardrail: refuse to fulfill rather than silently using the
+        // env hipId. This will surface as a clear 403 in our logs and a
+        // gateway-side timeout for the HIU rather than a wrong-tenant push.
+        throw new AppError(
+          'Could not resolve a tenant hospital for this fulfill request. The gateway X-HIP-ID was missing or unknown, and no care context in the consent artefact has a recognisable hipId.',
+          422,
+        );
+      }
+
+      // Acknowledge receipt — stamp our hipId so the gateway routes the ACK
+      // back through the correct tenant lane and never re-uses an env header.
+      await abdmClient.post(
+        abdmConfig.endpoints.hip.healthInfoOnRequest,
+        {
+          hiRequest: { transactionId: request.transactionId, sessionStatus: 'ACKNOWLEDGED' },
+          response: { requestId: request.requestId },
+        },
+        { 'X-HIP-ID': tenant.hipId },
+        tenant,
+      );
 
       // Validate that consent has allowed health information types
       const consentHiTypes = (consent as any).hiTypes as string[] | undefined;
@@ -1137,6 +1276,12 @@ export class HipService {
         // scope — accepting the risk of a 400 from a strict HIU.
         authorisedCareContextRefs,
         keyMaterial: request.hiRequest.keyMaterial,
+        // Tenant scope for the worker — the worker filters care contexts by
+        // this hipId so we never serve another hospital's data even if the
+        // patient row's hospitalId points elsewhere on a multi-tenant
+        // platform.
+        tenantHipId: tenant.hipId,
+        tenantHospitalId: tenant.hospitalId,
       };
 
       logger.info('HIP: enqueued health data push job', {
@@ -1202,6 +1347,17 @@ export class HipService {
         throw new AppError('Patient has no ABHA — please create ABHA first before linking care contexts', 404);
       }
 
+      // Resolve the tenant HIP that owns this patient's care contexts.
+      // Multi-tenant: each hospital must have its own hipId registered with
+      // ABDM HFR. We refuse to create a CareContext with a hipId we don't
+      // actually own, because once it's linked under the wrong hipId ABDM
+      // will route every future fulfill request to the wrong tenant.
+      const tenantHospitalId = patient.hospitalId;
+      if (!tenantHospitalId) {
+        throw new AppError('Patient is not associated with any hospital — cannot register care contexts', 422);
+      }
+      const tenant = await resolveHipTenant(tenantHospitalId);
+
       // Upsert: skip encounters that already have a care context
       const createdContexts = [];
       for (const context of careContexts) {
@@ -1219,7 +1375,7 @@ export class HipService {
             encounterId: context.encounterId,
             patientId: patient.id,
             display: context.display,
-            hipId: abdmConfig.hip.id,
+            hipId: tenant.hipId,
           },
         });
         createdContexts.push(careContext);
@@ -1313,7 +1469,7 @@ export class HipService {
                 hiType: b.hiType,
                 count: b.count,
               })),
-            });
+            }, tenantHospitalId);
           } catch (e: any) {
             // The reused token was rejected (e.g. expired/consumed). Clear it from
             // the PENDING contexts so the next link attempt regenerates a fresh
@@ -1375,7 +1531,7 @@ export class HipService {
       setImmediate(async () => {
         try {
           logger.info('HIP: [async] Calling generate-token for ABDM linking', { abhaAddress, patientId });
-          await this.generateLinkToken({ abhaNumber, abhaAddress, name: patientName, gender, yearOfBirth });
+          await this.generateLinkToken({ abhaNumber, abhaAddress, name: patientName, gender, yearOfBirth }, tenantHospitalId);
           logger.info('HIP: [async] generate-token sent — awaiting ABDM callback', { abhaAddress });
         } catch (e: any) {
           const abdmCode: string = e?.response?.data?.error?.code || '';

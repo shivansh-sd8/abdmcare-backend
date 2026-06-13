@@ -88,6 +88,121 @@ export async function resolveHospitalAbdmContext(
   };
 }
 
+/**
+ * Strict variant — load the hospital and assert it has a usable HIP ID.
+ *
+ * Use this everywhere we make an outbound HIP call (link/carecontext,
+ * generate-token, link/context/notify, on-discover, on-request, data push).
+ * If the hospital row is missing or has no hipId, throw — silently falling
+ * back to the env-level ABDM_HIP_ID would assign cross-tenant data to the
+ * platform default tenant and break per-facility isolation.
+ *
+ * Throws AppError(422, ...) so the route layer surfaces a helpful message
+ * instead of the generic 500 a `null.hipId` access would produce.
+ */
+export async function resolveHipTenant(hospitalId: string): Promise<HospitalAbdmContext & { hipId: string; hipName: string }> {
+  if (!hospitalId) {
+    const { AppError } = await import('../middleware/errorHandler');
+    throw new AppError('Cannot make HIP call without a hospital context', 500);
+  }
+  const ctx = await resolveHospitalAbdmContext(hospitalId);
+  if (!ctx) {
+    const { AppError } = await import('../middleware/errorHandler');
+    throw new AppError(`Hospital ${hospitalId} not found`, 404);
+  }
+  if (!ctx.hipId) {
+    const { AppError } = await import('../middleware/errorHandler');
+    throw new AppError(
+      'Hospital has no HIP ID configured. Register the facility in HFR and onboard it with a hipId before performing HIP operations.',
+      422,
+    );
+  }
+  return { ...ctx, hipId: ctx.hipId, hipName: ctx.hipName || 'Healthcare Facility' };
+}
+
+/** HIU-side mirror of `resolveHipTenant`. */
+export async function resolveHiuTenant(hospitalId: string): Promise<HospitalAbdmContext & { hiuId: string; hiuName: string }> {
+  if (!hospitalId) {
+    const { AppError } = await import('../middleware/errorHandler');
+    throw new AppError('Cannot make HIU call without a hospital context', 500);
+  }
+  const ctx = await resolveHospitalAbdmContext(hospitalId);
+  if (!ctx) {
+    const { AppError } = await import('../middleware/errorHandler');
+    throw new AppError(`Hospital ${hospitalId} not found`, 404);
+  }
+  if (!ctx.hiuId) {
+    const { AppError } = await import('../middleware/errorHandler');
+    throw new AppError(
+      'Hospital has no HIU ID configured. Register the facility in HFR and onboard it with a hiuId before performing HIU operations.',
+      422,
+    );
+  }
+  return { ...ctx, hiuId: ctx.hiuId, hiuName: ctx.hiuName || 'Healthcare Facility' };
+}
+
+/**
+ * Reverse lookup — given an inbound `metaData.hipId` / `X-HIP-ID` from an
+ * ABDM callback, return the hospital tenant whose row owns that HIP ID.
+ *
+ * Returns `null` (not throw) when no tenant matches; the route layer then
+ * decides whether to fall back to platform default or reject the callback
+ * outright. Per-facility multi-tenant deployments should reject; legacy
+ * single-tenant deployments should accept under the seeded hospital.
+ */
+export async function findHipTenant(hipIdHeader: string | null | undefined): Promise<(HospitalAbdmContext & { hipId: string; hipName: string }) | null> {
+  if (!hipIdHeader) return null;
+  const hospital = await prisma.hospital.findFirst({
+    where: {
+      // hipId is the canonical match. hfrFacilityId is the same value at
+      // facilities that registered both fields under one HFR id (common case).
+      OR: [{ hipId: hipIdHeader }, { hfrFacilityId: hipIdHeader }],
+    },
+    select: {
+      id: true,
+      hipId: true, hipName: true,
+      hiuId: true, hiuName: true,
+      abdmClientId: true, abdmClientSecret: true,
+      name: true,
+    },
+  });
+  if (!hospital || !hospital.hipId) return null;
+  return {
+    hospitalId: hospital.id,
+    clientId: hospital.abdmClientId,
+    clientSecret: hospital.abdmClientSecret,
+    hipId: hospital.hipId,
+    hiuId: hospital.hiuId,
+    hipName: hospital.hipName || hospital.name,
+    hiuName: hospital.hiuName || hospital.name,
+  };
+}
+
+/** HIU-side mirror of `findHipTenant`. */
+export async function findHiuTenant(hiuIdHeader: string | null | undefined): Promise<(HospitalAbdmContext & { hiuId: string; hiuName: string }) | null> {
+  if (!hiuIdHeader) return null;
+  const hospital = await prisma.hospital.findFirst({
+    where: { hiuId: hiuIdHeader },
+    select: {
+      id: true,
+      hipId: true, hipName: true,
+      hiuId: true, hiuName: true,
+      abdmClientId: true, abdmClientSecret: true,
+      name: true,
+    },
+  });
+  if (!hospital || !hospital.hiuId) return null;
+  return {
+    hospitalId: hospital.id,
+    clientId: hospital.abdmClientId,
+    clientSecret: hospital.abdmClientSecret,
+    hipId: hospital.hipId,
+    hiuId: hospital.hiuId,
+    hipName: hospital.hipName || hospital.name,
+    hiuName: hospital.hiuName || hospital.name,
+  };
+}
+
 // ABDM has deprecated v0.5. Using v3 only — confirmed in writing by ABDM support
 // (06/04/2026 & 06/05/2026 sandbox tickets). v0.5 calls from non-whitelisted
 // origin servers are now blocked at CloudFront with HTML 403 responses.

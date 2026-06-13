@@ -262,7 +262,12 @@ export class HospitalService {
           maxPatients: planLimits.maxPatients,
           maxStorage: planLimits.maxStorage,
 
-          // ABDM Integration (per-facility identifiers from HFR/NHA)
+          // ABDM Integration (per-facility identifiers from HFR/NHA).
+          // Each tenant must have its OWN hipId/hiuId registered with the
+          // ABDM bridge — they are the unit of consent + the unit of data
+          // fulfillment. Falling back to the platform-default hipId/hiuId
+          // (as a single-tenant deployment would) breaks isolation, so the
+          // multi-tenant rewrite REQUIRES per-row values.
           hipId: data.hipId || null,
           hipName: data.hipName || null,
           hiuId: data.hiuId || null,
@@ -271,16 +276,13 @@ export class HospitalService {
           // Per ABDM docs, abdmClientId/Secret/CallbackUrl are platform-level
           // (issued by NHA per integrator) — supplied via env, not per-row.
           //
-          // The platform's bridge credentials (env-level) make every newly
-          // onboarded hospital ABDM-capable through the shared bridge: HIU
-          // outbound calls use abdmConfig.hiu.id, HIP outbound calls use
-          // abdmConfig.hip.id. So mark abdmEnabled=true at onboarding time
-          // unless those env vars are missing — that way the admin dashboard
-          // doesn't show "ABDM disabled" on every new tenant.
-          abdmEnabled: !!(process.env.ABDM_CLIENT_ID && process.env.ABDM_CALLBACK_URL),
-          abdmRegisteredAt: process.env.ABDM_CLIENT_ID && process.env.ABDM_CALLBACK_URL
-            ? new Date()
-            : null,
+          // abdmEnabled is set to TRUE only after we successfully register
+          // the new tenant's hipId/hiuId with the platform's ABDM bridge —
+          // see the post-creation auto-register block below. Until then it
+          // stays false so the admin dashboard correctly shows "ABDM not
+          // wired up yet" instead of giving a false-green status.
+          abdmEnabled: false,
+          abdmRegisteredAt: null,
 
           // Default OPD charge
           defaultOpdCharge: data.defaultOpdCharge != null ? data.defaultOpdCharge : null,
@@ -321,6 +323,66 @@ export class HospitalService {
         hospitalCode: hospital.code,
         adminUserId: adminUser.id,
       });
+
+      // ── Auto-register ABDM bridge services (best-effort, async) ──────────
+      // If the admin provided a hipId or hiuId, register them with the
+      // platform's bridge so ABDM treats this tenant as a real HIP/HIU.
+      // We do this in setImmediate so a slow / failing bridge never blocks
+      // the response — the admin can always retry from "Hospital Management
+      // → Register with ABDM" if either call fails. abdmEnabled flips to
+      // true only when at least one registration succeeds.
+      if ((data.hipId || data.hiuId) && process.env.ABDM_CLIENT_ID) {
+        const newHospitalId = hospital.id;
+        setImmediate(async () => {
+          let anyOk = false;
+          try {
+            const hipServiceModule = await import('../hip/hip.service');
+            const hipService = hipServiceModule.default;
+            if (data.hipId) {
+              try {
+                await hipService.registerHipService(newHospitalId);
+                anyOk = true;
+                logger.info('ABDM bridge: HIP registered for new hospital', {
+                  hospitalId: newHospitalId, hipId: data.hipId,
+                });
+              } catch (e: any) {
+                logger.warn('ABDM bridge: HIP registration failed (admin can retry)', {
+                  hospitalId: newHospitalId, hipId: data.hipId, error: e?.message,
+                });
+              }
+            }
+            if (data.hiuId) {
+              try {
+                await hipService.registerHiuService(newHospitalId);
+                anyOk = true;
+                logger.info('ABDM bridge: HIU registered for new hospital', {
+                  hospitalId: newHospitalId, hiuId: data.hiuId,
+                });
+              } catch (e: any) {
+                logger.warn('ABDM bridge: HIU registration failed (admin can retry)', {
+                  hospitalId: newHospitalId, hiuId: data.hiuId, error: e?.message,
+                });
+              }
+            }
+            // registerHipService/registerHiuService each set
+            // abdmEnabled=true on success, so this UPDATE only matters if
+            // both calls failed — in that case keep abdmEnabled=false.
+            if (!anyOk) {
+              logger.warn('ABDM bridge: no service registered for new hospital — abdmEnabled stays false', {
+                hospitalId: newHospitalId,
+              });
+            }
+          } catch (outerErr: any) {
+            logger.warn('ABDM bridge auto-register: unexpected error', {
+              hospitalId: newHospitalId, error: outerErr?.message,
+            });
+          }
+        });
+      } else if (data.hipId || data.hiuId) {
+        logger.info('Skipping ABDM bridge auto-register — ABDM_CLIENT_ID is not configured', {
+          hospitalId: hospital.id,
+        });
+      }
 
       return {
         success: true,

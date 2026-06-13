@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import prisma from '../../common/config/database';
-import abdmClient from '../../common/utils/abdm-client';
+import abdmClient, { resolveHiuTenant } from '../../common/utils/abdm-client';
 import { abdmConfig } from '../../common/config/abdm';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
@@ -58,6 +58,21 @@ export class ConsentService {
 
       if (!patient) throw new AppError('Patient with ABHA ID not found at this hospital', 404);
 
+      // Resolve the requesting tenant's HIU identity. The consent must be
+      // initiated under the requester hospital's hiuId so the matching
+      // /on-notify and /on-fetch callbacks route to the same tenant. We
+      // refuse to fall back to the platform default hiuId on a multi-tenant
+      // deployment because that would make the CM treat the consent as
+      // owned by another facility.
+      const tenantHospitalId = effectiveHospitalId || patient.hospitalId;
+      if (!tenantHospitalId) {
+        throw new AppError(
+          'Cannot resolve a hospital tenant for this consent request. Pass currentUser with a hospitalId or attach the patient to a hospital.',
+          422,
+        );
+      }
+      const tenant = await resolveHiuTenant(tenantHospitalId);
+
       // ABDM consent init requires the patient's ABHA *address* (PHR address,
       // e.g. "name@sbx") as consent.patient.id — NOT the 14-digit ABHA number.
       // Sending the number makes ABDM respond "user not found". So prefer any
@@ -112,7 +127,7 @@ export class ConsentService {
             refUri: 'http://terminology.hl7.org/ValueSet/v3-PurposeOfUse',
           },
           patient: { id: resolvedAbhaId },
-          hiu: { id: abdmConfig.hiu.id },
+          hiu: { id: tenant.hiuId },
           // Per the official M3 consent/v3/request/init body, hip + careContexts
           // are explicit (null = "any facility / all linked care contexts"). The
           // CM resolves the patient's LINKED care contexts itself; sending null
@@ -144,7 +159,8 @@ export class ConsentService {
       const abdmResponse = await abdmClient.post(
         abdmConfig.endpoints.consent.init,
         requestPayload,
-        { 'REQUEST-ID': abdmOutboundRequestId },
+        { 'REQUEST-ID': abdmOutboundRequestId, 'X-HIU-ID': tenant.hiuId },
+        tenant,
       );
 
       const consent = await prisma.consent.create({
@@ -451,19 +467,39 @@ export class ConsentService {
       // Trigger a fresh ABDM artefact fetch only if we don't yet have a body
       // and the consent is in a state where ABDM will respond. Fire-and-forget;
       // the on-fetch callback persists the body and the UI can re-load.
+      // The fetch must go out under the consent's requester tenant's hiuId so
+      // ABDM matches it back to the original /init request — using the
+      // platform-default hiuId on a multi-facility deployment makes the CM
+      // respond with "Unauthorised request"  for consents not owned by that hiuId.
       if (
         consent.status === 'GRANTED' &&
         !!consent.abdmConsentId &&
         !consent.artefactBody
       ) {
-        abdmClient
-          .post(
-            abdmConfig.endpoints.consent.fetch,
-            { consentId: consent.abdmConsentId },
-            { 'X-HIU-ID': abdmConfig.hiu.id },
-          )
-          .then(() => logger.info('Consent artefact fetch (re)requested', { consentId: consent.consentId }))
-          .catch((err: any) => logger.warn('Consent artefact fetch failed', { message: err?.message }));
+        const fetchTenantHospitalId = consent.requesterHospitalId || consent.patient?.hospitalId;
+        if (fetchTenantHospitalId) {
+          (async () => {
+            try {
+              const fetchTenant = await resolveHiuTenant(fetchTenantHospitalId);
+              await abdmClient.post(
+                abdmConfig.endpoints.consent.fetch,
+                { consentId: consent.abdmConsentId },
+                { 'X-HIU-ID': fetchTenant.hiuId },
+                fetchTenant,
+              );
+              logger.info('Consent artefact fetch (re)requested', {
+                consentId: consent.consentId,
+                hiuId: fetchTenant.hiuId,
+              });
+            } catch (err: any) {
+              logger.warn('Consent artefact fetch failed', { message: err?.message });
+            }
+          })();
+        } else {
+          logger.warn('Skipping consent artefact fetch — consent has no resolvable tenant hospital', {
+            consentId: consent.consentId,
+          });
+        }
       }
 
       // Pull external records linked under this consent. We block bodies once

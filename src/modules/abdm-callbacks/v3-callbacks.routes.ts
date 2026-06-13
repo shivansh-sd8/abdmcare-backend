@@ -132,6 +132,32 @@ const hiuConsentNotifyHandler = asyncHandler(async (req: Request, res: Response)
         rowsUpdated: updated.count,
       });
 
+      // Resolve the consent's tenant (requesterHospitalId, the source of truth
+      // for "who owns this consent") so both the outbound ack AND the artefact
+      // fetch go out under the right hiuId. On a multi-facility deployment
+      // the platform-default hiuId would belong to a different tenant and the
+      // CM would respond "Unauthorised request".
+      let tenantHospitalId: string | undefined;
+      try {
+        const consentRow = await prisma.consent.findFirst({
+          where: {
+            OR: [
+              { abdmRequestId: consentRequestId },
+              ...(firstArtefactId ? [{ abdmConsentId: firstArtefactId }] : []),
+            ],
+          },
+          select: { requesterHospitalId: true, patient: { select: { hospitalId: true } } },
+        });
+        tenantHospitalId =
+          consentRow?.requesterHospitalId
+          || consentRow?.patient?.hospitalId
+          || undefined;
+      } catch (lookupErr: any) {
+        logger.warn('HIU consent on-notify: tenant lookup failed (will fall back to platform hiuId)', {
+          message: lookupErr?.message,
+        });
+      }
+
       // ── M3 compliance: outbound gateway ACK ───────────────────────────────
       // ABDM expects the HIU to ack receipt of the state-change push at
       //   POST /consent/v3/request/hiu/on-notify
@@ -141,12 +167,15 @@ const hiuConsentNotifyHandler = asyncHandler(async (req: Request, res: Response)
       if (firstArtefactId) {
         try {
           const hiuService = (await import('../hiu/hiu.service')).default;
-          await hiuService.consentOnNotify({
-            requestId: inboundRequestId || consentRequestId,
-            consentIds: artefacts
-              .filter((a: any) => a?.id)
-              .map((a: any) => ({ status: 'ok', consentId: a.id })),
-          });
+          await hiuService.consentOnNotify(
+            {
+              requestId: inboundRequestId || consentRequestId,
+              consentIds: artefacts
+                .filter((a: any) => a?.id)
+                .map((a: any) => ({ status: 'ok', consentId: a.id })),
+            },
+            tenantHospitalId,
+          );
         } catch (ackErr: any) {
           logger.warn('HIU consent on-notify: outbound ACK failed', { message: ackErr?.message });
         }
@@ -160,10 +189,20 @@ const hiuConsentNotifyHandler = asyncHandler(async (req: Request, res: Response)
       if (mappedStatus === 'GRANTED' && firstArtefactId) {
         setImmediate(async () => {
           try {
-            await abdmClient.post(abdmConfig.endpoints.consent.fetch, {
-              consentId: firstArtefactId,
+            const { resolveHiuTenant } = await import('../../common/utils/abdm-client');
+            const fetchTenant = tenantHospitalId
+              ? await resolveHiuTenant(tenantHospitalId).catch(() => null)
+              : null;
+            await abdmClient.post(
+              abdmConfig.endpoints.consent.fetch,
+              { consentId: firstArtefactId },
+              fetchTenant ? { 'X-HIU-ID': fetchTenant.hiuId } : undefined,
+              fetchTenant,
+            );
+            logger.info('HIU consent on-notify: artefact fetch dispatched', {
+              abdmConsentId: firstArtefactId,
+              hiuId: fetchTenant?.hiuId,
             });
-            logger.info('HIU consent on-notify: artefact fetch dispatched', { abdmConsentId: firstArtefactId });
           } catch (fetchErr: any) {
             logger.warn('HIU consent on-notify: artefact fetch failed', { message: fetchErr?.message });
           }
@@ -389,6 +428,34 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
           // ['OPConsultation','Prescription','DiagnosticReport'] for ALL).
           const { deriveHiType } = await import('../hip/discovery-helpers');
 
+          // Resolve the tenant hospital for this link batch from the FIRST care
+          // context's stored hipId — every context in `linkedRefs` belongs to
+          // the same patient and same originating hospital, so they share a
+          // single hipId. Without this lookup link/context/notify would go out
+          // under the env hipId and the CM would attribute the notify to the
+          // wrong tenant on a multi-facility deployment.
+          const { findHipTenant } = await import('../../common/utils/abdm-client');
+          const firstCc = await prisma.careContext.findFirst({
+            where: { careContextId: linkedRefs[0] },
+            select: { hipId: true, patient: { select: { hospitalId: true } } },
+          });
+          const tenant =
+            (firstCc?.hipId && (await findHipTenant(firstCc.hipId)))
+            || (firstCc?.patient?.hospitalId
+              ? await (async () => {
+                  const { resolveHospitalAbdmContext } = await import('../../common/utils/abdm-client');
+                  const ctxLocal = await resolveHospitalAbdmContext(firstCc.patient!.hospitalId);
+                  return ctxLocal && ctxLocal.hipId ? { ...ctxLocal, hipId: ctxLocal.hipId, hipName: ctxLocal.hipName || 'Healthcare Facility' } : null;
+                })()
+              : null);
+          if (!tenant) {
+            logger.warn('on_carecontext: link/context/notify skipped — could not resolve a tenant hospital for the linked care contexts', {
+              firstCareContextId: linkedRefs[0],
+              firstHipId: firstCc?.hipId,
+            });
+            return;
+          }
+
           for (const ref of linkedRefs) {
             const cc = await prisma.careContext.findFirst({
               where: { careContextId: ref },
@@ -430,9 +497,9 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
               careContextReference: ref,
               patientReference,
               hiTypes,
-            });
+            }, tenant.hospitalId!);
           }
-          logger.info('on_carecontext: link/context/notify sent for linked contexts', { count: linkedRefs.length });
+          logger.info('on_carecontext: link/context/notify sent for linked contexts', { count: linkedRefs.length, tenant: tenant.hipId });
         } catch (e: any) {
           logger.warn('on_carecontext: link/context/notify failed', { message: e?.message });
         }
@@ -736,6 +803,15 @@ hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(asy
       // Group by derived hiType so the CM gets one block per type.
       const blocks = await hipService.groupCareContextsByHiType(contexts);
 
+      // Resolve the tenant hospital from the patient's hospitalId. The link
+      // token + on-generate-token callback are scoped to the originating HIP,
+      // so the linked contexts must be advertised under the same hipId.
+      if (!patient.hospitalId) {
+        logger.warn('on-generate-token: patient has no hospitalId — refusing to fall back to platform hipId for linking', {
+          patientId: patient.id,
+        });
+        return;
+      }
       await hipService.hipInitiatedLink({
         abhaNumber:  resolvedAbhaNumber,
         abhaAddress: resolvedAbhaAddress,
@@ -747,7 +823,7 @@ hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(asy
           hiType: b.hiType,
           count: b.count,
         })),
-      });
+      }, patient.hospitalId);
 
       logger.info('on-generate-token: hipInitiatedLink submitted', {
         patientId: patient.id,

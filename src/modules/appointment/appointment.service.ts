@@ -526,9 +526,16 @@ export class AppointmentService {
         patient.abhaRecord?.abhaAddress || patient.abhaAddress || undefined;
 
       if (abhaNumber || abhaAddress) {
-        // Resolve the HIP id for this hospital. If the hospital has no hipId
-        // set, the env-level ABDM_HIP_ID is used as a fallback.
-        let hipIdForCareContext = process.env.ABDM_HIP_ID || 'default-hip-id';
+        // Multi-tenant rule: a CareContext is the unit of ABDM linkage and
+        // the unit of fulfillment, both of which carry an X-HIP-ID identifying
+        // the FACILITY that owns the data. We MUST persist the hospital's
+        // own hipId — never the env-level platform default — otherwise data
+        // linked at hospital A and authorised in a consent for hospital A
+        // would be served from a fulfill request routed to whatever tenant
+        // happens to own the env hipId. Skip linking entirely if the hospital
+        // hasn't been onboarded with a hipId yet (it can be added later via
+        // ABHA Management → "Link care contexts").
+        let hipIdForCareContext: string | null = null;
         try {
           if (appointment.hospitalId) {
             const hospital = await prisma.hospital.findUnique({
@@ -537,41 +544,48 @@ export class AppointmentService {
             });
             if (hospital?.hipId) hipIdForCareContext = hospital.hipId;
           }
-        } catch (_) { /* ignore — fall back to env */ }
+        } catch (_) { /* fall through to skip */ }
 
-        const careContext = await prisma.careContext.create({
-          data: {
-            careContextId: `CC-${Date.now()}`,
-            patientId: appointment.patientId,
-            encounterId: encounter.id,
-            display: `OPD Visit - ${encounter.type}`,
-            referenceNumber: encounter.encounterId,
-            hipId: hipIdForCareContext,
-          },
-        });
-
-        // Fire-and-forget: initiate ABDM HIP linking only if we have an ABHA
-        // number (generate-token requires the 14-digit number).
-        if (abhaNumber) {
-          setImmediate(async () => {
-            try {
-              const hipService = (await import('../hip/hip.service')).default;
-              const abdmGender =
-                patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
-              await hipService.generateLinkToken({
-                abhaNumber,
-                abhaAddress: abhaAddress || '',
-                name: `${patient.firstName} ${patient.lastName}`,
-                gender: abdmGender,
-                yearOfBirth: patient.dob ? new Date(patient.dob).getFullYear() : 2000,
-              });
-              logger.info('HIP linking initiated (generate-token) for care context', {
-                careContextId: careContext.careContextId,
-              });
-            } catch (err: any) {
-              logger.warn('HIP linking failed (non-blocking)', { error: err.message });
-            }
+        if (!hipIdForCareContext) {
+          logger.warn('Appointment check-in: skipping ABDM care-context creation — hospital has no hipId. Configure it in Hospital Management → ABDM Integration before check-in.', {
+            appointmentId: appointment.id,
+            hospitalId: appointment.hospitalId,
           });
+        } else {
+          const careContext = await prisma.careContext.create({
+            data: {
+              careContextId: `CC-${Date.now()}`,
+              patientId: appointment.patientId,
+              encounterId: encounter.id,
+              display: `OPD Visit - ${encounter.type}`,
+              referenceNumber: encounter.encounterId,
+              hipId: hipIdForCareContext,
+            },
+          });
+
+          // Fire-and-forget: initiate ABDM HIP linking only if we have an ABHA
+          // number (generate-token requires the 14-digit number).
+          if (abhaNumber) {
+            setImmediate(async () => {
+              try {
+                const hipService = (await import('../hip/hip.service')).default;
+                const abdmGender =
+                  patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
+                await hipService.generateLinkToken({
+                  abhaNumber,
+                  abhaAddress: abhaAddress || '',
+                  name: `${patient.firstName} ${patient.lastName}`,
+                  gender: abdmGender,
+                  yearOfBirth: patient.dob ? new Date(patient.dob).getFullYear() : 2000,
+                }, appointment.hospitalId!);
+                logger.info('HIP linking initiated (generate-token) for care context', {
+                  careContextId: careContext.careContextId,
+                });
+              } catch (err: any) {
+                logger.warn('HIP linking failed (non-blocking)', { error: err.message });
+              }
+            });
+          }
         }
       }
 

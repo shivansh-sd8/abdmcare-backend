@@ -153,18 +153,26 @@ export class HipController {
   });
 
   // ── M2: HIP Initiated Linking ──────────────────────────────────────────────
+  // These endpoints are admin/dev tools that route the call through the
+  // current user's hospital, so the per-tenant hipId is used.
   generateLinkToken = asyncHandler(async (req: Request, res: Response) => {
-    const result = await this.hipService.generateLinkToken(req.body);
+    const currentUser = (req as any).user;
+    if (!currentUser?.hospitalId) throw new AppError('Hospital context required', 422);
+    const result = await this.hipService.generateLinkToken(req.body, currentUser.hospitalId);
     ResponseHandler.success(res, 'Link token generated', result);
   });
 
   hipInitiatedLink = asyncHandler(async (req: Request, res: Response) => {
-    const result = await this.hipService.hipInitiatedLink(req.body);
+    const currentUser = (req as any).user;
+    if (!currentUser?.hospitalId) throw new AppError('Hospital context required', 422);
+    const result = await this.hipService.hipInitiatedLink(req.body, currentUser.hospitalId);
     ResponseHandler.success(res, 'Care context linked', result);
   });
 
   linkContextNotify = asyncHandler(async (req: Request, res: Response) => {
-    const result = await this.hipService.linkContextNotify(req.body);
+    const currentUser = (req as any).user;
+    if (!currentUser?.hospitalId) throw new AppError('Hospital context required', 422);
+    const result = await this.hipService.linkContextNotify(req.body, currentUser.hospitalId);
     ResponseHandler.success(res, 'Link notification sent', result);
   });
 
@@ -186,7 +194,7 @@ export class HipController {
       }
     }
 
-    const result = await this.hipService.smsNotify(phoneNo, resolvedHipName, resolvedHipId);
+    const result = await this.hipService.smsNotify(phoneNo, resolvedHipName, resolvedHipId, currentUser?.hospitalId);
     ResponseHandler.success(res, 'SMS notification sent', result);
   });
 
@@ -197,19 +205,35 @@ export class HipController {
   // back to the body keeps it robust if ABDM ever includes it there.
   discoverCareContexts = asyncHandler(async (req: Request, res: Response) => {
     const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
-    const result = await this.hipService.discoverCareContexts({ ...req.body, requestId });
+    // X-HIP-ID is the gateway tenant route key — pass it through so the
+    // service scopes the patient lookup to the FACILITY that received the
+    // discover. Without it, a discover for hospital A could match a patient
+    // row at hospital B (same ABHA at multiple facilities).
+    const hipId =
+      (req.headers['x-hip-id'] as string)
+      || (req.headers['X-HIP-ID'] as unknown as string)
+      || undefined;
+    const result = await this.hipService.discoverCareContexts({ ...req.body, requestId, hipId });
     res.status(202).json(result);
   });
 
   linkCareContexts = asyncHandler(async (req: Request, res: Response) => {
     const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
-    const result = await this.hipService.linkCareContexts({ ...req.body, requestId });
+    const hipId =
+      (req.headers['x-hip-id'] as string)
+      || (req.headers['X-HIP-ID'] as unknown as string)
+      || undefined;
+    const result = await this.hipService.linkCareContexts({ ...req.body, requestId, hipId });
     res.status(202).json(result);
   });
 
   confirmLinkCareContexts = asyncHandler(async (req: Request, res: Response) => {
     const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
-    const result = await this.hipService.confirmLinkCareContexts({ ...req.body, requestId });
+    const hipId =
+      (req.headers['x-hip-id'] as string)
+      || (req.headers['X-HIP-ID'] as unknown as string)
+      || undefined;
+    const result = await this.hipService.confirmLinkCareContexts({ ...req.body, requestId, hipId });
     res.status(202).json(result);
   });
 
@@ -227,7 +251,14 @@ export class HipController {
     const requestId = (req.headers['request-id'] as string) || body.requestId || body.response?.requestId;
     const consentId = notification.consentId || consentDetail.consentId || body.consentId;
     const status = notification.status || body.status;
-    await this.hipService.handleConsentHipNotify({ requestId, consentId, status });
+    // X-HIP-ID is the gateway tenant route key for HIP-side consent
+    // notifications too — pass it through so the outbound ack goes back
+    // under the right tenant's hipId.
+    const inboundHipId =
+      (req.headers['x-hip-id'] as string)
+      || (req.headers['X-HIP-ID'] as unknown as string)
+      || undefined;
+    await this.hipService.handleConsentHipNotify({ requestId, consentId, status, inboundHipId });
     res.status(202).json({ message: 'Acknowledged' });
   });
 
@@ -236,7 +267,20 @@ export class HipController {
     // The on-request ACK must echo it as response.requestId, else ABDM rejects with
     // 400 "ABDM-1015: Invalid Response". The data-push notify also reuses it.
     const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
-    const result = await this.hipService.handleHealthInformationRequest({ ...req.body, requestId });
+    // X-HIP-ID is the gateway-stamped tenant route key. On a multi-facility
+    // platform sharing one bridge, this is the ONLY reliable signal of which
+    // hospital owns the artefact and must serve the data; the body itself
+    // doesn't carry hipId. Pass it through so the service scopes the worker
+    // job — and the FHIR Composition.custodian — to that tenant.
+    const inboundHipId =
+      (req.headers['x-hip-id'] as string)
+      || (req.headers['X-HIP-ID'] as unknown as string)
+      || undefined;
+    const result = await this.hipService.handleHealthInformationRequest({
+      ...req.body,
+      requestId,
+      inboundHipId,
+    });
     res.status(202).json(result);
   });
 

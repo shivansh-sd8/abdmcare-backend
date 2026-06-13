@@ -2,7 +2,7 @@ import { Job, UnrecoverableError } from 'bullmq';
 import prisma from '../common/config/database';
 import logger from '../common/config/logger';
 import { abdmConfig } from '../common/config/abdm';
-import { AbdmClient } from '../common/utils/abdm-client';
+import { AbdmClient, resolveHipTenant } from '../common/utils/abdm-client';
 import EncryptionService from '../common/utils/encryption';
 import crypto from 'crypto';
 import { HealthDataPushJobData, createHealthDataPushWorker } from '../common/config/queue';
@@ -27,7 +27,7 @@ class UnrecoverablePushError extends Error {
 }
 
 async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<void> {
-  const { transactionId, consentAbdmId, consentPatientId, dataPushUrl, dateRange, hiTypes, authorisedCareContextRefs, keyMaterial } = job.data;
+  const { transactionId, consentAbdmId, consentPatientId, dataPushUrl, dateRange, hiTypes, authorisedCareContextRefs, keyMaterial, tenantHipId, tenantHospitalId } = job.data;
 
   logger.info('Worker: Processing health data push', {
     transactionId,
@@ -37,6 +37,8 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     hiTypes,
     authorisedCareContextCount: authorisedCareContextRefs?.length || 0,
     dateRange,
+    tenantHipId,
+    tenantHospitalId,
   });
 
   // Track the care-context references involved so a FAILED notification can
@@ -53,13 +55,34 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       throw new Error(`Consent not found: ${consentAbdmId}`);
     }
 
-    const hospital = await prisma.hospital.findFirst({
-      where: { id: consent.patient.hospitalId || undefined },
-    });
+    // Resolve the tenant hospital — this is the FACILITY that authored the
+    // care contexts and whose name MUST appear as the FHIR
+    // Composition.custodian. We never use the consent's patient.hospitalId
+    // here because on a multi-tenant platform the patient may have rows at
+    // multiple hospitals (same ABHA, different facility) — the consent's
+    // requesterHospitalId is the HIU's local copy, NOT the HIP we're
+    // fulfilling as. Always prefer tenantHospitalId from the job (set by
+    // hip.service.handleHealthInformationRequest from the inbound X-HIP-ID).
+    const hospital = tenantHospitalId
+      ? await prisma.hospital.findFirst({ where: { id: tenantHospitalId } })
+      : await prisma.hospital.findFirst({ where: { id: consent.patient.hospitalId || undefined } });
 
-    // Load care contexts with their linked encounters via the correct relation
+    // Multi-tenant scope: load only care contexts owned by THIS tenant. The
+    // care-context row's `hipId` is the canonical owner — we never look up
+    // by patientId alone because that would let a request fulfilled as
+    // hospital A return care contexts authored at hospital B (the patient's
+    // sibling row). Local DB stays per-hospital; cross-hospital data flows
+    // ONLY through ABDM CM, never through the worker.
+    //
+    // Note: the patientId scope is ALSO tenant-local — `consentPatientId`
+    // is the consent's patient row, which already lives at the tenant
+    // hospital (the consent was created there). This is just the safety
+    // belt to make accidental cross-tenant joins impossible.
     const careContextsWithEnc = await prisma.careContext.findMany({
-      where: { patientId: consentPatientId },
+      where: {
+        patientId: consentPatientId,
+        ...(tenantHipId ? { hipId: tenantHipId } : {}),
+      },
       include: {
         encounter: {
           include: {
@@ -73,6 +96,21 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
         },
       },
     });
+
+    if (tenantHipId) {
+      logger.info('Worker: Tenant-scoped care-context query', {
+        transactionId,
+        tenantHipId,
+        tenantHospitalId,
+        matched: careContextsWithEnc.length,
+      });
+    } else {
+      // Legacy single-tenant path — should be rare. Log so we can find any
+      // callers still feeding the worker without a tenant.
+      logger.warn('Worker: No tenantHipId on job — falling back to patientId-only scope (single-tenant deployment).', {
+        transactionId,
+      });
+    }
 
     // Filter encounters within consent dateRange. We DO NOT additionally
     // filter by `authorisedCareContextRefs` here — that would drop care
@@ -538,16 +576,28 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       description: 'Transferred',
     }));
 
-    // Notify ABDM: data delivered
-    await abdmClient.post(abdmConfig.endpoints.hip.dataFlowNotify, {
-      notification: {
-        consentId: consentAbdmId,
-        transactionId,
-        doneAt: new Date().toISOString(),
-        notifier: { type: 'HIP', id: abdmConfig.hip.id },
-        statusNotification: { sessionStatus: 'TRANSFERRED', hipId: abdmConfig.hip.id, statusResponses },
+    // Notify ABDM: data delivered. Use the tenant's hipId everywhere this
+    // notification carries a HIP identifier — the gateway expects it to
+    // match the X-HIP-ID we serve under, otherwise it treats the notify as
+    // coming from a different facility.
+    const notifyTenant = tenantHospitalId
+      ? await resolveHipTenant(tenantHospitalId).catch(() => null)
+      : null;
+    const notifyHipId = notifyTenant?.hipId || tenantHipId || abdmConfig.hip.id;
+    await abdmClient.post(
+      abdmConfig.endpoints.hip.dataFlowNotify,
+      {
+        notification: {
+          consentId: consentAbdmId,
+          transactionId,
+          doneAt: new Date().toISOString(),
+          notifier: { type: 'HIP', id: notifyHipId },
+          statusNotification: { sessionStatus: 'TRANSFERRED', hipId: notifyHipId, statusResponses },
+        },
       },
-    });
+      { 'X-HIP-ID': notifyHipId },
+      notifyTenant,
+    );
 
     logger.info('Worker: Health data push completed', { transactionId, entriesCount: entries.length, pageCount });
   } catch (error: any) {
@@ -573,24 +623,33 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     const shouldNotify = isUnrecoverable || isLastAttempt;
     if (shouldNotify) {
       try {
-        await abdmClient.post(abdmConfig.endpoints.hip.dataFlowNotify, {
-          notification: {
-            consentId: consentAbdmId,
-            transactionId,
-            doneAt: new Date().toISOString(),
-            notifier: { type: 'HIP', id: abdmConfig.hip.id },
-            statusNotification: {
-              sessionStatus: 'FAILED',
-              hipId: abdmConfig.hip.id,
-              // ABDM requires a non-empty statusResponses array even on failure.
-              statusResponses: (careContextRefs.length > 0 ? careContextRefs : ['']).map((ref) => ({
-                careContextReference: ref,
-                hiStatus: 'FAILED',
-                description,
-              })),
+        const failTenant = tenantHospitalId
+          ? await resolveHipTenant(tenantHospitalId).catch(() => null)
+          : null;
+        const failHipId = failTenant?.hipId || tenantHipId || abdmConfig.hip.id;
+        await abdmClient.post(
+          abdmConfig.endpoints.hip.dataFlowNotify,
+          {
+            notification: {
+              consentId: consentAbdmId,
+              transactionId,
+              doneAt: new Date().toISOString(),
+              notifier: { type: 'HIP', id: failHipId },
+              statusNotification: {
+                sessionStatus: 'FAILED',
+                hipId: failHipId,
+                // ABDM requires a non-empty statusResponses array even on failure.
+                statusResponses: (careContextRefs.length > 0 ? careContextRefs : ['']).map((ref) => ({
+                  careContextReference: ref,
+                  hiStatus: 'FAILED',
+                  description,
+                })),
+              },
             },
           },
-        });
+          { 'X-HIP-ID': failHipId },
+          failTenant,
+        );
       } catch (notifyErr: any) {
         logger.error('Worker: Failed to send FAILED notification to ABDM', { error: notifyErr.message });
       }

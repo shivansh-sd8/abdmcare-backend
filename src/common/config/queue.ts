@@ -74,6 +74,15 @@ export interface HealthDataPushJobData {
     dhPublicKey: { expiry: string; parameters: string; keyValue: string };
     nonce: string;
   };
+  /**
+   * The hipId of the tenant fulfilling this request. The worker scopes the
+   * care-context query to this hipId so it can never serve another hospital's
+   * data on a multi-tenant platform — even if the consent's patient row has
+   * a different hospitalId.
+   */
+  tenantHipId?: string;
+  /** Hospital row id matching tenantHipId. Used for FHIR Composition.custodian. */
+  tenantHospitalId?: string;
 }
 
 export function createHealthDataPushWorker(

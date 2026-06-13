@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import prisma from '../../common/config/database';
-import abdmClient from '../../common/utils/abdm-client';
+import abdmClient, { resolveHiuTenant } from '../../common/utils/abdm-client';
 import { abdmConfig } from '../../common/config/abdm';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
@@ -99,6 +99,23 @@ export class HiuService {
       if (consent.status !== 'GRANTED') throw new AppError('Consent not granted', 403);
       if (!consent.abdmConsentId) throw new AppError('ABDM consent ID not available', 400);
 
+      // Resolve the requesting tenant's HIU identity. Prefer the consent's
+      // requesterHospitalId (the source of truth for "who owns this consent");
+      // fall back to the current user's hospital. Throws if no hiuId — we
+      // refuse to silently issue a /cm/request under the platform default
+      // hiuId because the matching /on-request callback would then route to
+      // the wrong tenant on a multi-facility deployment.
+      const tenantHospitalId =
+        consent.requesterHospitalId
+        || (currentUser?.hospitalId as string | undefined);
+      if (!tenantHospitalId) {
+        throw new AppError(
+          'Cannot resolve a hospital tenant for this consent — set consent.requesterHospitalId or pass a currentUser with hospitalId.',
+          422,
+        );
+      }
+      const tenant = await resolveHiuTenant(tenantHospitalId);
+
       const ecdhKeyPair = EncryptionService.generateECDHKeyPair();
 
       // Generate our own REQUEST-ID for the cm/request and persist it alongside
@@ -150,12 +167,15 @@ export class HiuService {
       await abdmClient.post(
         abdmConfig.endpoints.hiu.healthInfoRequest,
         requestPayload,
-        { 'REQUEST-ID': cmRequestId },
+        { 'REQUEST-ID': cmRequestId, 'X-HIU-ID': tenant.hiuId },
+        tenant,
       );
 
       logger.info('HIU: Health information request sent', {
         consentId: consent.consentId,
         cmRequestId,
+        hiuId: tenant.hiuId,
+        hospitalId: tenant.hospitalId,
       });
       return { success: true, message: 'Health information request sent successfully' };
     } catch (error: any) {
@@ -256,13 +276,29 @@ export class HiuService {
    * Handle consent notification for HIU
    * POST /api/hiecm/consent/v3/request/hiu/on-notify
    */
-  async consentOnNotify(params: { requestId: string; consentIds: Array<{ status: string; consentId: string }> }) {
+  async consentOnNotify(
+    params: { requestId: string; consentIds: Array<{ status: string; consentId: string }> },
+    tenantHospitalId?: string,
+  ) {
     try {
-      await abdmClient.post(abdmConfig.endpoints.hiu.consentOnNotify, {
-        acknowledgement: params.consentIds.map(c => ({ status: c.status, consentId: c.consentId })),
-        response: { requestId: params.requestId },
-      });
-      logger.info('HIU: consent on-notify acknowledged');
+      // Optional tenant: in the legacy single-tenant path the caller doesn't
+      // know which hospital owns the consent (the body only has consentIds).
+      // When provided, route the ack under the tenant's hiuId; otherwise
+      // fall back to the platform hiuId (best-effort backwards compat).
+      const tenant = tenantHospitalId ? await resolveHiuTenant(tenantHospitalId) : null;
+      const headers: Record<string, string> | undefined = tenant
+        ? { 'X-HIU-ID': tenant.hiuId }
+        : undefined;
+      await abdmClient.post(
+        abdmConfig.endpoints.hiu.consentOnNotify,
+        {
+          acknowledgement: params.consentIds.map(c => ({ status: c.status, consentId: c.consentId })),
+          response: { requestId: params.requestId },
+        },
+        headers,
+        tenant,
+      );
+      logger.info('HIU: consent on-notify acknowledged', { hiuId: tenant?.hiuId });
     } catch (error: any) {
       logger.error('HIU: consent on-notify failed', error);
       rethrowServiceError(error);
@@ -273,33 +309,49 @@ export class HiuService {
    * Send data flow completion notification
    * POST /api/hiecm/data-flow/v3/health-information/notify
    */
-  async dataFlowNotify(params: {
-    consentId: string;
-    transactionId: string;
-    status: string;
-    hipId?: string;
-    statusResponses?: Array<{ careContextReference: string; hiStatus: string; description?: string }>;
-  }) {
+  async dataFlowNotify(
+    params: {
+      consentId: string;
+      transactionId: string;
+      status: string;
+      hipId?: string;
+      statusResponses?: Array<{ careContextReference: string; hiStatus: string; description?: string }>;
+    },
+    tenantHospitalId?: string,
+  ) {
     try {
       // Per ABDM M3 data-flow notify spec, statusNotification.hipId is REQUIRED
       // (the HIP that provided the data) and statusResponses carries per-care-
-      // context delivery status. In the sandbox this instance is both HIP+HIU,
-      // so default hipId to our configured HIP id when not supplied.
+      // context delivery status. The notifier.id (NOT the same hipId) is the
+      // hiuId of the hospital that received the data — must be the same hiuId
+      // we used on /cm/request, otherwise ABDM rejects the notify.
+      const tenant = tenantHospitalId ? await resolveHiuTenant(tenantHospitalId) : null;
+      const headers: Record<string, string> | undefined = tenant
+        ? { 'X-HIU-ID': tenant.hiuId }
+        : undefined;
       const hipId = params.hipId || abdmConfig.hip.id;
-      await abdmClient.post(abdmConfig.endpoints.hiu.dataFlowNotify, {
-        notification: {
-          consentId: params.consentId,
-          transactionId: params.transactionId,
-          doneAt: new Date().toISOString(),
-          notifier: { type: 'HIU', id: abdmConfig.hiu.id },
-          statusNotification: {
-            sessionStatus: params.status,
-            hipId,
-            statusResponses: params.statusResponses || [],
+      const notifierHiuId = tenant?.hiuId || abdmConfig.hiu.id;
+      await abdmClient.post(
+        abdmConfig.endpoints.hiu.dataFlowNotify,
+        {
+          notification: {
+            consentId: params.consentId,
+            transactionId: params.transactionId,
+            doneAt: new Date().toISOString(),
+            notifier: { type: 'HIU', id: notifierHiuId },
+            statusNotification: {
+              sessionStatus: params.status,
+              hipId,
+              statusResponses: params.statusResponses || [],
+            },
           },
         },
+        headers,
+        tenant,
+      );
+      logger.info('HIU: data flow notify sent', {
+        transactionId: params.transactionId, hipId, hiuId: notifierHiuId,
       });
-      logger.info('HIU: data flow notify sent', { transactionId: params.transactionId, hipId });
     } catch (error: any) {
       logger.error('HIU: data flow notify failed', error);
       rethrowServiceError(error);
@@ -437,6 +489,7 @@ export class HiuService {
       // a doctor at a different hospital can never see records pulled under
       // someone else's consent).
       let persistedCount = 0;
+      let consentRequesterHospitalId: string | null = null;
       const careContextRefs = new Set<string>();
       let authorisationDropped = false;
       // Use whatever consent id we resolved (from keypair lookup OR the
@@ -462,6 +515,7 @@ export class HiuService {
             purged: !!consent.purgedAt,
           });
         } else if (consent) {
+          consentRequesterHospitalId = consent.requesterHospitalId || null;
           for (const entry of decryptedEntries) {
             if (!entry.decrypted || !entry.data) continue;
 
@@ -511,14 +565,22 @@ export class HiuService {
           hiStatus: allOk ? 'OK' : 'ERRORED',
           ...(allOk ? {} : { description: 'Decryption or parsing failed for one or more entries' }),
         }));
+        // Route the notify under the consent's requester tenant so the CM
+        // sees the same hiuId we used on /cm/request. consentRequesterHospitalId
+        // is captured above; if it's null (legacy data) we fall back to
+        // platform default.
+        const notifyTenantHospitalId = consentRequesterHospitalId || undefined;
         setImmediate(async () => {
           try {
-            await this.dataFlowNotify({
-              consentId: lookupConsentId,
-              transactionId: data.transactionId,
-              status: sessionStatus,
-              statusResponses,
-            });
+            await this.dataFlowNotify(
+              {
+                consentId: lookupConsentId,
+                transactionId: data.transactionId,
+                status: sessionStatus,
+                statusResponses,
+              },
+              notifyTenantHospitalId,
+            );
           } catch (notifyErr: any) {
             logger.warn('HIU: data-flow notify dispatch failed', { message: notifyErr?.message });
           }
@@ -595,10 +657,21 @@ export class HiuService {
         if (c.abdmConsentId) allowedConsentIds.add(c.abdmConsentId);
       }
 
+      // Defense-in-depth: scope BOTH by allowed consents AND by the record's
+      // own `hospitalId`. The consent-scope already guarantees tenant
+      // isolation (records were persisted under our hospital's consent), but
+      // the redundant filter ensures that even if a stale row's consentId
+      // somehow falls into the allowed set the row will still be hidden
+      // from a different tenant. Records with hospitalId=null (legacy data
+      // ingested before this column existed) are visible only to
+      // SUPER_ADMIN, never to a hospital user.
       const externalRecords = await prisma.externalHealthRecord.findMany({
         where: {
           patientId,
           consentId: { in: Array.from(allowedConsentIds) },
+          ...(requesterHospitalId
+            ? { hospitalId: requesterHospitalId }
+            : {}),
         },
         orderBy: { receivedAt: 'desc' },
       });
