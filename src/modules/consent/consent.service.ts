@@ -283,6 +283,12 @@ export class ConsentService {
           // Persist the granted artefact window/types so the data-flow request
           // validates/clamps against what was ACTUALLY granted (not the original
           // request). Only set status when promoting a still-REQUESTED consent.
+          //
+          // CRITICAL: also persist the full `consentDetail` (including
+          // `careContexts[]`). At data-push time the HIP MUST send entries
+          // whose `careContextReference` exactly matches one of the references
+          // listed in this artefact. Pushing any other care context yields
+          // ABDM-7727 ("Mismatch of careContextReference(s) with consent").
           const artefactDateRange = consentDetail?.permission?.dateRange;
           const artefactHiTypes: string[] | undefined = consentDetail?.hiTypes;
           const promote = consent.status === 'REQUESTED';
@@ -292,12 +298,20 @@ export class ConsentService {
               abdmConsentId,
               ...(artefactDateRange ? { dateRange: artefactDateRange } : {}),
               ...(artefactHiTypes?.length ? { hiTypes: artefactHiTypes } : {}),
+              ...(consentDetail && Object.keys(consentDetail).length > 0
+                ? { artefactBody: consentDetail as any, artefactFetchedAt: new Date() }
+                : {}),
               ...(promote ? { status: status as any } : {}),
               ...(promote && status === 'GRANTED' ? { grantedAt: new Date() } : {}),
               ...(status === 'REVOKED' ? { status: 'REVOKED' as any, revokedAt: new Date() } : {}),
             },
           });
-          logger.info('HIP: consent artefact recorded', { consentId: consent.consentId, status, promoted: promote });
+          logger.info('HIP: consent artefact recorded', {
+            consentId: consent.consentId,
+            status,
+            promoted: promote,
+            careContextCount: Array.isArray(consentDetail?.careContexts) ? consentDetail.careContexts.length : 0,
+          });
         } else if (status === 'GRANTED' && resolvedPatientId) {
           // No local Consent row exists for this artefact — this is the
           // "HIU-initiated, HIP-side bookkeeping" case: a remote HIU asked
@@ -351,6 +365,10 @@ export class ConsentService {
                 expiresAt: dataEraseAt ? new Date(dataEraseAt) : null,
                 abdmConsentId,
                 abdmRequestId: notification?.consentRequestId || null,
+                // See sibling promotion branch — careContexts[] in the artefact
+                // is the authorised set the HIP can push at data-flow time.
+                artefactBody: consentDetail as any,
+                artefactFetchedAt: new Date(),
               },
             });
             logger.info('HIP: consent artefact recorded', {
@@ -358,6 +376,7 @@ export class ConsentService {
               status: 'GRANTED',
               promoted: false,
               created: true,
+              careContextCount: Array.isArray(consentDetail?.careContexts) ? consentDetail.careContexts.length : 0,
             });
           } catch (createErr: any) {
             logger.error('HIP: failed to insert HIU-initiated consent artefact', {

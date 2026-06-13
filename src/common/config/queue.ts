@@ -55,6 +55,19 @@ export interface HealthDataPushJobData {
    * column).
    */
   hiTypes?: string[];
+  /**
+   * The exact `careContextReference` strings that the patient authorised
+   * via the consent artefact (`consentDetail.careContexts[].careContextReference`).
+   * The worker MUST drop entries whose careContextReference is not in this
+   * list — pushing extra contexts triggers ABDM-7727 "Mismatch of
+   * careContextReference(s) with consent" with HTTP 400.
+   *
+   * Empty/undefined means "no artefact careContexts captured" (legacy
+   * row); in that case the worker falls back to whichever care contexts
+   * are in date+hiType scope, which is the safest behaviour we can offer
+   * without the artefact itself.
+   */
+  authorisedCareContextRefs?: string[];
   keyMaterial: {
     cryptoAlg: string;
     curve: string;

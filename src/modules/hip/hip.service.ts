@@ -1058,6 +1058,19 @@ export class HipService {
         }
       }
 
+      // Pull the authorised careContextReferences out of the persisted
+      // artefact body. ABDM rejects the data push (ABDM-7727) when entries
+      // include any careContextReference not listed in
+      // `consentDetail.careContexts[]` — so this is the authoritative scope
+      // for the push, even tighter than dateRange + hiTypes.
+      const artefactBody = (consent as any).artefactBody as
+        | { careContexts?: Array<{ careContextReference?: string; patientReference?: string }> }
+        | null
+        | undefined;
+      const authorisedCareContextRefs: string[] = (artefactBody?.careContexts || [])
+        .map((c) => c?.careContextReference)
+        .filter((s): s is string => !!s);
+
       // Enqueue the data push job — return 202 immediately so ABDM doesn't timeout
       const jobData: HealthDataPushJobData = {
         transactionId: request.transactionId,
@@ -1071,8 +1084,21 @@ export class HipService {
         // Records" doc the HIP must only share data that "is in keeping with
         // the terms of the artefact".
         hiTypes: consentHiTypes,
+        // The patient picked these specific care contexts when granting the
+        // consent. The data push MUST contain only these references; otherwise
+        // ABDM-7727. If the artefact body wasn't captured (legacy consent),
+        // we leave this empty and the worker falls back to its date+hiType
+        // scope — accepting the risk of a 400 from a strict HIU.
+        authorisedCareContextRefs,
         keyMaterial: request.hiRequest.keyMaterial,
       };
+
+      logger.info('HIP: enqueued health data push job', {
+        transactionId: request.transactionId,
+        consentAbdmId: request.hiRequest.consent.id,
+        authorisedCareContextCount: authorisedCareContextRefs.length,
+        hiTypes: consentHiTypes?.length ? consentHiTypes : '(no restriction)',
+      });
 
       await healthDataPushQueue.add(`push-${request.transactionId}`, jobData, {
         jobId: request.transactionId,

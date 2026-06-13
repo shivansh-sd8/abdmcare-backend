@@ -11,7 +11,7 @@ import { deriveHiType, hiTypeToProfile, AbdmHiType } from '../modules/hip/discov
 const abdmClient = new AbdmClient();
 
 async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<void> {
-  const { transactionId, consentAbdmId, consentPatientId, dataPushUrl, dateRange, hiTypes, keyMaterial } = job.data;
+  const { transactionId, consentAbdmId, consentPatientId, dataPushUrl, dateRange, hiTypes, authorisedCareContextRefs, keyMaterial } = job.data;
 
   logger.info('Worker: Processing health data push', {
     transactionId,
@@ -19,6 +19,7 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     dataPushUrl,
     consentAbdmId,
     hiTypes,
+    authorisedCareContextCount: authorisedCareContextRefs?.length || 0,
     dateRange,
   });
 
@@ -56,7 +57,12 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       },
     });
 
-    // Filter encounters within consent dateRange
+    // Filter encounters within consent dateRange. We DO NOT additionally
+    // filter by `authorisedCareContextRefs` here — that would drop care
+    // contexts whose encounter is in scope but whose careContextId we
+    // happen to have stored under a different surface form. Instead,
+    // authorisedCareContextRefs is enforced strictly below, AFTER hiType
+    // filtering, on the actual references we are about to ship.
     const fromDate = dateRange?.from ? new Date(dateRange.from) : null;
     const toDate = dateRange?.to ? new Date(dateRange.to) : null;
 
@@ -109,27 +115,57 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     // is not in the consented scope. Empty/undefined hiTypes means "no
     // restriction" (legacy consents that pre-dated the column).
     const allowedHiTypes = (hiTypes && hiTypes.length > 0) ? new Set(hiTypes) : null;
-    const validContexts = (allowedHiTypes
+    const hiTypeFiltered = (allowedHiTypes
       ? ccWithHiType.filter(({ hiType }) => allowedHiTypes.has(hiType))
       : ccWithHiType
     );
 
-    careContextRefs = (validContexts.length > 0
-      ? validContexts.map((v) => v.cc)
-      : careContextsWithEnc
-    ).map((cc) => cc.careContextId).filter(Boolean);
-
-    if (allowedHiTypes && validContexts.length < ccWithHiType.length) {
+    if (allowedHiTypes && hiTypeFiltered.length < ccWithHiType.length) {
       logger.info('Worker: Filtered care contexts to consented hiTypes', {
         transactionId,
         consentedHiTypes: Array.from(allowedHiTypes),
         beforeFilter: ccWithHiType.length,
-        afterFilter: validContexts.length,
+        afterFilter: hiTypeFiltered.length,
         droppedHiTypes: ccWithHiType
           .filter(({ hiType }) => !allowedHiTypes.has(hiType))
           .map(({ hiType }) => hiType),
       });
     }
+
+    // Apply consent-artefact careContextReferences filter. ABDM rejects
+    // (ABDM-7727 / 400) any data-push entry whose `careContextReference` is
+    // not on the artefact's authorised list. The list is the ONLY thing the
+    // gateway compares against; even if the patient is the same and the
+    // dateRange matches, an unlisted reference is a hard reject.
+    //
+    // `authorisedCareContextRefs` empty/undefined means we never captured
+    // the artefact body (legacy consents pre-dating the artefactBody
+    // persistence) — in that case fall through with everything we have.
+    const authorisedSet = (authorisedCareContextRefs && authorisedCareContextRefs.length > 0)
+      ? new Set(authorisedCareContextRefs)
+      : null;
+    const validContexts = authorisedSet
+      ? hiTypeFiltered.filter(({ cc }) => authorisedSet.has(cc.careContextId))
+      : hiTypeFiltered;
+
+    if (authorisedSet && validContexts.length < hiTypeFiltered.length) {
+      const dropped = hiTypeFiltered
+        .filter(({ cc }) => !authorisedSet.has(cc.careContextId))
+        .map(({ cc }) => cc.careContextId);
+      logger.info('Worker: Filtered care contexts to artefact-authorised refs', {
+        transactionId,
+        authorisedCount: authorisedSet.size,
+        authorisedSample: Array.from(authorisedSet).slice(0, 5),
+        beforeFilter: hiTypeFiltered.length,
+        afterFilter: validContexts.length,
+        droppedRefs: dropped.slice(0, 10),
+      });
+    }
+
+    careContextRefs = (validContexts.length > 0
+      ? validContexts.map((v) => v.cc)
+      : careContextsWithEnc
+    ).map((cc) => cc.careContextId).filter(Boolean);
 
 
     const vitalsByEnc = new Map<string, any[]>();
