@@ -112,20 +112,24 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     // using the one keyMaterial.dhPublicKey we publish in the push payload.
     // (Previously each entry used its own ephemeral keypair while the push
     // advertised a different keypair — the HIU could never decrypt.)
-    const ownKeyPair = EncryptionService.generateECDHKeyPair();
-
-    // Diagnostics: log the inbound key shape so on encoding mismatches we can
-    // see exactly what the HIU sent (length, leading bytes, claimed curve).
-    // Do NOT log the full key — that would disclose the peer's session pubkey
-    // even though it's ephemeral; head bytes are enough to debug.
+    //
+    // CRITICAL: detect the peer's actual curve from its key bytes, NOT from
+    // the curve label on the wire — several certified HIUs label P-256 keys
+    // as "Curve25519". If we generate X25519 locally while the peer is
+    // P-256, crypto.diffieHellman fails with "decode error" and the entire
+    // push job dies on every retry.
+    let peerBytes = Buffer.alloc(0);
+    let detectedCurve: 'X25519' | 'X448' | 'prime256v1' = 'X25519';
     try {
       const peerB64 = keyMaterial.dhPublicKey?.keyValue;
-      const peerBytes = peerB64 ? Buffer.from(peerB64, 'base64') : Buffer.alloc(0);
+      peerBytes = peerB64 ? Buffer.from(peerB64, 'base64') : Buffer.alloc(0);
+      detectedCurve = EncryptionService.detectCurveFromBytes(peerBytes);
       const head = peerBytes.subarray(0, Math.min(8, peerBytes.length)).toString('hex');
       logger.info('Worker: HIU keyMaterial received', {
         transactionId,
         cryptoAlg: keyMaterial.cryptoAlg,
-        curve: keyMaterial.curve,
+        curveLabel: keyMaterial.curve,
+        detectedCurve,
         keyValueLength: peerB64?.length || 0,
         keyBytesLength: peerBytes.length,
         keyHead: head,
@@ -134,6 +138,8 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     } catch {
       // diagnostic only
     }
+
+    const ownKeyPair = EncryptionService.generateECDHKeyPair(detectedCurve);
 
     let sessionKey: Buffer;
     try {
@@ -144,19 +150,30 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
         keyMaterial.nonce,
       );
     } catch (e: any) {
-      logger.error('Worker: ECDH derive failed — peer key encoding rejected', {
+      logger.error('Worker: ECDH derive failed', {
         transactionId,
         error: e?.message,
+        detectedCurve,
         keyValuePrefix: keyMaterial.dhPublicKey?.keyValue?.slice(0, 16),
       });
       throw e;
     }
+    // Mirror the peer's curve label so it can decrypt with its existing
+    // crypto stack. Many HIUs hard-code "Curve25519" as the curve label even
+    // when they're actually using P-256 — sending the literal "P-256"
+    // confuses them, so we echo "Curve25519" while shipping the right key.
+    const wireCurveLabel = keyMaterial.curve || 'Curve25519';
+    const wireParameters = detectedCurve === 'prime256v1'
+      ? 'secp256r1/uncompressed point'
+      : detectedCurve === 'X448'
+        ? 'Curve448/56byte random key'
+        : 'Curve25519/32byte random key';
     const sessionKeyMaterial = {
       cryptoAlg: 'ECDH',
-      curve: 'Curve25519',
+      curve: wireCurveLabel,
       dhPublicKey: {
         expiry: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-        parameters: 'Curve25519/32byte random key',
+        parameters: wireParameters,
         keyValue: ownKeyPair.publicKey,
       },
       nonce: ownKeyPair.nonce,

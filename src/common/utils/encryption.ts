@@ -2,13 +2,19 @@ import crypto from 'crypto';
 import fs from 'fs';
 import { config } from '../config/index';
 
+  // ─────────────────────────────────────────────────────────────────────────────
+// ECDH types (ABDM v3 spec mandates Curve25519/X25519, but several
+// "Curve25519"-labelled HIUs/HIPs in the field actually emit NIST P-256
+// keys — we accept both and reply on whichever curve the peer used so the
+// shared-secret derivation succeeds.)
 // ─────────────────────────────────────────────────────────────────────────────
-// ECDH types (ABDM Curve25519 / X25519)
-// ─────────────────────────────────────────────────────────────────────────────
+export type ECDHCurve = 'X25519' | 'X448' | 'prime256v1';
+
 export interface ECDHKeyPair {
-  privateKey: string; // base64
-  publicKey: string;  // base64
+  privateKey: string; // base64 (PKCS8 DER)
+  publicKey: string;  // base64 (SPKI DER)
   nonce: string;      // base64 (32 random bytes)
+  curve: ECDHCurve;
 }
 
 export interface ECDHKeyMaterial {
@@ -128,8 +134,17 @@ export class EncryptionService {
   // ECDH — ABDM Curve25519 (X25519) key exchange + AES-256-GCM
   // ═══════════════════════════════════════════════════════════════════════════
 
-  static generateECDHKeyPair(): ECDHKeyPair {
-    const keyPair = crypto.generateKeyPairSync('x25519');
+  static generateECDHKeyPair(curve: ECDHCurve = 'X25519'): ECDHKeyPair {
+    let keyPair: crypto.KeyPairKeyObjectResult;
+    if (curve === 'X25519') {
+      keyPair = crypto.generateKeyPairSync('x25519');
+    } else if (curve === 'X448') {
+      keyPair = crypto.generateKeyPairSync('x448');
+    } else if (curve === 'prime256v1') {
+      keyPair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    } else {
+      throw new Error(`Unsupported ECDH curve: ${curve}`);
+    }
     const publicKey = keyPair.publicKey.export({ type: 'spki', format: 'der' });
     const privateKey = keyPair.privateKey.export({ type: 'pkcs8', format: 'der' });
     const nonce = crypto.randomBytes(32);
@@ -137,7 +152,41 @@ export class EncryptionService {
       privateKey: privateKey.toString('base64'),
       publicKey: publicKey.toString('base64'),
       nonce: nonce.toString('base64'),
+      curve,
     };
+  }
+
+  /**
+   * Inspect the peer public key bytes and infer which curve they belong to.
+   * Used to decide which curve to use for OUR own ephemeral keypair so that
+   * `crypto.diffieHellman` doesn't fail with a mismatched-curve "decode error".
+   *
+   * Inference is byte-shape based — it does NOT trust the `keyMaterial.curve`
+   * field on the wire. Several ABDM-certified HIUs label P-256 keys as
+   * "Curve25519", so trusting the label leads to silent shared-secret
+   * mismatches. The bytes never lie:
+   *   • 32 bytes (or 33 with sign byte)               → X25519
+   *   • 56 bytes                                       → X448
+   *   • 65 bytes starting with 0x04                    → P-256 X9.63 point
+   *   • 91 bytes starting with 30 59 30 13 06 07 2a … → P-256 SPKI DER
+   *   • 44 bytes starting with 30 2a 30 05 06 03 2b 65 → X25519 SPKI DER
+   */
+  static detectCurveFromBytes(bytes: Buffer): ECDHCurve {
+    // SPKI DER — peek at the algorithm OID inside.
+    if (bytes.length > 32 && bytes[0] === 0x30) {
+      const hex = bytes.toString('hex');
+      if (hex.includes('06082a8648ce3d030107')) return 'prime256v1'; // 1.2.840.10045.3.1.7
+      if (hex.includes('06032b656e')) return 'X25519';                 // 1.3.101.110
+      if (hex.includes('06032b656f')) return 'X448';                   // 1.3.101.111
+    }
+    // Raw key by length.
+    let raw = bytes;
+    if (raw.length === 33 && raw[0] === 0x00) raw = raw.subarray(1);
+    if (raw.length === 32) return 'X25519';
+    if (raw.length === 56) return 'X448';
+    if (raw.length === 65 && raw[0] === 0x04) return 'prime256v1';
+    if (raw.length === 97 && raw[0] === 0x04) return 'prime256v1'; // P-384 not supported here yet
+    return 'X25519'; // safe default — older ABDM spec
   }
 
   // ASN.1 SPKI prefix for an X25519 (1.3.101.110) public key wrapping a raw
@@ -203,13 +252,12 @@ export class EncryptionService {
   }
 
   /**
-   * Build an X25519 public KeyObject from however ABDM/peers encode it.
-   * ABDM sends the RAW 32-byte key (base64) per "Curve25519/32byte random key";
-   * our own generated keys are SPKI DER (44 bytes). Also tolerate a leading
-   * 0x00 byte, PEM, hex, base64url, ASCII-hex-of-bytes, and X448. Parsing
-   * mismatched bytes as SPKI DER throws "asn1 ... wrong tag".
+   * Build a public KeyObject from however ABDM/peers encode it. Auto-detects
+   * the curve (X25519, X448, P-256) from the byte shape. The returned
+   * KeyObject's curve drives our own ephemeral keypair selection in
+   * `encryptWithECDH` so the subsequent DH derive succeeds.
    */
-  private static toX25519PublicKey(peerPublicKeyB64: string): crypto.KeyObject {
+  private static toECDHPublicKey(peerPublicKeyB64: string): crypto.KeyObject {
     if (!peerPublicKeyB64 || typeof peerPublicKeyB64 !== 'string') {
       throw new Error('Peer public key is empty or not a string');
     }
@@ -266,7 +314,14 @@ export class EncryptionService {
   }
 
   /**
-   * Derive a 256-bit shared secret using X25519 ECDH + XOR'd nonces as salt for HKDF.
+   * Derive a 256-bit shared secret using ECDH + XOR'd nonces as HKDF salt.
+   *
+   * The peer's curve must match our own private key's curve. If our key is
+   * X25519 but the peer key is P-256, `crypto.diffieHellman` fails with
+   * "decode error" — that's the regression we hit when an HIU mislabels its
+   * P-256 key as Curve25519. `encryptWithECDH` solves this by detecting the
+   * peer's curve from the bytes and generating a matching local keypair
+   * BEFORE calling deriveSharedSecret.
    */
   static deriveSharedSecret(
     ownPrivateKeyB64: string,
@@ -279,7 +334,16 @@ export class EncryptionService {
       format: 'der',
       type: 'pkcs8',
     });
-    const peerPublicKey = this.toX25519PublicKey(peerPublicKeyB64);
+    const peerPublicKey = this.toECDHPublicKey(peerPublicKeyB64);
+
+    const ownCurve = (ownPrivateKey.asymmetricKeyType || '').toLowerCase();
+    const peerCurve = (peerPublicKey.asymmetricKeyType || '').toLowerCase();
+    if (ownCurve && peerCurve && ownCurve !== peerCurve) {
+      throw new Error(
+        `ECDH curve mismatch: own private key is ${ownCurve} but peer public key is ${peerCurve}. ` +
+          `Generate the local keypair on the peer's curve before deriving.`,
+      );
+    }
 
     const sharedSecret = crypto.diffieHellman({
       privateKey: ownPrivateKey,
@@ -298,15 +362,23 @@ export class EncryptionService {
 
   /**
    * Encrypt plaintext for HIP data push.
-   * Generates own keypair, derives shared key with peer's public key + nonce, encrypts with AES-256-GCM.
-   * Returns encrypted data (base64) and the HIP's own keyMaterial for the push payload.
+   *
+   * Detects the peer's curve from its public key bytes (X25519 / X448 /
+   * P-256), generates an ephemeral local keypair on the SAME curve, derives
+   * the AES-256-GCM session key, and emits a keyMaterial whose `curve` and
+   * `parameters` reflect what the peer can actually decrypt against. The
+   * peer-curve label on the wire is ignored on purpose — several certified
+   * HIUs label P-256 keys as "Curve25519".
    */
   static encryptWithECDH(
     plaintext: string,
     peerPublicKeyB64: string,
     peerNonce: string,
   ): ECDHEncryptResult {
-    const ownKeyPair = this.generateECDHKeyPair();
+    const peerBytes = this.decodePeerKey(peerPublicKeyB64).bytes;
+    const peerCurve = this.detectCurveFromBytes(peerBytes);
+    const ownKeyPair = this.generateECDHKeyPair(peerCurve);
+
     const derivedKeyBuf = this.deriveSharedSecret(
       ownKeyPair.privateKey,
       peerPublicKeyB64,
@@ -321,14 +393,26 @@ export class EncryptionService {
     const authTag = cipher.getAuthTag();
     const ciphertext = Buffer.concat([iv, encrypted, authTag]).toString('base64');
 
+    // ABDM expects "Curve25519" as the curve label for X25519; P-256 has no
+    // ABDM-canonical label, so we mirror what most certified HIUs send.
+    const curveLabel =
+      peerCurve === 'X25519' ? 'Curve25519'
+      : peerCurve === 'X448' ? 'Curve448'
+      : peerCurve === 'prime256v1' ? 'Curve25519' // peers labelled P-256 as Curve25519; mirror that
+      : 'Curve25519';
+    const parameters =
+      peerCurve === 'X25519' ? 'Curve25519/32byte random key'
+      : peerCurve === 'prime256v1' ? 'secp256r1/uncompressed point'
+      : 'Curve25519/32byte random key';
+
     return {
       encryptedData: ciphertext,
       keyMaterial: {
         cryptoAlg: 'ECDH',
-        curve: 'Curve25519',
+        curve: curveLabel,
         dhPublicKey: {
           expiry: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-          parameters: 'Curve25519/32byte random key',
+          parameters,
           keyValue: ownKeyPair.publicKey,
         },
         nonce: ownKeyPair.nonce,
