@@ -229,46 +229,53 @@ export class EncryptionService {
   }
 
   /**
-   * Wrap a BC `curve25519` uncompressed point in an X.509 SPKI DER envelope —
-   * byte-for-byte compatible with what Fidelius CLI emits for ABDM data
-   * exchange. The HIU side parses this with
+   * Wrap a BC `curve25519` uncompressed point in an X.509 SPKI DER envelope.
+   * The HIU side parses this with
+   *
    *   PublicKeyFactory.createKey(decodedKey)        // BouncyCastle
    *   KeyFactory.getInstance("EC")
    *            .generatePublic(new X509EncodedKeySpec(decodedKey))
-   * which strictly expects this structure; sending a raw 65-byte point yields
-   * the famous "encoded key spec not recognized / corrupted stream out of
-   * bounds length found N >= 65" error.
    *
-   * Wire layout (88 bytes total for a 65-byte uncompressed point):
+   * which strictly expects this structure AND validates that (X, Y) lies on
+   * the curve indicated by the AlgorithmIdentifier OID (we observed
+   * `ABDM-9999: encoded key spec not recognized  Invalid point coordinates`
+   * when the OID disagreed with the actual curve).
    *
-   *   30 56                                  SEQUENCE 86 — SubjectPublicKeyInfo
-   *     30 10                                SEQUENCE 16 — AlgorithmIdentifier
-   *       06 07 2A 86 48 CE 3D 02 01         OID 1.2.840.10045.2.1 (id-ecPublicKey)
-   *       06 05 2B 81 04 00 0A               OID 1.3.132.0.10 (secp256k1)
-   *     03 42 00 04 ||X(32)||Y(32)           BIT STRING 66 bytes
+   * Wire layout (93 bytes total for a 65-byte uncompressed point):
    *
-   * Note on the curve OID: BouncyCastle's "curve25519" Weierstrass form has
-   * its own OID `1.3.6.1.4.1.3029.1.5.1`, but Fidelius/ABDM HIU SDKs in
-   * production decline that OID and instead use the secp256k1 OID
-   * (`1.3.132.0.10`) as a placeholder. We follow the Fidelius wire convention
-   * because that's what the HIU validator was built to recognize — the
-   * actual ECDH math is decoupled from the OID since both sides agree out-of-
-   * band on the curve via `keyMaterial.curve = "Curve25519"`.
+   *   30 5B                                    SEQUENCE 91 — SubjectPublicKeyInfo
+   *     30 15                                  SEQUENCE 21 — AlgorithmIdentifier
+   *       06 07 2A 86 48 CE 3D 02 01           OID 1.2.840.10045.2.1 (id-ecPublicKey)
+   *       06 0A 2B 06 01 04 01 97 55 01 05 01  OID 1.3.6.1.4.1.3029.1.5.1 (BC curve25519)
+   *     03 42 00 04 ||X(32)||Y(32)             BIT STRING 66 bytes
    *
-   * Lengths use canonical DER short form (single byte) wherever payload < 128.
+   * Why this exact curve OID: BouncyCastle registers Weierstrass-form
+   * curve25519 under OID `1.3.6.1.4.1.3029.1.5.1` in `ECNamedCurveTable`. The
+   * receiver uses the OID to look up the curve parameters and then verifies
+   * that (X, Y) satisfies `y² = x³ + a·x + b mod p` for THAT curve. Sending
+   * a curve25519 point with a secp256k1 OID (as Fidelius CLI famously does)
+   * passes some lenient validators but is rejected as "Invalid point
+   * coordinates" by strict ones — including the production ABDM HIU sandbox.
+   *
+   * Multi-byte OID-arc encoding for 3029:
+   *   3029 = 0b101111010101 (12 bits)
+   *   high 5 bits = 0b00010111 = 0x17  → with cont. bit set → 0x97
+   *   low  7 bits = 0b01010101 = 0x55
+   *   → 0x97 0x55
+   *
+   * Lengths use canonical DER short form everywhere (each subcomponent < 128).
    */
   private static encodeBcCurve25519AsSpki(uncompressedPoint: Uint8Array): Buffer {
     if (uncompressedPoint.length !== 65 || uncompressedPoint[0] !== 0x04) {
       throw new Error('encodeBcCurve25519AsSpki expects a 65-byte uncompressed EC point starting with 0x04');
     }
-    // Algorithm OIDs — pre-rolled DER (06 <len> <bytes>).
-    const idEcPublicKey = Buffer.from('06072a8648ce3d0201', 'hex'); // 1.2.840.10045.2.1
-    const curveOid = Buffer.from('06052b8104000a', 'hex');          // 1.3.132.0.10 (secp256k1)
-    const algoBody = Buffer.concat([idEcPublicKey, curveOid]);      // 9 + 7 = 16 bytes
-    const algoSeq = Buffer.concat([Buffer.from([0x30, algoBody.length]), algoBody]); // 18 bytes
+    const idEcPublicKey = Buffer.from('06072a8648ce3d0201', 'hex');             // 1.2.840.10045.2.1 (id-ecPublicKey)
+    const curveOid = Buffer.from('060a2b060104019755010501', 'hex');            // 1.3.6.1.4.1.3029.1.5.1 (BC curve25519)
+    const algoBody = Buffer.concat([idEcPublicKey, curveOid]);                  // 9 + 12 = 21 bytes
+    const algoSeq = Buffer.concat([Buffer.from([0x30, algoBody.length]), algoBody]); // 23 bytes
 
     const bitStringBody = Buffer.concat([
-      Buffer.from([0x00]), // unused-bits prefix
+      Buffer.from([0x00]),
       Buffer.from(uncompressedPoint),
     ]); // 1 + 65 = 66 bytes
     const bitString = Buffer.concat([
@@ -276,8 +283,8 @@ export class EncryptionService {
       bitStringBody,
     ]); // 2 + 66 = 68 bytes
 
-    const inner = Buffer.concat([algoSeq, bitString]); // 18 + 68 = 86 bytes
-    const outer = Buffer.concat([Buffer.from([0x30, inner.length]), inner]); // 2 + 86 = 88 bytes
+    const inner = Buffer.concat([algoSeq, bitString]); // 23 + 68 = 91 bytes
+    const outer = Buffer.concat([Buffer.from([0x30, inner.length]), inner]); // 2 + 91 = 93 bytes
     return outer;
   }
 
