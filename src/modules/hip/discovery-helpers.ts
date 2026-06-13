@@ -60,6 +60,29 @@ export interface MatchResult {
   ambiguous: boolean;
 }
 
+/**
+ * Deterministic, stable `careContextReference` for an encounter.
+ *
+ * ABDM's contract requires the SAME reference across the entire flow:
+ * discover (advertise) → link (CM stores it) → consent artefact
+ * (`careContexts[].careContextReference`) → data-push (worker must resolve it).
+ *
+ * Historically this was generated three different ways with `Date.now()` +
+ * random suffixes across appointment check-in, discover auto-create and
+ * `addCareContexts`, so the reference advertised at discovery could never be
+ * re-resolved by the worker — the strict artefact-authorised filter then
+ * dropped every entry and the transfer failed with "No care contexts match the
+ * consent scope".
+ *
+ * Deriving the id purely from `encounterId` (already `@unique` in the schema)
+ * guarantees one stable reference per encounter forever — identical no matter
+ * which code path creates the row, idempotent across re-discovery, and immune
+ * to the `CC-${Date.now()}` unique-constraint collision.
+ */
+export function careContextIdForEncounter(encounterId: string): string {
+  return `CC-${encounterId}`;
+}
+
 const SOUNDEX_REPL: Record<string, string> = {
   b: '1', f: '1', p: '1', v: '1',
   c: '2', g: '2', j: '2', k: '2', q: '2', s: '2', x: '2', z: '2',

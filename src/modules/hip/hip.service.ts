@@ -7,7 +7,7 @@ import logger from '../../common/config/logger';
 import EncryptionService from '../../common/utils/encryption';
 import { healthDataPushQueue, HealthDataPushJobData } from '../../common/config/queue';
 import redisClient from '../../common/config/redis';
-import { pickPatientByCascade, deriveHiType, AbdmHiType } from './discovery-helpers';
+import { pickPatientByCascade, deriveHiType, AbdmHiType, careContextIdForEncounter } from './discovery-helpers';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -777,7 +777,8 @@ export class HipService {
         .map(e => e.id);
       if (missingCcEncIds.length) {
         for (const enc of winner.encounters.filter(e => missingCcEncIds.includes(e.id))) {
-          const newId = `CC-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+          // Deterministic, stable reference — must equal what link/data-push use.
+          const newId = careContextIdForEncounter(enc.id);
           const display = sanitizeDisplay(`${enc.type} - ${new Date(enc.createdAt).toLocaleDateString()}`);
           try {
             await prisma.careContext.create({
@@ -786,7 +787,12 @@ export class HipService {
                 encounterId: enc.id,
                 patientId: winner.id,
                 display,
-                hipId: abdmConfig.hip.id,
+                // Multi-tenant: stamp the hipId of the tenant the CM is
+                // discovering (the inbound X-HIP-ID, which `hospitalScope`
+                // already restricted candidates to), NOT the env default —
+                // otherwise the worker's `hipId`-scoped query would never
+                // find this context when fulfilling for the real tenant.
+                hipId: inboundHipId || abdmConfig.hip.id,
               },
             });
             ccByEncId.set(enc.id, { careContextId: newId, display });
@@ -1371,7 +1377,10 @@ export class HipService {
         }
         const careContext = await prisma.careContext.create({
           data: {
-            careContextId: `CC-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            // Deterministic, stable reference (CC-<encounterId>) so the ref we
+            // link here is the SAME one discover advertises and the worker
+            // resolves at data-push time — see careContextIdForEncounter.
+            careContextId: careContextIdForEncounter(context.encounterId),
             encounterId: context.encounterId,
             patientId: patient.id,
             display: context.display,

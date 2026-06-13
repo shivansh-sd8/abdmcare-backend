@@ -7,6 +7,7 @@ import { generateSlots, isValidSlotTime, HospitalScheduleConfig, DoctorScheduleC
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
 import { hospitalScope } from '../../common/utils/scope';
 import { istDayRange, istDayRangeOf } from '../../common/utils/dateRange';
+import { careContextIdForEncounter } from '../hip/discovery-helpers';
 
 interface CreateAppointmentRequest {
   patientId: string;
@@ -554,7 +555,12 @@ export class AppointmentService {
         } else {
           const careContext = await prisma.careContext.create({
             data: {
-              careContextId: `CC-${Date.now()}`,
+              // Deterministic, stable reference (CC-<encounterId>) — identical
+              // to what HIP discover advertises and addCareContexts links, so
+              // the consent artefact's careContextReference always resolves at
+              // data-push time. Also avoids the `CC-${Date.now()}` unique
+              // collision when two check-ins land in the same millisecond.
+              careContextId: careContextIdForEncounter(encounter.id),
               patientId: appointment.patientId,
               encounterId: encounter.id,
               display: `OPD Visit - ${encounter.type}`,
