@@ -13,7 +13,14 @@ const abdmClient = new AbdmClient();
 async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<void> {
   const { transactionId, consentAbdmId, consentPatientId, dataPushUrl, dateRange, hiTypes, keyMaterial } = job.data;
 
-  logger.info('Worker: Processing health data push', { transactionId, jobId: job.id });
+  logger.info('Worker: Processing health data push', {
+    transactionId,
+    jobId: job.id,
+    dataPushUrl,
+    consentAbdmId,
+    hiTypes,
+    dateRange,
+  });
 
   // Track the care-context references involved so a FAILED notification can
   // still carry a valid `statusResponses` array (required by ABDM, else 400).
@@ -303,32 +310,62 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     const pageCount = pages.length;
 
     for (let pageNumber = 0; pageNumber < pageCount; pageNumber++) {
-      // ABDM /v3/.../on-request expects entries in the shape
-      // `{ content, media, checksum, careContextReference }`. We carry hiType
-      // internally for diagnostics/notification but strip it from the wire.
+      // Wire schema (ABDM "Transferring Health Data" OpenAPI, op
+      // `callingDataPushUrl` at /api-hiu/data/notification):
+      //   { transactionId, pageNumber, pageCount, entries[], keyMaterial }
+      //
+      // entry shape: { content, media, checksum, careContextReference }
+      //
+      // STRICT — we deliberately do NOT include any extension fields
+      // (consentId, requestId, …): several HIUs run a JSON-schema validator
+      // that rejects unknown keys with a generic 400, which is exactly the
+      // failure mode we hit before this strip.
       const wireEntries = pages[pageNumber].map(({ content, media, checksum, careContextReference }) => ({
         content,
         media,
         checksum,
         careContextReference,
       }));
-      await abdmClient.post(dataPushUrl, {
+      const pushBody = {
+        transactionId,
         pageNumber,
         pageCount,
-        transactionId,
-        // consentId lets the receiving HIU correlate this push to the consent +
-        // its decryption keypair. The push is sent HIP→HIU directly (ABDM is not
-        // in the push path), so this extra field is safe and only read by the HIU.
-        consentId: consentAbdmId,
         entries: wireEntries,
         keyMaterial: sessionKeyMaterial,
-      });
-      logger.info('Worker: pushed data page', {
-        transactionId,
-        pageNumber,
-        pageCount,
-        entries: pages[pageNumber].length,
-      });
+      };
+      try {
+        await abdmClient.post(dataPushUrl, pushBody);
+        logger.info('Worker: pushed data page', {
+          transactionId,
+          pageNumber,
+          pageCount,
+          entries: pages[pageNumber].length,
+        });
+      } catch (pushErr: any) {
+        // Surface the HIU's actual error body so we can diagnose 4xx without
+        // re-running. Axios attaches the parsed body on `response.data` —
+        // strip large encrypted blobs from the failed-payload echo so we
+        // don't dump megabytes per attempt.
+        const respStatus = pushErr?.response?.status;
+        const respBody = pushErr?.response?.data;
+        const respHeaders = pushErr?.response?.headers;
+        const compactedBody = (typeof respBody === 'object' && respBody)
+          ? JSON.stringify(respBody).slice(0, 800)
+          : String(respBody).slice(0, 800);
+        logger.error('Worker: data push HTTP error', {
+          transactionId,
+          pageNumber,
+          dataPushUrl,
+          status: respStatus,
+          responseBody: compactedBody,
+          contentType: respHeaders?.['content-type'],
+          payloadKeys: Object.keys(pushBody),
+          firstEntryKeys: wireEntries[0] ? Object.keys(wireEntries[0]) : [],
+          keyMaterialCurve: sessionKeyMaterial.curve,
+          keyMaterialParams: sessionKeyMaterial.dhPublicKey.parameters,
+        });
+        throw pushErr;
+      }
     }
 
     // Per-care-context delivery status for the data-flow notification.
