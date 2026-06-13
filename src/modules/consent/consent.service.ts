@@ -526,7 +526,38 @@ export class ConsentService {
       }
     }
     const consents = await prisma.consent.findMany({ where: { patientId }, orderBy: { createdAt: 'desc' } });
-    return { success: true, data: consents };
+
+    // Annotate each consent with a `staleReferences` flag — the consent
+    // artefact authorises a specific list of careContextReferences, and
+    // those references can become orphans (e.g. after a `prisma migrate
+    // reset` regenerates careContextIds, or after a care-context is hard-
+    // deleted). When any authorised ref is missing from our CareContext
+    // table the consent is unusable: the worker would push 0 records and
+    // ABDM would surface a "fetch failed" toast in the patient's ABHA app.
+    //
+    // We expose the flag so the UI can render a "Stale references" warning
+    // chip and tell the user "ask the patient to revoke this consent and
+    // re-grant after we re-link care contexts" instead of leaving them to
+    // chase the failure in the backend logs.
+    const currentRefs = new Set(
+      (await prisma.careContext.findMany({
+        where: { patientId },
+        select: { careContextId: true },
+      })).map((cc) => cc.careContextId),
+    );
+    const annotated = consents.map((c) => {
+      const artefactCcs: any[] = Array.isArray((c.artefactBody as any)?.careContexts)
+        ? ((c.artefactBody as any).careContexts as any[])
+        : [];
+      const authorisedRefs: string[] = artefactCcs
+        .map((x: any) => x?.careContextReference)
+        .filter((r: any): r is string => typeof r === 'string' && r.length > 0);
+      const missingRefs = authorisedRefs.filter((r) => !currentRefs.has(r));
+      const staleReferences = authorisedRefs.length > 0 && missingRefs.length === authorisedRefs.length;
+      return { ...c, staleReferences, missingReferenceCount: missingRefs.length };
+    });
+
+    return { success: true, data: annotated };
   }
 
   async revokeConsent(consentId: string, currentUser?: { role?: string; hospitalId?: string }) {

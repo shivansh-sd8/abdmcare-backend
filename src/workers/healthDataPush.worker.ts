@@ -1,4 +1,4 @@
-import { Job } from 'bullmq';
+import { Job, UnrecoverableError } from 'bullmq';
 import prisma from '../common/config/database';
 import logger from '../common/config/logger';
 import { abdmConfig } from '../common/config/abdm';
@@ -9,6 +9,22 @@ import { HealthDataPushJobData, createHealthDataPushWorker } from '../common/con
 import { deriveHiType, hiTypeToProfile, AbdmHiType } from '../modules/hip/discovery-helpers';
 
 const abdmClient = new AbdmClient();
+
+/**
+ * Sentinel thrown when a transfer cannot succeed regardless of retry — e.g.
+ * the consent artefact authorises careContextReferences our HIP no longer
+ * stores (orphan refs after a DB reset), or the consent date-window has zero
+ * matching encounters. Re-running the same job in 5/15/45s will deterministically
+ * fail again, so we surface this to BullMQ as `UnrecoverableError` to skip the
+ * remaining attempts. The message becomes the FAILED-notify description ABDM
+ * relays to the patient's ABHA app, so it should be human-readable.
+ */
+class UnrecoverablePushError extends Error {
+  constructor(public readonly reason: string, public readonly description: string) {
+    super(reason);
+    this.name = 'UnrecoverablePushError';
+  }
+}
 
 async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<void> {
   const { transactionId, consentAbdmId, consentPatientId, dataPushUrl, dateRange, hiTypes, authorisedCareContextRefs, keyMaterial } = job.data;
@@ -312,16 +328,38 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     }
 
     // If no entries were built (e.g. no encounters in range OR all dropped
-    // by the consent-hiType filter), do NOT push a synthetic empty bundle —
-    // ABDM treats that as "data delivered" which misleads the user. Instead
-    // skip the push entirely and notify FAILED with reason "no records".
+    // by the consent-hiType filter / artefact careContextReference filter),
+    // do NOT push a synthetic empty bundle — ABDM treats that as "data
+    // delivered" which misleads the user. Instead skip the push entirely
+    // and notify FAILED with a precise reason.
+    //
+    // This is also UNRECOVERABLE — the same job re-running in 5s/15s will
+    // hit the same DB state and fail identically, generating duplicate
+    // FAILED notifications to ABDM (which the patient sees as repeated
+    // "fetch failed" toasts). We classify the failure so BullMQ skips
+    // remaining attempts.
     if (entries.length === 0) {
+      // Disambiguate the most useful error variant for the patient.
+      const hadAuthorisedFilter = !!(authorisedCareContextRefs && authorisedCareContextRefs.length > 0);
+      const droppedByAuthorisedFilter = hadAuthorisedFilter && hiTypeFiltered.length > 0 && validContexts.length === 0;
+      let description: string;
+      if (droppedByAuthorisedFilter) {
+        description = 'Care contexts referenced in this consent are no longer available at the HIP. Please unlink and re-link records, then grant a new consent.';
+      } else if (dateValidContexts.length === 0) {
+        description = 'No encounters fall within the consented date range.';
+      } else if (hiTypeFiltered.length === 0) {
+        description = 'No records of the consented health-information types are available for this patient.';
+      } else {
+        description = 'No records match the consent scope.';
+      }
       logger.info('Worker: No care contexts match consent scope, marking transfer as FAILED with no-data', {
         transactionId,
         dateRange,
         consentedHiTypes: hiTypes,
+        droppedByAuthorisedFilter,
+        description,
       });
-      throw new Error('No care contexts match the consent scope (date range + hiTypes)');
+      throw new UnrecoverablePushError('No care contexts match the consent scope', description);
     }
 
     logger.info('Worker: Built FHIR bundles per consented hiType', {
@@ -424,32 +462,63 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
 
     logger.info('Worker: Health data push completed', { transactionId, entriesCount: entries.length, pageCount });
   } catch (error: any) {
-    logger.error('Worker: Health data push failed', { transactionId, error: error.message });
+    const isUnrecoverable = error instanceof UnrecoverablePushError;
+    const description: string = isUnrecoverable
+      ? (error as UnrecoverablePushError).description
+      : 'Transfer failed';
 
-    // Notify ABDM: push failed
-    try {
-      await abdmClient.post(abdmConfig.endpoints.hip.dataFlowNotify, {
-        notification: {
-          consentId: consentAbdmId,
-          transactionId,
-          doneAt: new Date().toISOString(),
-          notifier: { type: 'HIP', id: abdmConfig.hip.id },
-          statusNotification: {
-            sessionStatus: 'FAILED',
-            hipId: abdmConfig.hip.id,
-            // ABDM requires a non-empty statusResponses array even on failure.
-            statusResponses: (careContextRefs.length > 0 ? careContextRefs : ['']).map((ref) => ({
-              careContextReference: ref,
-              hiStatus: 'FAILED',
-              description: 'Transfer failed',
-            })),
+    logger.error('Worker: Health data push failed', {
+      transactionId,
+      error: error.message,
+      unrecoverable: isUnrecoverable,
+      attempt: job.attemptsMade + 1,
+      attemptsAllowed: job.opts?.attempts,
+    });
+
+    // Notify ABDM: push failed. Send the FAILED notification at most ONCE per
+    // transaction — for unrecoverable failures we know retries won't help, and
+    // for transient failures we let the final attempt own the FAILED notify
+    // (BullMQ surfaces `attemptsMade` 0-indexed so `attemptsMade + 1 === attempts`
+    // means "this is the last attempt").
+    const isLastAttempt = (job.attemptsMade + 1) >= (job.opts?.attempts || 1);
+    const shouldNotify = isUnrecoverable || isLastAttempt;
+    if (shouldNotify) {
+      try {
+        await abdmClient.post(abdmConfig.endpoints.hip.dataFlowNotify, {
+          notification: {
+            consentId: consentAbdmId,
+            transactionId,
+            doneAt: new Date().toISOString(),
+            notifier: { type: 'HIP', id: abdmConfig.hip.id },
+            statusNotification: {
+              sessionStatus: 'FAILED',
+              hipId: abdmConfig.hip.id,
+              // ABDM requires a non-empty statusResponses array even on failure.
+              statusResponses: (careContextRefs.length > 0 ? careContextRefs : ['']).map((ref) => ({
+                careContextReference: ref,
+                hiStatus: 'FAILED',
+                description,
+              })),
+            },
           },
-        },
+        });
+      } catch (notifyErr: any) {
+        logger.error('Worker: Failed to send FAILED notification to ABDM', { error: notifyErr.message });
+      }
+    } else {
+      logger.info('Worker: Skipping FAILED notification — will retry', {
+        transactionId,
+        attempt: job.attemptsMade + 1,
+        attemptsAllowed: job.opts?.attempts,
       });
-    } catch (notifyErr: any) {
-      logger.error('Worker: Failed to send FAILED notification to ABDM', { error: notifyErr.message });
     }
 
+    // Surface unrecoverable failures to BullMQ as `UnrecoverableError` so it
+    // skips the remaining attempts. Transient failures keep the original error
+    // type so the queue's exponential backoff still kicks in.
+    if (isUnrecoverable) {
+      throw new UnrecoverableError(error.message);
+    }
     throw error;
   }
 }
