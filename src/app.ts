@@ -133,7 +133,14 @@ app.use('/api/v3/hiu/consent/request', hiuConsentV3Routes);
 // HIU-side consent ARTEFACT delivery → /api/v3/hiu/consents/on-fetch
 // (M3 spec ndhm-hiu /v0.5/consents/on-fetch — async response to /consent/v3/fetch).
 // MUST be mounted before /api/v3/hiu (which applies authenticate middleware).
+//
+// ABDM dispatches under BOTH spellings depending on which CM build is on the
+// gateway: the M3 spec doc says `/consents/on-fetch` (plural) but the live
+// dev sandbox actually delivers to `/consent/on-fetch` (singular) — observed
+// in production logs as a 401 because the singular path fell through to the
+// generic /api/v3/hiu auth-protected router. We listen on both.
 app.use('/api/v3/hiu/consents', hiuConsentsOnFetchRoutes);
+app.use('/api/v3/hiu/consent', hiuConsentsOnFetchRoutes);
 // HIP-side consent notification → /api/v3/consent/request/hip/notify
 app.use('/api/v3/consent/request', consentV3Routes);
 app.use('/api/v3/link', linkV3Routes);
