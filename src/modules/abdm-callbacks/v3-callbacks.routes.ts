@@ -392,15 +392,27 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
           for (const ref of linkedRefs) {
             const cc = await prisma.careContext.findFirst({
               where: { careContextId: ref },
-              include: { encounter: true },
+              include: { encounter: { include: { appointment: { select: { id: true } } } } },
             });
             const enc: any = cc?.encounter;
             let hiTypes: string[] = ['OPConsultation'];
             if (enc) {
-              const [hasInv, hasPresc, hasImm] = await Promise.all([
+              const apptId: string | undefined = enc.appointment?.id;
+              const admId: string | undefined = enc.admissionId || undefined;
+              const [hasInv, hasPresc, hasImm, hasPay] = await Promise.all([
                 prisma.investigation.count({ where: { encounterId: enc.id } }),
                 prisma.encounterPrescription.count({ where: { encounterId: enc.id } }),
                 prisma.immunization.count({ where: { encounterId: enc.id } }),
+                (apptId || admId)
+                  ? prisma.payment.count({
+                      where: {
+                        OR: [
+                          ...(apptId ? [{ appointmentId: apptId }] : []),
+                          ...(admId  ? [{ admissionId: admId  }] : []),
+                        ],
+                      },
+                    })
+                  : Promise.resolve(0),
               ]);
               const hi = deriveHiType({
                 type: enc.type,
@@ -409,6 +421,7 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
                 hasInvestigation: !!hasInv,
                 hasPrescription: !!hasPresc,
                 hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
+                hasPayment: !!hasPay,
               });
               hiTypes = [hi];
             }
@@ -704,7 +717,7 @@ hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(asy
     try {
       const contexts = await prisma.careContext.findMany({
         where: { patientId: patient.id, linkToken, linkStatus: 'PENDING' },
-        include: { encounter: true },
+        include: { encounter: { include: { appointment: { select: { id: true } } } } },
       });
 
       if (!contexts.length) {

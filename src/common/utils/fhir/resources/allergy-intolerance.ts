@@ -1,4 +1,4 @@
-import { generateUUID, SYSTEM, FHIRReference, FHIRResource } from '../coding-tables';
+import { generateUUID, SYSTEM, FHIRReference, FHIRResource, NRCES_PROFILES } from '../coding-tables';
 
 export function buildAllergyIntolerances(
   allergies: string | null | undefined,
@@ -12,7 +12,7 @@ export function buildAllergyIntolerances(
       resource: {
         resourceType: 'AllergyIntolerance',
         id: uuid,
-        meta: { profile: [`${SYSTEM.NRCES_BASE}/AllergyIntolerance`] },
+        meta: { profile: [NRCES_PROFILES.AllergyIntolerance] },
         clinicalStatus: {
           coding: [{ system: 'http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical', code: 'active', display: 'Active' }],
         },
@@ -37,7 +37,7 @@ export function buildAllergyIntolerances(
       resource: {
         resourceType: 'AllergyIntolerance',
         id: uuid,
-        meta: { profile: [`${SYSTEM.NRCES_BASE}/AllergyIntolerance`] },
+        meta: { profile: [NRCES_PROFILES.AllergyIntolerance] },
         clinicalStatus: {
           coding: [{ system: 'http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical', code: 'active', display: 'Active' }],
         },

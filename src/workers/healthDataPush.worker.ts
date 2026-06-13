@@ -68,6 +68,7 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
             labOrders: true,
             emrRecords: true,
             ipdAdmission: true,
+            appointment: { select: { id: true } },
           },
         },
       },
@@ -94,10 +95,21 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       logger.warn('Worker: No encounters found in consent date range', { transactionId, from: dateRange?.from, to: dateRange?.to });
     }
 
-    // Load vitals, investigations and immunizations separately (they link via
-    // encounterId string, not a Prisma relation).
+    // Load vitals, investigations, immunizations and payments separately
+    // (vitals/investigations/immunizations link via encounterId, payments
+    // link via appointmentId or admissionId — Payment has no direct
+    // encounterId column).
     const dateValidEncIds = dateValidContexts.map((cc) => cc.encounter!.id);
-    const [allVitals, allInvestigations, allImmunizations] = await Promise.all([
+    const dateValidAppointmentIds = dateValidContexts
+      .map((cc) => (cc.encounter as any)?.appointment?.id)
+      .filter(Boolean) as string[];
+    const dateValidAdmissionIds = Array.from(new Set(
+      dateValidContexts
+        .map((cc) => cc.encounter?.admissionId)
+        .filter(Boolean) as string[],
+    ));
+
+    const [allVitals, allInvestigations, allImmunizations, allPayments] = await Promise.all([
       dateValidEncIds.length > 0
         ? prisma.vitals.findMany({ where: { encounterId: { in: dateValidEncIds } } })
         : Promise.resolve([]),
@@ -107,7 +119,34 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       dateValidEncIds.length > 0
         ? prisma.immunization.findMany({ where: { encounterId: { in: dateValidEncIds } } })
         : Promise.resolve([]),
+      (dateValidAppointmentIds.length > 0 || dateValidAdmissionIds.length > 0)
+        ? prisma.payment.findMany({
+            where: {
+              OR: [
+                ...(dateValidAppointmentIds.length > 0 ? [{ appointmentId: { in: dateValidAppointmentIds } }] : []),
+                ...(dateValidAdmissionIds.length > 0 ? [{ admissionId: { in: dateValidAdmissionIds } }] : []),
+              ],
+              status: { in: ['PAID', 'PARTIAL', 'REFUNDED', 'PENDING'] },
+            },
+          })
+        : Promise.resolve([]),
     ]);
+
+    // Bucket payments by encounter id. We resolve via appointmentId (OPD)
+    // and admissionId (IPD); a single Payment row will only appear under one
+    // bucket because each row has either appointmentId OR admissionId, not
+    // both.
+    const paymentsByEnc = new Map<string, any[]>();
+    for (const cc of dateValidContexts) {
+      const enc = cc.encounter!;
+      const apptId = (enc as any).appointment?.id;
+      const admId = enc.admissionId;
+      const matched = allPayments.filter((p: any) =>
+        (apptId && p.appointmentId === apptId) ||
+        (admId && p.admissionId === admId),
+      );
+      if (matched.length > 0) paymentsByEnc.set(enc.id, matched);
+    }
 
     // Per-care-context hiType derivation (same algorithm as discovery/link).
     // The hiType drives both the consent-scope filter AND the FHIR profile
@@ -123,6 +162,7 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
           (enc.prescriptions?.length || 0) > 0 ||
           (enc as any).labOrders?.length > 0,
         hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
+        hasPayment: (paymentsByEnc.get(enc.id)?.length || 0) > 0,
       });
       return { cc, hiType: ccHiType };
     });
@@ -348,6 +388,20 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
             administeredAt: im.administeredAt,
             reason: im.reason,
             notes: im.notes,
+          })),
+          payments: (paymentsByEnc.get(enc.id) || []).map((p: any) => ({
+            id: p.id,
+            amount: p.amount != null ? Number(p.amount) : 0,
+            paymentMethod: p.paymentMethod,
+            status: p.status,
+            receiptNumber: p.receiptNumber,
+            transactionId: p.transactionId,
+            description: p.description,
+            items: p.items,
+            paidAt: p.paidAt,
+            createdAt: p.createdAt,
+            appointmentId: p.appointmentId,
+            admissionId: p.admissionId,
           })),
           profileOverride,
         });

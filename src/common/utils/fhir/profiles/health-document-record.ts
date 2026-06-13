@@ -1,4 +1,4 @@
-import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID } from '../coding-tables';
+import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID, BUNDLE_IDENTIFIER_SYSTEM } from '../coding-tables';
 import { buildComposition, SECTION_CODES, makeTextSection, makeRefSection, CompositionSection } from '../resources/composition';
 import type { FHIRBundleInput } from '../fhir-builder';
 
@@ -82,7 +82,7 @@ export function buildHealthDocumentBundle(input: FHIRBundleInput & {
     resourceType: 'Bundle',
     id: bundleId,
     meta: { lastUpdated: new Date().toISOString(), profile: [NRCES_PROFILES.HealthDocumentRecord] },
-    identifier: { system: 'https://www.ndhm.gov.in/bundle', value: bundleId },
+    identifier: { system: BUNDLE_IDENTIFIER_SYSTEM, value: bundleId },
     type: 'document',
     timestamp: new Date().toISOString(),
     entry: [

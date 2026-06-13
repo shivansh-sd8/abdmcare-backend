@@ -1,4 +1,4 @@
-import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID, COMPOSITION_TYPE } from '../coding-tables';
+import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID, COMPOSITION_TYPE, BUNDLE_IDENTIFIER_SYSTEM } from '../coding-tables';
 import { buildComposition, SECTION_CODES, makeRefSection, makeTextSection, CompositionSection } from '../resources/composition';
 import { allergiesNarrative, immunizationsNarrative } from './narrative-helpers';
 import type { FHIRBundleInput } from '../fhir-builder';
@@ -91,7 +91,7 @@ export function buildImmunizationRecordBundle(input: FHIRBundleInput & {
     resourceType: 'Bundle',
     id: bundleId,
     meta: { lastUpdated: new Date().toISOString(), profile: [NRCES_PROFILES.ImmunizationRecord] },
-    identifier: { system: 'https://www.ndhm.gov.in/bundle', value: bundleId },
+    identifier: { system: BUNDLE_IDENTIFIER_SYSTEM, value: bundleId },
     type: 'document',
     timestamp: new Date().toISOString(),
     entry: [

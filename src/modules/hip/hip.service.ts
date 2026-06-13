@@ -587,7 +587,11 @@ export class HipService {
         where: { OR: orClauses, ...hospitalScope },
         include: {
           abhaRecord: true,
-          encounters: { orderBy: { createdAt: 'desc' }, take: 10 },
+          encounters: {
+            orderBy: { createdAt: 'desc' },
+            take: 10,
+            include: { appointment: { select: { id: true } } },
+          },
         },
         take: 25,
       });
@@ -642,7 +646,27 @@ export class HipService {
       const winner = candidates.find(c => c.id === cascade.patient!.id)!;
       const encIds = winner.encounters.map(e => e.id);
 
-      const [pcounts, icounts, immcounts] = await Promise.all([
+      // Payment rows live one-step removed from encounter (Payment links by
+      // appointmentId or admissionId, not encounterId). Resolve those FK
+      // values for each encounter so the same payment-detection cascade we
+      // run on data push also runs during discovery — that's how Invoice
+      // care contexts (no clinical data, only a bill) get advertised.
+      const apptByEnc = new Map<string, string>();
+      const admByEnc = new Map<string, string>();
+      const apptIds: string[] = [];
+      const admIds: string[] = [];
+      for (const enc of winner.encounters as any[]) {
+        if (enc.appointment?.id) {
+          apptByEnc.set(enc.id, enc.appointment.id);
+          apptIds.push(enc.appointment.id);
+        }
+        if (enc.admissionId) {
+          admByEnc.set(enc.id, enc.admissionId);
+          admIds.push(enc.admissionId);
+        }
+      }
+
+      const [pcounts, icounts, immcounts, paymentRows] = await Promise.all([
         encIds.length
           ? prisma.encounterPrescription.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
           : Promise.resolve([]),
@@ -652,11 +676,32 @@ export class HipService {
         encIds.length
           ? prisma.immunization.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
           : Promise.resolve([]),
+        (apptIds.length || admIds.length)
+          ? prisma.payment.findMany({
+              where: {
+                OR: [
+                  ...(apptIds.length ? [{ appointmentId: { in: apptIds } }] : []),
+                  ...(admIds.length ? [{ admissionId: { in: admIds } }] : []),
+                ],
+              },
+              select: { appointmentId: true, admissionId: true },
+            })
+          : Promise.resolve([]),
       ]);
 
       const prescByEnc = new Map(pcounts.map(p => [p.encounterId!, p._count as any]));
       const invByEnc = new Map(icounts.map(i => [i.encounterId!, i._count as any]));
       const immByEnc = new Map(immcounts.map(i => [i.encounterId!, i._count as any]));
+      const paidApptIds = new Set(paymentRows.map((p: any) => p.appointmentId).filter(Boolean));
+      const paidAdmIds = new Set(paymentRows.map((p: any) => p.admissionId).filter(Boolean));
+      const payByEnc = new Map<string, boolean>();
+      for (const enc of winner.encounters) {
+        const apptId = apptByEnc.get(enc.id);
+        const admId = admByEnc.get(enc.id);
+        if ((apptId && paidApptIds.has(apptId)) || (admId && paidAdmIds.has(admId))) {
+          payByEnc.set(enc.id, true);
+        }
+      }
 
       // Resolve CareContext rows so discover can advertise the SAME persistent
       // identifier (`careContextId`, e.g. "CC-...") that HIP-initiated linking
@@ -724,6 +769,7 @@ export class HipService {
           hasInvestigation: !!invByEnc.get(enc.id),
           hasPrescription: !!prescByEnc.get(enc.id),
           hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
+          hasPayment: !!payByEnc.get(enc.id),
         });
         const cc = ccByEncId.get(enc.id);
         return {
@@ -908,7 +954,7 @@ export class HipService {
       const contexts = await prisma.careContext.findMany({
         where: { patientId: patient.id },
         orderBy: { createdAt: 'desc' },
-        include: { encounter: true },
+        include: { encounter: { include: { appointment: { select: { id: true } } } } },
       });
       await prisma.careContext.updateMany({
         where: { patientId: patient.id },
@@ -1241,7 +1287,7 @@ export class HipService {
 
         const pendingContexts = await prisma.careContext.findMany({
           where: { patientId: patient.id, linkStatus: 'PENDING' },
-          include: { encounter: true },
+          include: { encounter: { include: { appointment: { select: { id: true } } } } },
         });
 
         // Group contexts by their derived hiType so each `patient[]` block
@@ -1775,7 +1821,20 @@ export class HipService {
       .map(c => c.encounter?.id)
       .filter(Boolean) as string[];
 
-    const [pcounts, icounts, immcounts] = await Promise.all([
+    // Resolve appointment + admission ids so payment-only encounters
+    // (advertised as `Invoice` hiType) are grouped correctly.
+    const apptIdsByEnc = new Map<string, string>();
+    const admIdsByEnc = new Map<string, string>();
+    for (const c of contexts) {
+      const enc: any = c.encounter;
+      if (!enc) continue;
+      if (enc.appointment?.id) apptIdsByEnc.set(enc.id, enc.appointment.id);
+      if (enc.admissionId) admIdsByEnc.set(enc.id, enc.admissionId);
+    }
+    const apptIds = Array.from(apptIdsByEnc.values());
+    const admIds = Array.from(new Set(admIdsByEnc.values()));
+
+    const [pcounts, icounts, immcounts, payRows] = await Promise.all([
       encIds.length
         ? prisma.encounterPrescription.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
         : Promise.resolve([]),
@@ -1785,10 +1844,30 @@ export class HipService {
       encIds.length
         ? prisma.immunization.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
         : Promise.resolve([]),
+      (apptIds.length || admIds.length)
+        ? prisma.payment.findMany({
+            where: {
+              OR: [
+                ...(apptIds.length ? [{ appointmentId: { in: apptIds } }] : []),
+                ...(admIds.length ? [{ admissionId: { in: admIds } }] : []),
+              ],
+            },
+            select: { appointmentId: true, admissionId: true },
+          })
+        : Promise.resolve([]),
     ]);
     const prescByEnc = new Map(pcounts.map(p => [p.encounterId!, p._count as any]));
     const invByEnc = new Map(icounts.map(i => [i.encounterId!, i._count as any]));
     const immByEnc = new Map(immcounts.map(i => [i.encounterId!, i._count as any]));
+    const paidApptIds = new Set(payRows.map((p: any) => p.appointmentId).filter(Boolean));
+    const paidAdmIds = new Set(payRows.map((p: any) => p.admissionId).filter(Boolean));
+    const payByEnc = new Map<string, boolean>();
+    for (const [encId, apptId] of apptIdsByEnc.entries()) {
+      if (paidApptIds.has(apptId)) payByEnc.set(encId, true);
+    }
+    for (const [encId, admId] of admIdsByEnc.entries()) {
+      if (paidAdmIds.has(admId)) payByEnc.set(encId, true);
+    }
 
     const groups = new Map<AbdmHiType, Array<{ referenceNumber: string; display: string }>>();
     for (const cc of contexts) {
@@ -1801,6 +1880,7 @@ export class HipService {
             hasInvestigation: !!invByEnc.get(enc.id),
             hasPrescription: !!prescByEnc.get(enc.id),
             hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
+            hasPayment: !!payByEnc.get(enc.id),
           })
         : 'OPConsultation';
       const list = groups.get(hiType) || [];

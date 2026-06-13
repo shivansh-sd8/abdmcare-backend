@@ -16,6 +16,8 @@ import { buildDiagnosticReportBundle } from './profiles/diagnostic-report-record
 import { buildHealthDocumentBundle } from './profiles/health-document-record';
 import { buildImmunizationRecordBundle } from './profiles/immunization-record';
 import { buildWellnessRecordBundle } from './profiles/wellness-record';
+import { buildInvoiceRecordBundle } from './profiles/invoice-record';
+import { buildInvoices, InvoiceInput } from './resources/invoice';
 
 // ─── Input types matching Prisma models ──────────────────────────────────────
 
@@ -114,6 +116,14 @@ export interface FHIRBundleInput {
   }>;
   /** Vaccination doses administered. Drives the ImmunizationRecord profile. */
   immunizations?: ImmunizationInput[];
+  /**
+   * Payments collected for the encounter. Drives the InvoiceRecord profile.
+   * Also surfaced in narratives of clinical bundles when payments exist
+   * alongside other clinical data (so HIUs can show "you also paid ₹X" next
+   * to the encounter), but only the dedicated InvoiceRecord profile renders
+   * them as FHIR Invoice resources.
+   */
+  payments?: InvoiceInput[];
   /** Force a specific profile instead of auto-detecting from encounter type */
   profileOverride?: ProfileName;
 }
@@ -127,7 +137,8 @@ export type ProfileName =
   | 'DiagnosticReportRecord'
   | 'HealthDocumentRecord'
   | 'ImmunizationRecord'
-  | 'WellnessRecord';
+  | 'WellnessRecord'
+  | 'InvoiceRecord';
 
 /**
  * Pick the right NRCeS FHIR profile for an encounter. Mirrors
@@ -145,7 +156,9 @@ export type ProfileName =
  *      DiagnosticReportRecord
  *   4. Prescription-only (no diagnosis + no investigation)         →
  *      PrescriptionRecord
- *   5. Anything else (incl. OPD/TELE/EMERGENCY with diagnosis)     →
+ *   5. Payment-only (no clinical data of any kind)                 →
+ *      InvoiceRecord
+ *   6. Anything else (incl. OPD/TELE/EMERGENCY with diagnosis)     →
  *      OPConsultRecord
  */
 function selectProfile(input: FHIRBundleInput): ProfileName {
@@ -163,6 +176,7 @@ function selectProfile(input: FHIRBundleInput): ProfileName {
     enc.diagnosis ||
     enc.provisionalDiagnosis
   );
+  const hasPayments = (input.payments?.length || 0) > 0;
 
   if (hasImmunizations && !hasDiagnosis && !hasInvestigations) {
     return 'ImmunizationRecord';
@@ -178,6 +192,10 @@ function selectProfile(input: FHIRBundleInput): ProfileName {
 
   if (hasPrescriptions && !hasDiagnosis && !hasInvestigations) {
     return 'PrescriptionRecord';
+  }
+
+  if (hasPayments && !hasDiagnosis && !hasInvestigations && !hasPrescriptions && !hasImmunizations) {
+    return 'InvoiceRecord';
   }
 
   // Default — covers OPD, TELECONSULTATION, EMERGENCY, and any encounter
@@ -217,10 +235,19 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
   const encounterRef: FHIRReference = { reference: urnUUID(encounterResult.uuid) };
 
   // Build clinical resources
-  const allObservations: Array<{ uuid: string; resource: any }> = [];
+  // ──────────────────────────────────────────────────────────────────────
+  // We keep VITAL observations and LAB-ANALYTE observations in separate
+  // lists. Both end up in the bundle's `entry[]` so every resource has a
+  // fullUrl, but only the vitals UUIDs are fed to the "Vital Signs"
+  // Composition section. Lab analytes are reachable via
+  // `DiagnosticReport.result[]` and don't need a section reference of
+  // their own — folding them into the Vital Signs section is what made
+  // the ABHA app render Hb/RBC/Haematocrit under "Vital Signs".
+  // ──────────────────────────────────────────────────────────────────────
+  const vitalObservations: Array<{ uuid: string; resource: any }> = [];
   if (input.vitals) {
     for (const v of input.vitals) {
-      allObservations.push(...buildObservations(v, patientRef, encounterRef));
+      vitalObservations.push(...buildObservations(v, patientRef, encounterRef));
     }
   }
 
@@ -243,8 +270,12 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     encounterRef,
   );
 
-  // Merge lab/analyte observations from diagnostic reports into allObservations
-  allObservations.push(...diagnosticResult.observations);
+  // Lab-analyte Observations + auxiliary Specimen resources from the lab
+  // results live alongside the DiagnosticReport but are NOT advertised in
+  // the Vital Signs Composition section.
+  const labAuxiliaryResources = diagnosticResult.observations;
+  // All Observation/Specimen entries that need a fullUrl in the bundle.
+  const allObservations = [...vitalObservations, ...labAuxiliaryResources];
 
   const allergyResults = buildAllergyIntolerances(
     input.encounter.allergies,
@@ -259,6 +290,12 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     encounterRef,
   );
 
+  const invoiceResults = buildInvoices(
+    input.payments || [],
+    patientRef,
+    { reference: urnUUID(organizationResult.uuid) },
+  );
+
   // Prepare bundle entries
   const patientEntry: BundleEntry = { fullUrl: urnUUID(patientResult.uuid), resource: patientResult.resource };
   const practitionerEntry: BundleEntry = { fullUrl: urnUUID(practitionerResult.uuid), resource: practitionerResult.resource };
@@ -271,6 +308,7 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
   const diagnosticEntries: BundleEntry[] = diagnosticResult.reports.map(d => ({ fullUrl: urnUUID(d.uuid), resource: d.resource }));
   const allergyEntries: BundleEntry[] = allergyResults.map(a => ({ fullUrl: urnUUID(a.uuid), resource: a.resource }));
   const immunizationEntries: BundleEntry[] = immunizationResults.map(i => ({ fullUrl: urnUUID(i.uuid), resource: i.resource }));
+  const invoiceEntries: BundleEntry[] = invoiceResults.map(i => ({ fullUrl: urnUUID(i.uuid), resource: i.resource }));
 
   const commonPayload = {
     ...input,
@@ -284,16 +322,23 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     diagnosticEntries,
     allergyEntries,
     immunizationEntries,
+    invoiceEntries,
     patientUUID: patientResult.uuid,
     practitionerUUID: practitionerResult.uuid,
     organizationUUID: organizationResult.uuid,
     encounterUUID: encounterResult.uuid,
-    observationUUIDs: allObservations.map(o => o.uuid),
+    // `observationUUIDs` is the list referenced by the "Vital Signs"
+    // Composition section and MUST contain only true vital observations.
+    // Lab analytes are reachable via DiagnosticReport.result; surfacing
+    // them as a section reference makes PHR apps display them under
+    // Vital Signs (we hit this exact bug — Hb/RBC under "Vital Signs").
+    observationUUIDs: vitalObservations.map(o => o.uuid),
     conditionUUIDs: conditionResults.map(c => c.uuid),
     medicationUUIDs: medicationResults.map(m => m.uuid),
     diagnosticUUIDs: diagnosticResult.reports.map(d => d.uuid),
     allergyUUIDs: allergyResults.map(a => a.uuid),
     immunizationUUIDs: immunizationResults.map(i => i.uuid),
+    invoiceUUIDs: invoiceResults.map(i => i.uuid),
   };
 
   const profile = selectProfile(input);
@@ -313,6 +358,8 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
       return buildImmunizationRecordBundle(commonPayload);
     case 'WellnessRecord':
       return buildWellnessRecordBundle(commonPayload);
+    case 'InvoiceRecord':
+      return buildInvoiceRecordBundle(commonPayload);
   }
 }
 

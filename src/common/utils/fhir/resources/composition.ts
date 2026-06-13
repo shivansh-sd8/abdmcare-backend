@@ -192,6 +192,14 @@ export const SECTION_CODES = {
   documentReference: {
     coding: [{ system: SYSTEM.LOINC, code: '11488-4', display: 'Consultation note' }],
   },
+  // ── M2 InvoiceRecord section ──────────────────────────────────────────────
+  // Per ABDM Health Record Formats §"Invoice Record" the bundle has one
+  // section ("Invoice") that points to one or more FHIR Invoice resources.
+  // No standard LOINC/SNOMED concept exists for an "invoice section"; ABDM's
+  // sample bundles use a custom code under `https://projecteka.in/sct`.
+  invoice: {
+    coding: [{ system: 'https://projecteka.in/sct', code: 'Invoice', display: 'Invoice' }],
+  },
 } as const;
 
 export function makeTextSection(title: string, code: CompositionSection['code'], text: string): CompositionSection {

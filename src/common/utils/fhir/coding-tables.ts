@@ -36,6 +36,26 @@ export interface BundleEntry {
   resource: FHIRResource;
 }
 
+// ─── Bundle.identifier.system ─────────────────────────────────────────────
+// Per FHIR R4 / NRCeS the Bundle.identifier.system MUST point to the entity
+// that "owns" the bundle id. For an HIP that's its facility URL — the value
+// becomes traceable back to the originating system. We resolve, in order:
+//   1. ABDM_BUNDLE_IDENTIFIER_SYSTEM env override (explicit URL),
+//   2. derive from HIP_ID when set ("https://<hipId>/fhir/bundle"),
+//   3. fall back to the legacy NDHM placeholder so existing flows keep
+//      working pre-deploy.
+// The fallback is what older versions hardcoded; receivers accept it but
+// using the HIP's own domain is what NRCeS recommends.
+function resolveBundleIdentifierSystem(): string {
+  const explicit = process.env.ABDM_BUNDLE_IDENTIFIER_SYSTEM?.trim();
+  if (explicit) return explicit;
+  const hipId = process.env.HIP_ID?.trim();
+  if (hipId) return `https://${hipId.replace(/^https?:\/\//, '').replace(/\/+$/, '')}/fhir/bundle`;
+  return 'https://www.ndhm.gov.in/bundle';
+}
+
+export const BUNDLE_IDENTIFIER_SYSTEM = resolveBundleIdentifierSystem();
+
 // ─── System URLs ─────────────────────────────────────────────────────────────
 
 export const SYSTEM = {
@@ -66,6 +86,11 @@ export const NRCES_PROFILES = {
   DiagnosticReport: `${SYSTEM.NRCES_BASE}/DiagnosticReport`,
   Composition: `${SYSTEM.NRCES_BASE}/Composition`,
   Immunization: `${SYSTEM.NRCES_BASE}/Immunization`,
+  Invoice: `${SYSTEM.NRCES_BASE}/Invoice`,
+  AllergyIntolerance: `${SYSTEM.NRCES_BASE}/AllergyIntolerance`,
+  Specimen: `${SYSTEM.NRCES_BASE}/Specimen`,
+  DocumentReference: `${SYSTEM.NRCES_BASE}/DocumentReference`,
+  Procedure: `${SYSTEM.NRCES_BASE}/Procedure`,
   OPConsultRecord: `${SYSTEM.NRCES_BASE}/OPConsultRecord`,
   DischargeSummaryRecord: `${SYSTEM.NRCES_BASE}/DischargeSummaryRecord`,
   PrescriptionRecord: `${SYSTEM.NRCES_BASE}/PrescriptionRecord`,
@@ -73,6 +98,7 @@ export const NRCES_PROFILES = {
   HealthDocumentRecord: `${SYSTEM.NRCES_BASE}/HealthDocumentRecord`,
   ImmunizationRecord: `${SYSTEM.NRCES_BASE}/ImmunizationRecord`,
   WellnessRecord: `${SYSTEM.NRCES_BASE}/WellnessRecord`,
+  InvoiceRecord: `${SYSTEM.NRCES_BASE}/InvoiceRecord`,
 } as const;
 
 // ─── M2 Composition.type codes (per ABDM Health Record Formats) ────────────
@@ -114,6 +140,15 @@ export const COMPOSITION_TYPE = {
     // when the snomed concept is not available.
     code: 'WELLNESSREC',
     display: 'Wellness record',
+    system: 'http://nrces.in/CodeSystem/abdm-record-types',
+  },
+  InvoiceRecord: {
+    // ABDM Health Record Format — InvoiceRecord uses a free-text composition
+    // type because there's no clinical SNOMED concept that fits "invoice".
+    // The receiver identifies the bundle by `meta.profile` →
+    // …/StructureDefinition/InvoiceRecord rather than the SNOMED code.
+    code: 'INVOICEREC',
+    display: 'Invoice record',
     system: 'http://nrces.in/CodeSystem/abdm-record-types',
   },
 } as const;

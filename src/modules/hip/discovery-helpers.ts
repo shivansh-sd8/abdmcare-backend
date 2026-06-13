@@ -26,7 +26,8 @@ export type AbdmHiType =
   | 'DiagnosticReport'
   | 'ImmunizationRecord'
   | 'WellnessRecord'
-  | 'HealthDocumentRecord';
+  | 'HealthDocumentRecord'
+  | 'Invoice';
 
 interface DiscoverIdentifier {
   type: string;
@@ -236,6 +237,7 @@ interface EncounterContent {
   hasInvestigation?: boolean;
   hasPrescription?: boolean;
   hasDiagnosis?: boolean;
+  hasPayment?: boolean;
   isWellnessVisit?: boolean;
 }
 
@@ -243,6 +245,13 @@ interface EncounterContent {
  * Infer the ABDM hiType for a single care context based on the encounter
  * content, mirroring the FHIR profile selector. When unsure, falls back to
  * 'OPConsultation' (the broadest type that satisfies most consents).
+ *
+ * `Invoice` is the LOWEST-priority hiType: it only fires when the encounter
+ * has billing rows but NO clinical content of any kind. A typical OPD visit
+ * with payment + diagnosis stays `OPConsultation` because the clinical record
+ * is the substantive information for the patient — the bill is a side
+ * artefact. Pure-billing care contexts (e.g. a pharmacy bill, lab pre-pay,
+ * cancelled-visit refund) flow as `Invoice` so they're still ABDM-shareable.
  */
 export function deriveHiType(content: EncounterContent): AbdmHiType {
   if (content.hasImmunization && !content.hasDiagnosis && !content.hasInvestigation) {
@@ -260,6 +269,15 @@ export function deriveHiType(content: EncounterContent): AbdmHiType {
   if (content.hasPrescription && !content.hasDiagnosis && !content.hasInvestigation) {
     return 'Prescription';
   }
+  if (
+    content.hasPayment &&
+    !content.hasDiagnosis &&
+    !content.hasInvestigation &&
+    !content.hasPrescription &&
+    !content.hasImmunization
+  ) {
+    return 'Invoice';
+  }
   return 'OPConsultation';
 }
 
@@ -276,6 +294,7 @@ export function profileToHiType(profile: ProfileName): AbdmHiType {
     case 'ImmunizationRecord': return 'ImmunizationRecord';
     case 'WellnessRecord': return 'WellnessRecord';
     case 'HealthDocumentRecord': return 'HealthDocumentRecord';
+    case 'InvoiceRecord': return 'Invoice';
   }
 }
 
@@ -289,5 +308,6 @@ export function hiTypeToProfile(hiType: AbdmHiType): ProfileName {
     case 'ImmunizationRecord': return 'ImmunizationRecord';
     case 'WellnessRecord': return 'WellnessRecord';
     case 'HealthDocumentRecord': return 'HealthDocumentRecord';
+    case 'Invoice': return 'InvoiceRecord';
   }
 }
