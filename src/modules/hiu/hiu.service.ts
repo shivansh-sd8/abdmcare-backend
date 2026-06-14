@@ -511,10 +511,30 @@ export class HiuService {
       // optional consent id in the body) to find the parent Consent row.
       const lookupConsentId = resolvedConsentId || abdmConsentId || null;
       if (lookupConsentId) {
-        const consent = await prisma.consent.findFirst({
-          where: { abdmConsentId: lookupConsentId },
-          select: { patientId: true, id: true, status: true, requesterHospitalId: true, purgedAt: true },
-        });
+        // Disambiguate when more than one Consent row shares this abdmConsentId.
+        // On a single-platform deployment that is BOTH HIU and HIP, two rows
+        // exist for the same artefact:
+        //   • the HIU consent WE raised  → requesterHospitalId set, patientId =
+        //     the patient at the requesting hospital (what the UI shows)
+        //   • the HIP bookkeeping row auto-created in handleConsentNotification
+        //     → requesterHospitalId = null, patientId = the HIP-side patient
+        // We are RECEIVING data as the HIU here, so records must be attributed
+        // to the HIU consent. A plain findFirst(abdmConsentId) picked the HIP
+        // row non-deterministically, tagging records with the wrong patientId +
+        // a null hospitalId — so they showed in the consent modal (consentId-only
+        // match) but never in the patient profile (patientId + hospitalId match).
+        // Prefer the row that carries a requesterHospitalId; fall back to any.
+        const consent =
+          (await prisma.consent.findFirst({
+            where: { abdmConsentId: lookupConsentId, requesterHospitalId: { not: null } },
+            orderBy: { createdAt: 'desc' },
+            select: { patientId: true, id: true, status: true, requesterHospitalId: true, purgedAt: true },
+          })) ||
+          (await prisma.consent.findFirst({
+            where: { abdmConsentId: lookupConsentId },
+            orderBy: { createdAt: 'desc' },
+            select: { patientId: true, id: true, status: true, requesterHospitalId: true, purgedAt: true },
+          }));
 
         // Refuse to persist records that arrive after revoke/expire — this
         // closes the race window where ABDM is still pushing pages while the
@@ -535,19 +555,47 @@ export class HiuService {
             if (!entry.decrypted || !entry.data) continue;
 
             const parsed = parseFHIRBundle(entry.data);
-            await prisma.externalHealthRecord.create({
-              data: {
-                patientId: consent.patientId,
-                consentId: lookupConsentId!,
-                hospitalId: consent.requesterHospitalId || null,
-                sourceHipId: parsed.sourceHIP || null,
-                sourceHipName: parsed.sourceHIP || null,
-                recordType: parsed.compositionTitle || 'Health Record',
-                recordDate: parsed.encounters[0]?.date ? new Date(parsed.encounters[0].date) : null,
-                rawBundle: entry.data,
-                parsedData: parsed as any,
-              },
-            });
+            const recordFields = {
+              patientId: consent.patientId,
+              consentId: lookupConsentId!,
+              hospitalId: consent.requesterHospitalId || null,
+              careContextReference: entry.careContextReference || null,
+              sourceHipId: parsed.sourceHIP || null,
+              sourceHipName: parsed.sourceHIP || null,
+              recordType: parsed.compositionTitle || 'Health Record',
+              recordDate: parsed.encounters[0]?.date ? new Date(parsed.encounters[0].date) : null,
+              rawBundle: entry.data,
+              parsedData: parsed as any,
+            };
+
+            // Dedup on (consentId, careContextReference): re-pulling the same
+            // care context under the same consent must REFRESH the row, not
+            // append a duplicate (which is what produced the inflating 2/5/8
+            // counts). When no careContextReference is present we can't dedup,
+            // so fall back to a plain create.
+            if (entry.careContextReference) {
+              await prisma.externalHealthRecord.upsert({
+                where: {
+                  consentId_careContextReference: {
+                    consentId: lookupConsentId!,
+                    careContextReference: entry.careContextReference,
+                  },
+                },
+                create: recordFields,
+                update: {
+                  hospitalId: recordFields.hospitalId,
+                  sourceHipId: recordFields.sourceHipId,
+                  sourceHipName: recordFields.sourceHipName,
+                  recordType: recordFields.recordType,
+                  recordDate: recordFields.recordDate,
+                  rawBundle: recordFields.rawBundle,
+                  parsedData: recordFields.parsedData,
+                  receivedAt: new Date(),
+                },
+              });
+            } else {
+              await prisma.externalHealthRecord.create({ data: recordFields });
+            }
             persistedCount++;
           }
         }

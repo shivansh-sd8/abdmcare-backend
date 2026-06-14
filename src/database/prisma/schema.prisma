@@ -1553,6 +1553,12 @@ model ExternalHealthRecord {
   // Hospital A cannot read records pulled by Hospital B even if the patient
   // is registered at both.
   hospitalId    String?
+  // The ABDM care-context this record was transferred for. Carried on the wire
+  // entry (not inside the encrypted bundle). Used as the natural dedup key so
+  // re-pulling under the same consent UPSERTS instead of appending duplicates.
+  // Nullable for legacy rows / entries that arrive without a reference; Postgres
+  // permits multiple NULLs under the unique index so those are never deduped.
+  careContextReference String?
   sourceHipId   String?
   sourceHipName String?
   recordType    String
@@ -1561,6 +1567,7 @@ model ExternalHealthRecord {
   parsedData    Json
   receivedAt    DateTime @default(now())
   patient       Patient  @relation(fields: [patientId], references: [id])
+  @@unique([consentId, careContextReference])
   @@index([patientId])
   @@index([consentId])
   @@index([hospitalId])
