@@ -107,7 +107,12 @@ export class HiuService {
       // the wrong tenant on a multi-facility deployment.
       const tenantHospitalId =
         consent.requesterHospitalId
-        || (currentUser?.hospitalId as string | undefined);
+        || (currentUser?.hospitalId as string | undefined)
+        // Last resort: consents auto-created from the HIP consent-notify
+        // callback have no requesterHospitalId, and the on-fetch auto-pull
+        // runs without a currentUser. Fall back to the patient's hospital so
+        // the auto-pull can still resolve a HIU tenant instead of 422-ing.
+        || (consent.patient?.hospitalId as string | undefined);
       if (!tenantHospitalId) {
         throw new AppError(
           'Cannot resolve a hospital tenant for this consent — set consent.requesterHospitalId or pass a currentUser with hospitalId.',
@@ -385,7 +390,13 @@ export class HiuService {
         consentId: abdmConsentId,
         entries: data.entries?.length || 0,
       });
-      const decryptedEntries: any[] = [];
+      const decryptedEntries: Array<{
+        data?: any;
+        raw?: any;
+        decrypted: boolean;
+        error?: string;
+        careContextReference?: string;
+      }> = [];
 
       let keyPairRecord: { privateKey: string; nonce: string } | null = null;
       let resolvedConsentId: string | null = abdmConsentId || null;
@@ -428,8 +439,13 @@ export class HiuService {
       }
 
       for (const entry of data.entries || []) {
+        // The careContextReference lives on the WIRE entry (alongside content/
+        // checksum), NOT inside the encrypted FHIR bundle. Capture it here so
+        // the data-flow notify can build a non-empty statusResponses[] (ABDM
+        // rejects an empty one with "ABDM-9999: statusResponses is mandatory").
+        const careContextReference: string | undefined = entry.careContextReference;
         if (!entry.content || !hipKeyMaterial) {
-          decryptedEntries.push({ raw: entry, decrypted: false });
+          decryptedEntries.push({ raw: entry, decrypted: false, careContextReference });
           continue;
         }
 
@@ -438,7 +454,7 @@ export class HiuService {
             transactionId,
             consentId: abdmConsentId,
           });
-          decryptedEntries.push({ raw: entry, decrypted: false });
+          decryptedEntries.push({ raw: entry, decrypted: false, careContextReference });
           continue;
         }
 
@@ -451,10 +467,10 @@ export class HiuService {
             hipKeyMaterial.nonce,
           );
           const parsed = JSON.parse(decryptedText);
-          decryptedEntries.push({ data: parsed, decrypted: true });
+          decryptedEntries.push({ data: parsed, decrypted: true, careContextReference });
         } catch (decErr: any) {
           logger.error('HIU: Failed to decrypt entry', { error: decErr.message });
-          decryptedEntries.push({ raw: entry, decrypted: false, error: decErr.message });
+          decryptedEntries.push({ raw: entry, decrypted: false, error: decErr.message, careContextReference });
         }
       }
 
@@ -490,7 +506,6 @@ export class HiuService {
       // someone else's consent).
       let persistedCount = 0;
       let consentRequesterHospitalId: string | null = null;
-      const careContextRefs = new Set<string>();
       let authorisationDropped = false;
       // Use whatever consent id we resolved (from keypair lookup OR the
       // optional consent id in the body) to find the parent Consent row.
@@ -534,8 +549,6 @@ export class HiuService {
               },
             });
             persistedCount++;
-            const ccRef = entry?.raw?.careContextReference || entry?.data?.careContextReference;
-            if (ccRef) careContextRefs.add(String(ccRef));
           }
         }
       }
@@ -557,34 +570,52 @@ export class HiuService {
       // so the patient sees something went wrong. Fire-and-forget so a
       // notify failure doesn't bubble back into the data-push retry loop.
       if (lookupConsentId && data.transactionId && !authorisationDropped) {
-        const totalEntries = (data.entries || []).length;
-        const allOk = totalEntries > 0 && persistedCount === totalEntries;
+        // Build per-care-context status from the WIRE entries (each carries its
+        // own careContextReference). ABDM rejects an empty statusResponses[]
+        // with "ABDM-9999: statusResponses is mandatory", so we must report a
+        // row per received care context with OK/ERRORED reflecting decrypt+parse.
+        const statusResponses = decryptedEntries
+          .filter(e => !!e.careContextReference)
+          .map(e => {
+            const ok = e.decrypted && !!e.data;
+            return {
+              careContextReference: e.careContextReference as string,
+              hiStatus: ok ? 'OK' : 'ERRORED',
+              ...(ok ? {} : { description: 'Decryption or parsing failed for this care context' }),
+            };
+          });
+        const allOk = statusResponses.length > 0 && statusResponses.every(s => s.hiStatus === 'OK');
         const sessionStatus = allOk ? 'TRANSFERRED' : 'FAILED';
-        const statusResponses = Array.from(careContextRefs).map(ref => ({
-          careContextReference: ref,
-          hiStatus: allOk ? 'OK' : 'ERRORED',
-          ...(allOk ? {} : { description: 'Decryption or parsing failed for one or more entries' }),
-        }));
         // Route the notify under the consent's requester tenant so the CM
         // sees the same hiuId we used on /cm/request. consentRequesterHospitalId
         // is captured above; if it's null (legacy data) we fall back to
         // platform default.
         const notifyTenantHospitalId = consentRequesterHospitalId || undefined;
-        setImmediate(async () => {
-          try {
-            await this.dataFlowNotify(
-              {
-                consentId: lookupConsentId,
-                transactionId: data.transactionId,
-                status: sessionStatus,
-                statusResponses,
-              },
-              notifyTenantHospitalId,
-            );
-          } catch (notifyErr: any) {
-            logger.warn('HIU: data-flow notify dispatch failed', { message: notifyErr?.message });
-          }
-        });
+
+        if (statusResponses.length === 0) {
+          // No careContextReference on any wire entry — sending the notify would
+          // 400 ("statusResponses is mandatory"). Skip rather than spam ABDM.
+          logger.warn('HIU: skipping data-flow notify — no careContextReference on received entries', {
+            transactionId: data.transactionId,
+            consentId: lookupConsentId,
+          });
+        } else {
+          setImmediate(async () => {
+            try {
+              await this.dataFlowNotify(
+                {
+                  consentId: lookupConsentId,
+                  transactionId: data.transactionId,
+                  status: sessionStatus,
+                  statusResponses,
+                },
+                notifyTenantHospitalId,
+              );
+            } catch (notifyErr: any) {
+              logger.warn('HIU: data-flow notify dispatch failed', { message: notifyErr?.message });
+            }
+          });
+        }
       }
 
       return { success: true, message: 'Health information received successfully', entries: decryptedEntries };
