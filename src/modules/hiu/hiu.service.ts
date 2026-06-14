@@ -581,7 +581,11 @@ export class HiuService {
             return {
               careContextReference: e.careContextReference as string,
               hiStatus: ok ? 'OK' : 'ERRORED',
-              ...(ok ? {} : { description: 'Decryption or parsing failed for this care context' }),
+              // ABDM requires `description` on EVERY statusResponses item — not
+              // just failures. Omitting it on OK rows returns
+              // "ABDM-9999: description is mandatory" (400) and the CM never
+              // sees the transfer as complete.
+              description: ok ? 'Data received successfully' : 'Decryption or parsing failed for this care context',
             };
           });
         const allOk = statusResponses.length > 0 && statusResponses.every(s => s.hiStatus === 'OK');

@@ -1390,6 +1390,32 @@ export class HipService {
         createdContexts.push(careContext);
       }
 
+      // Re-arm retries: the link steps below only act on contexts whose
+      // linkStatus is PENDING. An encounter that previously FAILED (e.g. an
+      // ABDM rejection, or — historically — a mis-parsed success) or was
+      // UNLINKED keeps its existing row, so `addCareContexts` skips creation
+      // above and the retry would otherwise be a no-op, leaving the context
+      // stuck. Flip those requested contexts back to PENDING (clearing the old
+      // error) so a re-click genuinely re-submits them to ABDM. LINKED rows are
+      // never touched, so a real link is never clobbered.
+      const requestedEncounterIds = careContexts.map((c) => c.encounterId);
+      if (requestedEncounterIds.length) {
+        const rearmed = await prisma.careContext.updateMany({
+          where: {
+            patientId: patient.id,
+            encounterId: { in: requestedEncounterIds },
+            linkStatus: { in: ['FAILED', 'UNLINKED'] },
+          },
+          data: { linkStatus: 'PENDING', linkError: null },
+        });
+        if (rearmed.count) {
+          logger.info('HIP: [link] re-armed previously FAILED/UNLINKED care contexts for retry', {
+            patientId,
+            count: rearmed.count,
+          });
+        }
+      }
+
       logger.info('HIP: Care contexts added locally', { patientId, count: createdContexts.length });
 
       // Resolve ABHA identifiers for ABDM linking
