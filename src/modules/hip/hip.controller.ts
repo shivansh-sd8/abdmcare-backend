@@ -417,6 +417,35 @@ export class HipController {
     ResponseHandler.success(res, result.message, result.data, 201);
   });
 
+  // Hospital-wide care-context list for the Consent Manager "Linked Contexts"
+  // tab. Scoped to the caller's hospital (SUPER_ADMIN sees all). Returns the
+  // full link-audit detail (status, linkedAt, hiType, linkError) plus patient
+  // and encounter context so staff can see what was linked, when, and why a
+  // link failed — without opening each patient.
+  listCareContexts = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
+    const currentUser = (req as any).user;
+    const statusFilter = (req.query.status as string | undefined)?.toUpperCase();
+
+    const where: any = {};
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      where.patient = { is: { hospitalId: currentUser.hospitalId } };
+    }
+    if (statusFilter && ['PENDING', 'LINKED', 'FAILED'].includes(statusFilter)) {
+      where.linkStatus = statusFilter;
+    }
+
+    const contexts = await prisma.careContext.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 500,
+      include: {
+        patient: { select: { id: true, firstName: true, lastName: true, uhid: true, abhaAddress: true } },
+        encounter: { select: { id: true, type: true, visitDate: true, chiefComplaint: true, encounterId: true } },
+      },
+    });
+    ResponseHandler.success(res, 'Care contexts retrieved', contexts);
+  });
+
   getCareContexts = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const { patientId } = req.params;
     const currentUser = (req as any).user;
@@ -445,6 +474,17 @@ export class HipController {
     const contexts = await prisma.careContext.findMany({
       where: { patientId },
       orderBy: { createdAt: 'desc' },
+      include: {
+        encounter: {
+          select: {
+            id: true,
+            type: true,
+            visitDate: true,
+            chiefComplaint: true,
+            encounterId: true,
+          },
+        },
+      },
     });
     ResponseHandler.success(res, 'Care contexts retrieved', contexts);
   });

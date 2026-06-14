@@ -116,6 +116,14 @@ router.post(
   hipController.smsNotify
 );
 
+// Hospital-wide list of care contexts (for the "Linked Contexts" tab in the
+// Consent Manager). Scoped to the caller's hospital.
+router.get(
+  '/care-contexts',
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),
+  hipController.listCareContexts
+);
+
 router.get(
   '/patients/:patientId/care-contexts',
   authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'),

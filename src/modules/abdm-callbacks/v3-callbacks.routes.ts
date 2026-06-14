@@ -375,29 +375,48 @@ export const linkV3Routes = Router();
 // ABDM sends: POST /api/v3/link/on_carecontext (HIP-initiated link confirmation)
 linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req: Request, res: Response) => {
   const payload = req.body;
+  // ABDM's real on_carecontext body is { abhaAddress, status, response } — the
+  // grant/fail status is at the TOP LEVEL, not under `acknowledgement`, and the
+  // body does NOT echo the careContexts list. The previous code read
+  // `acknowledgement.status` (always undefined) so links never flipped to
+  // LINKED and the UI showed "pending" forever. Read both shapes defensively.
+  const status: string | undefined = payload?.status || payload?.acknowledgement?.status;
+  const abhaAddress: string | undefined = payload?.abhaAddress || payload?.patient?.id;
   logger.info('V3 callback: on_carecontext received', {
-    requestId: payload?.requestId,
-    status: payload?.acknowledgement?.status,
+    requestId: payload?.requestId || payload?.response?.requestId,
+    status,
+    abhaAddress,
     error: payload?.error,
   });
 
-  const acknowledgement = payload?.acknowledgement;
-  if (acknowledgement?.status === 'SUCCESS') {
-    // Mark matching care contexts as LINKED
-    const patient = payload?.patient;
-    const linkedRefs: string[] = [];
-    if (patient?.careContexts?.length) {
-      for (const cc of patient.careContexts) {
-        try {
-          await prisma.careContext.updateMany({
-            where: { careContextId: cc.referenceNumber },
-            data: { linkStatus: 'LINKED' },
-          });
-          linkedRefs.push(cc.referenceNumber);
-        } catch (err: any) {
-          logger.warn('on_carecontext: failed to update care context status', { ref: cc.referenceNumber, error: err.message });
-        }
-      }
+  // Resolve the affected care contexts. Prefer an explicit list if ABDM sends
+  // one; otherwise fall back to this patient's PENDING, token-bearing contexts
+  // (the batch we just submitted under the link token).
+  const explicitRefs: string[] = Array.isArray(payload?.patient?.careContexts)
+    ? payload.patient.careContexts.map((cc: any) => cc?.referenceNumber).filter(Boolean)
+    : [];
+  const resolveBatchRefs = async (): Promise<string[]> => {
+    if (explicitRefs.length) return explicitRefs;
+    if (!abhaAddress) return [];
+    const patient = await prisma.patient.findFirst({
+      where: { OR: [{ abhaAddress }, { abhaRecord: { is: { abhaAddress } } }] },
+      select: { id: true },
+    });
+    if (!patient) return [];
+    const pending = await prisma.careContext.findMany({
+      where: { patientId: patient.id, linkStatus: 'PENDING', linkToken: { not: null } },
+      select: { careContextId: true },
+    });
+    return pending.map((c) => c.careContextId);
+  };
+
+  if (status === 'SUCCESS') {
+    const linkedRefs = await resolveBatchRefs();
+    if (linkedRefs.length) {
+      await prisma.careContext.updateMany({
+        where: { careContextId: { in: linkedRefs } },
+        data: { linkStatus: 'LINKED', linkedAt: new Date(), linkError: null },
+      });
     }
     logger.info('V3 callback: Care context link confirmed by ABDM', { linkedRefs });
 
@@ -492,6 +511,11 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
               });
               hiTypes = [hi];
             }
+            // Persist the derived HI type so the UI can show WHICH data this
+            // care context carries (and the data-push worker stays consistent).
+            await prisma.careContext
+              .update({ where: { careContextId: ref }, data: { hiType: hiTypes[0] } })
+              .catch(() => { /* row may have been removed; non-fatal */ });
             await hipService.linkContextNotify({
               abhaAddress,
               careContextReference: ref,
@@ -506,7 +530,24 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
       });
     }
   } else {
-    logger.warn('V3 callback: Care context link failed', { error: payload?.error });
+    // ABDM rejected the link. Record the reason on the affected PENDING contexts
+    // so staff can see WHY it failed (instead of a perpetual "pending").
+    const reason =
+      payload?.error?.message ||
+      payload?.error?.code ||
+      `ABDM rejected the care-context link (status: ${status || 'unknown'})`;
+    const failedRefs = await resolveBatchRefs();
+    if (failedRefs.length) {
+      await prisma.careContext.updateMany({
+        where: { careContextId: { in: failedRefs } },
+        data: { linkStatus: 'FAILED', linkError: String(reason).slice(0, 500) },
+      });
+    }
+    logger.warn('V3 callback: Care context link failed', {
+      error: payload?.error,
+      status,
+      failedCount: failedRefs.length,
+    });
   }
 
   res.status(202).json({ message: 'Acknowledged' });

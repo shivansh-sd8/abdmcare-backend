@@ -315,6 +315,12 @@ model CareContext {
   linkStatus      String    @default("PENDING") // PENDING, LINKED, FAILED
   linkToken       String?
   
+  // ABDM link-audit detail — surfaced in the UI so staff can see exactly what
+  // happened, when, and why a link failed.
+  hiType          String?   // Derived ABDM HI type advertised for this context (OPConsultation, Prescription, …)
+  linkedAt        DateTime? // When ABDM confirmed the link (on_carecontext SUCCESS)
+  linkError       String?   // Failure reason from ABDM when linkStatus = FAILED
+  
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   

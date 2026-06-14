@@ -7,7 +7,6 @@ import { generateSlots, isValidSlotTime, HospitalScheduleConfig, DoctorScheduleC
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
 import { hospitalScope } from '../../common/utils/scope';
 import { istDayRange, istDayRangeOf } from '../../common/utils/dateRange';
-import { careContextIdForEncounter } from '../hip/discovery-helpers';
 
 interface CreateAppointmentRequest {
   patientId: string;
@@ -516,84 +515,13 @@ export class AppointmentService {
         },
       });
 
-      // Create Care Context for ABHA. We'll create one whenever the patient has
-      // any ABHA identity (AbhaRecord row OR scalar abhaNumber / abhaAddress on
-      // the patient), so check-ins from quickly-registered patients still
-      // trigger ABDM linking. Per-hospital hipId is used (falls back to env).
-      const patient: any = appointment.patient;
-      const abhaNumber: string | undefined =
-        patient.abhaRecord?.abhaNumber || patient.abhaNumber || undefined;
-      const abhaAddress: string | undefined =
-        patient.abhaRecord?.abhaAddress || patient.abhaAddress || undefined;
-
-      if (abhaNumber || abhaAddress) {
-        // Multi-tenant rule: a CareContext is the unit of ABDM linkage and
-        // the unit of fulfillment, both of which carry an X-HIP-ID identifying
-        // the FACILITY that owns the data. We MUST persist the hospital's
-        // own hipId — never the env-level platform default — otherwise data
-        // linked at hospital A and authorised in a consent for hospital A
-        // would be served from a fulfill request routed to whatever tenant
-        // happens to own the env hipId. Skip linking entirely if the hospital
-        // hasn't been onboarded with a hipId yet (it can be added later via
-        // ABHA Management → "Link care contexts").
-        let hipIdForCareContext: string | null = null;
-        try {
-          if (appointment.hospitalId) {
-            const hospital = await prisma.hospital.findUnique({
-              where: { id: appointment.hospitalId },
-              select: { hipId: true },
-            });
-            if (hospital?.hipId) hipIdForCareContext = hospital.hipId;
-          }
-        } catch (_) { /* fall through to skip */ }
-
-        if (!hipIdForCareContext) {
-          logger.warn('Appointment check-in: skipping ABDM care-context creation — hospital has no hipId. Configure it in Hospital Management → ABDM Integration before check-in.', {
-            appointmentId: appointment.id,
-            hospitalId: appointment.hospitalId,
-          });
-        } else {
-          const careContext = await prisma.careContext.create({
-            data: {
-              // Deterministic, stable reference (CC-<encounterId>) — identical
-              // to what HIP discover advertises and addCareContexts links, so
-              // the consent artefact's careContextReference always resolves at
-              // data-push time. Also avoids the `CC-${Date.now()}` unique
-              // collision when two check-ins land in the same millisecond.
-              careContextId: careContextIdForEncounter(encounter.id),
-              patientId: appointment.patientId,
-              encounterId: encounter.id,
-              display: `OPD Visit - ${encounter.type}`,
-              referenceNumber: encounter.encounterId,
-              hipId: hipIdForCareContext,
-            },
-          });
-
-          // Fire-and-forget: initiate ABDM HIP linking only if we have an ABHA
-          // number (generate-token requires the 14-digit number).
-          if (abhaNumber) {
-            setImmediate(async () => {
-              try {
-                const hipService = (await import('../hip/hip.service')).default;
-                const abdmGender =
-                  patient.gender === 'MALE' ? 'M' : patient.gender === 'FEMALE' ? 'F' : 'O';
-                await hipService.generateLinkToken({
-                  abhaNumber,
-                  abhaAddress: abhaAddress || '',
-                  name: `${patient.firstName} ${patient.lastName}`,
-                  gender: abdmGender,
-                  yearOfBirth: patient.dob ? new Date(patient.dob).getFullYear() : 2000,
-                }, appointment.hospitalId!);
-                logger.info('HIP linking initiated (generate-token) for care context', {
-                  careContextId: careContext.careContextId,
-                });
-              } catch (err: any) {
-                logger.warn('HIP linking failed (non-blocking)', { error: err.message });
-              }
-            });
-          }
-        }
-      }
+      // NOTE: ABDM care-context linking is intentionally NOT triggered here.
+      // Check-in no longer auto-creates a CareContext or fires generate-token —
+      // staff explicitly link a visit via the patient profile "Link Care
+      // Contexts" button (HipService.addCareContexts), which creates the
+      // CareContext and initiates ABDM linking on demand. This avoids visits
+      // showing a perpetual "PENDING" link the operator never asked for, and
+      // gives staff control over what gets shared to the patient's PHR.
 
       // Update appointment with check-in details
       const updatedAppointment = await prisma.appointment.update({

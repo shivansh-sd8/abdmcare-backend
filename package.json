@@ -19,6 +19,7 @@
     "prisma:seed": "ts-node src/database/seed-abdm.ts",
     "seed": "ts-node src/database/seed-abdm.ts",
     "seed:abdm": "ts-node src/database/seed-abdm.ts",
+    "seed:superadmin": "ts-node src/database/seed-superadmin.ts",
     "abdm:setup": "ts-node scripts/abdm-sandbox-setup.ts",
     "abdm:send-otp": "ts-node scripts/abdm-send-otp.ts",
     "docker:build": "docker build -t abhaayushman-backend .",
