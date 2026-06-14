@@ -389,6 +389,20 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
     error: payload?.error,
   });
 
+  // ABDM does NOT send a fixed token like 'SUCCESS' here — the real success
+  // payload carries a human-readable message, e.g. status:"Successfully Linked
+  // care context" with NO `error` object. An exact `=== 'SUCCESS'` check
+  // therefore mis-classified every successful link as FAILED (the UI showed
+  // "ABDM rejected the care-context link (status: Successfully Linked care
+  // context)"). Treat it as linked when there is no error and the status reads
+  // as success/linked; only the presence of an error (or an explicit
+  // failure-worded status) counts as a rejection.
+  const statusLc = (status || '').toLowerCase();
+  const hasError = !!payload?.error;
+  const looksFailed = /\b(fail|failed|error|reject|denied|expired|invalid)\b/.test(statusLc);
+  const looksLinked = statusLc === 'success' || statusLc.includes('success') || statusLc.includes('linked');
+  const isLinkSuccess = !hasError && !looksFailed && looksLinked;
+
   // Resolve the affected care contexts. Prefer an explicit list if ABDM sends
   // one; otherwise fall back to this patient's PENDING, token-bearing contexts
   // (the batch we just submitted under the link token).
@@ -410,7 +424,7 @@ linkV3Routes.post('/on_carecontext', verifyAbdmCallback, asyncHandler(async (req
     return pending.map((c) => c.careContextId);
   };
 
-  if (status === 'SUCCESS') {
+  if (isLinkSuccess) {
     const linkedRefs = await resolveBatchRefs();
     if (linkedRefs.length) {
       await prisma.careContext.updateMany({
