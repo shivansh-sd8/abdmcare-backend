@@ -717,7 +717,7 @@ export class HipService {
         }
       }
 
-      const [pcounts, icounts, immcounts, paymentRows] = await Promise.all([
+      const [pcounts, icounts, immcounts, paymentRows, docRows] = await Promise.all([
         encIds.length
           ? prisma.encounterPrescription.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
           : Promise.resolve([]),
@@ -738,11 +738,32 @@ export class HipService {
               select: { appointmentId: true, admissionId: true },
             })
           : Promise.resolve([]),
+        // Uploaded artefacts advertise a HealthDocumentRecord care context when
+        // the encounter has no structured clinical data of its own.
+        (encIds.length || admIds.length)
+          ? prisma.document.findMany({
+              where: {
+                OR: [
+                  ...(encIds.length ? [{ encounterId: { in: encIds } }] : []),
+                  ...(admIds.length ? [{ admissionId: { in: admIds } }] : []),
+                ],
+              },
+              select: { encounterId: true, admissionId: true },
+            })
+          : Promise.resolve([]),
       ]);
 
       const prescByEnc = new Map(pcounts.map(p => [p.encounterId!, p._count as any]));
       const invByEnc = new Map(icounts.map(i => [i.encounterId!, i._count as any]));
       const immByEnc = new Map(immcounts.map(i => [i.encounterId!, i._count as any]));
+      const docEncIds = new Set(docRows.map((d: any) => d.encounterId).filter(Boolean));
+      const docAdmIds = new Set(docRows.map((d: any) => d.admissionId).filter(Boolean));
+      const docByEnc = new Map<string, boolean>();
+      for (const enc of winner.encounters as any[]) {
+        if (docEncIds.has(enc.id) || (enc.admissionId && docAdmIds.has(enc.admissionId))) {
+          docByEnc.set(enc.id, true);
+        }
+      }
       const paidApptIds = new Set(paymentRows.map((p: any) => p.appointmentId).filter(Boolean));
       const paidAdmIds = new Set(paymentRows.map((p: any) => p.admissionId).filter(Boolean));
       const payByEnc = new Map<string, boolean>();
@@ -827,6 +848,7 @@ export class HipService {
           hasPrescription: !!prescByEnc.get(enc.id),
           hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
           hasPayment: !!payByEnc.get(enc.id),
+          hasDocument: !!docByEnc.get(enc.id),
         });
         const cc = ccByEncId.get(enc.id);
         return {
@@ -1312,6 +1334,63 @@ export class HipService {
   // ═══════════════════════════════════════════════════════════════════════════
   // CARE CONTEXT MANAGEMENT (local)
   // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Auto-share a single encounter as an ABDM care context — but ONLY when the
+   * owning hospital has `abdmAutoShare` enabled AND the patient has a linked
+   * ABHA. Reuses the manual `addCareContexts` path (identical ABDM link-token
+   * flow), so the per-context hiType — any of the 8 supported types — is
+   * derived downstream exactly as for a manual link.
+   *
+   * Fire-and-forget by contract: callers invoke this from clinical write paths
+   * (consult completion, discharge, PDF generation) and must never have their
+   * own transaction fail because ABDM was slow or unreachable. Every error is
+   * swallowed with a warning; existing/LINKED contexts are skipped idempotently
+   * by addCareContexts.
+   */
+  async autoShareEncounter(encounterId: string): Promise<void> {
+    try {
+      if (!encounterId) return;
+      const enc = await prisma.encounter.findUnique({
+        where: { id: encounterId },
+        include: { patient: { include: { abhaRecord: true } } },
+      });
+      const patient = enc?.patient;
+      if (!patient || !patient.hospitalId) return;
+      const hospitalId = patient.hospitalId;
+
+      const hospital = await prisma.hospital.findUnique({
+        where: { id: hospitalId },
+        select: { abdmAutoShare: true, abdmEnabled: true },
+      });
+      if (!hospital?.abdmAutoShare) return;
+
+      const hasAbha =
+        patient.abhaRecord || patient.abhaId || patient.abhaNumber || patient.abhaAddress;
+      if (!hasAbha) {
+        logger.info('HIP: [auto-share] skipped — patient has no ABHA', {
+          encounterId,
+          patientId: patient.id,
+        });
+        return;
+      }
+
+      const display = sanitizeDisplay(
+        `${enc.type} Visit - ${new Date((enc as any).visitDate || enc.createdAt).toLocaleDateString('en-IN')}`,
+      );
+      await this.addCareContexts(patient.id, [{ encounterId: enc.id, display }]);
+      logger.info('HIP: [auto-share] care context linked automatically', {
+        encounterId,
+        patientId: patient.id,
+        hospitalId: patient.hospitalId,
+      });
+    } catch (e: any) {
+      logger.warn('HIP: [auto-share] failed (non-fatal)', {
+        encounterId,
+        message: e?.message,
+      });
+    }
+  }
 
   async addCareContexts(
     patientId: string,
@@ -2025,7 +2104,7 @@ export class HipService {
     const apptIds = Array.from(apptIdsByEnc.values());
     const admIds = Array.from(new Set(admIdsByEnc.values()));
 
-    const [pcounts, icounts, immcounts, payRows] = await Promise.all([
+    const [pcounts, icounts, immcounts, payRows, docRows] = await Promise.all([
       encIds.length
         ? prisma.encounterPrescription.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
         : Promise.resolve([]),
@@ -2046,10 +2125,32 @@ export class HipService {
             select: { appointmentId: true, admissionId: true },
           })
         : Promise.resolve([]),
+      // Uploaded artefacts advertise a HealthDocumentRecord care context when
+      // the encounter has no structured clinical data of its own.
+      (encIds.length || admIds.length)
+        ? prisma.document.findMany({
+            where: {
+              OR: [
+                ...(encIds.length ? [{ encounterId: { in: encIds } }] : []),
+                ...(admIds.length ? [{ admissionId: { in: admIds } }] : []),
+              ],
+            },
+            select: { encounterId: true, admissionId: true },
+          })
+        : Promise.resolve([]),
     ]);
     const prescByEnc = new Map(pcounts.map(p => [p.encounterId!, p._count as any]));
     const invByEnc = new Map(icounts.map(i => [i.encounterId!, i._count as any]));
     const immByEnc = new Map(immcounts.map(i => [i.encounterId!, i._count as any]));
+    const docEncIds = new Set(docRows.map((d: any) => d.encounterId).filter(Boolean));
+    const docAdmIds = new Set(docRows.map((d: any) => d.admissionId).filter(Boolean));
+    const docByEnc = new Map<string, boolean>();
+    for (const c of contexts) {
+      const enc: any = c.encounter;
+      if (!enc) continue;
+      const admId = admIdsByEnc.get(enc.id);
+      if (docEncIds.has(enc.id) || (admId && docAdmIds.has(admId))) docByEnc.set(enc.id, true);
+    }
     const paidApptIds = new Set(payRows.map((p: any) => p.appointmentId).filter(Boolean));
     const paidAdmIds = new Set(payRows.map((p: any) => p.admissionId).filter(Boolean));
     const payByEnc = new Map<string, boolean>();
@@ -2072,6 +2173,7 @@ export class HipService {
             hasPrescription: !!prescByEnc.get(enc.id),
             hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
             hasPayment: !!payByEnc.get(enc.id),
+            hasDocument: !!docByEnc.get(enc.id),
           })
         : 'OPConsultation';
       const list = groups.get(hiType) || [];

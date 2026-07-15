@@ -739,6 +739,11 @@ model Hospital {
   abdmCallbackUrl  String?
   hfrFacilityId    String?  @unique
   abdmEnabled      Boolean  @default(false)
+  // When true, clinical events (OPD consult completion, IPD discharge,
+  // generated PDFs) for ABHA-linked patients are AUTOMATICALLY linked as ABDM
+  // care contexts. When false, staff link them manually via "Link Care
+  // Contexts" on the patient profile.
+  abdmAutoShare    Boolean  @default(false)
   abdmRegisteredAt DateTime?
   
   // Settings

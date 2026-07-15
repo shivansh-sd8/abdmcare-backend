@@ -686,6 +686,28 @@ export class IPDService {
       });
     }
 
+    // ── ABDM auto-share ───────────────────────────────────────────────────────
+    // When the hospital has abdmAutoShare enabled and the patient has an ABHA,
+    // auto-link this admission's encounters (the IPD stay → DischargeSummary,
+    // plus any linked OPD encounter) as ABDM care contexts. Fire-and-forget;
+    // autoShareEncounter is idempotent and swallows its own errors.
+    {
+      const autoShareEncIds = Array.from(new Set([
+        ...(opdEncounterId ? [opdEncounterId] : []),
+        ...roundIds,
+      ]));
+      if (autoShareEncIds.length) {
+        setImmediate(async () => {
+          try {
+            const hipService = (await import('../hip/hip.service')).default;
+            for (const encId of autoShareEncIds) {
+              await hipService.autoShareEncounter(encId);
+            }
+          } catch { /* non-fatal */ }
+        });
+      }
+    }
+
     // Fire-and-forget: generate discharge summary document + SMS with download link
     try {
       const hospitalRecord = await prisma.hospital.findUnique({

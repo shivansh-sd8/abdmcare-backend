@@ -122,6 +122,7 @@ interface UpdateHospitalData {
   hiuName?: string;
   hfrFacilityId?: string;
   abdmEnabled?: boolean;
+  abdmAutoShare?: boolean;
   defaultOpdCharge?: number;
   operatingHours?: any;
   defaultSlotDuration?: number;

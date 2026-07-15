@@ -148,6 +148,9 @@ const createValidation = [
     .optional({ values: 'falsy' })
     .matches(HFR_FACILITY_ID_RE)
     .withMessage('HFR Facility ID must be IN followed by exactly 10 digits (e.g. IN3410000260)'),
+  body('abdmAutoShare')
+    .optional()
+    .isBoolean().withMessage('abdmAutoShare must be a boolean'),
 
   // ── Stripped fields (silently ignored — superseded by other inputs) ──────
   body('ownerName').customSanitizer(() => undefined),
@@ -262,6 +265,9 @@ const updateValidation = [
     .optional({ values: 'falsy' })
     .matches(HFR_FACILITY_ID_RE)
     .withMessage('HFR Facility ID must be IN followed by exactly 10 digits (e.g. IN3410000260)'),
+  body('abdmAutoShare')
+    .optional()
+    .isBoolean().withMessage('abdmAutoShare must be a boolean'),
 
   // ── Stripped fields (silently ignored — superseded by other inputs) ──────
   body('ownerName').customSanitizer(() => undefined),

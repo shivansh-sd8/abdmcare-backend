@@ -786,6 +786,18 @@ class EncounterService {
         }
       }
 
+      // ── ABDM auto-share ─────────────────────────────────────────────────────
+      // When the hospital has abdmAutoShare enabled and the patient has a linked
+      // ABHA, automatically register this completed consult as an ABDM care
+      // context. Fire-and-forget so a slow/unreachable ABDM never blocks or
+      // fails consult completion (the helper swallows its own errors).
+      setImmediate(async () => {
+        try {
+          const hipService = (await import('../hip/hip.service')).default;
+          await hipService.autoShareEncounter(id);
+        } catch { /* non-fatal */ }
+      });
+
       return {
         success: true,
         data: updatedEncounter,

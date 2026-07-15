@@ -52,6 +52,21 @@ export class DocumentService {
 
     logger.info('Document generated', { documentId: document.id, type: params.type, patientId: params.patientId });
 
+    // ── ABDM auto-share ───────────────────────────────────────────────────────
+    // A generated PDF tied to an encounter should ride along to ABDM (as part of
+    // that care context's bundle / HealthDocumentRecord). When the hospital has
+    // abdmAutoShare enabled and the patient has an ABHA, auto-link that
+    // encounter. Fire-and-forget so document generation is never blocked.
+    if (params.encounterId) {
+      const encounterId = params.encounterId;
+      setImmediate(async () => {
+        try {
+          const hipService = (await import('../hip/hip.service')).default;
+          await hipService.autoShareEncounter(encounterId);
+        } catch { /* non-fatal */ }
+      });
+    }
+
     return { id: document.id, storageUrl: filePath, checksum };
   }
 
