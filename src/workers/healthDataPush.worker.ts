@@ -5,6 +5,7 @@ import { abdmConfig } from '../common/config/abdm';
 import { AbdmClient, resolveHipTenant } from '../common/utils/abdm-client';
 import EncryptionService from '../common/utils/encryption';
 import crypto from 'crypto';
+import fs from 'fs';
 import { HealthDataPushJobData, createHealthDataPushWorker } from '../common/config/queue';
 import { deriveHiType, hiTypeToProfile, AbdmHiType } from '../modules/hip/discovery-helpers';
 
@@ -147,7 +148,7 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
         .filter(Boolean) as string[],
     ));
 
-    const [allVitals, allInvestigations, allImmunizations, allPayments] = await Promise.all([
+    const [allVitals, allInvestigations, allImmunizations, allPayments, allDocuments] = await Promise.all([
       dateValidEncIds.length > 0
         ? prisma.vitals.findMany({ where: { encounterId: { in: dateValidEncIds } } })
         : Promise.resolve([]),
@@ -165,6 +166,19 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
                 ...(dateValidAdmissionIds.length > 0 ? [{ admissionId: { in: dateValidAdmissionIds } }] : []),
               ],
               status: { in: ['PAID', 'PARTIAL', 'REFUNDED', 'PENDING'] },
+            },
+          })
+        : Promise.resolve([]),
+      // Uploaded, unstructured artefacts (scanned reports, prescription PDFs)
+      // linked to an in-scope encounter or admission. These drive the M2
+      // HealthDocumentRecord (and ride along on clinical bundles).
+      (dateValidEncIds.length > 0 || dateValidAdmissionIds.length > 0)
+        ? prisma.document.findMany({
+            where: {
+              OR: [
+                ...(dateValidEncIds.length > 0 ? [{ encounterId: { in: dateValidEncIds } }] : []),
+                ...(dateValidAdmissionIds.length > 0 ? [{ admissionId: { in: dateValidAdmissionIds } }] : []),
+              ],
             },
           })
         : Promise.resolve([]),
@@ -186,6 +200,20 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       if (matched.length > 0) paymentsByEnc.set(enc.id, matched);
     }
 
+    // Bucket documents by encounter id — matched directly via encounterId, or
+    // via the encounter's admissionId for IPD-level artefacts (discharge PDF,
+    // scanned reports filed against the admission rather than one encounter).
+    const documentsByEnc = new Map<string, any[]>();
+    for (const cc of dateValidContexts) {
+      const enc = cc.encounter!;
+      const admId = enc.admissionId;
+      const matched = allDocuments.filter((d: any) =>
+        (d.encounterId && d.encounterId === enc.id) ||
+        (admId && d.admissionId === admId),
+      );
+      if (matched.length > 0) documentsByEnc.set(enc.id, matched);
+    }
+
     // Per-care-context hiType derivation (same algorithm as discovery/link).
     // The hiType drives both the consent-scope filter AND the FHIR profile
     // chosen by the bundle builder.
@@ -201,6 +229,7 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
           (enc as any).labOrders?.length > 0,
         hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
         hasPayment: (paymentsByEnc.get(enc.id)?.length || 0) > 0,
+        hasDocument: (documentsByEnc.get(enc.id)?.length || 0) > 0,
       });
       return { cc, hiType: ccHiType };
     });
@@ -441,6 +470,41 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
             appointmentId: p.appointmentId,
             admissionId: p.admissionId,
           })),
+          // Read each uploaded artefact off disk and inline it as base64 so the
+          // FHIR DocumentReference carries the actual file. Unreadable files are
+          // skipped rather than failing the whole transfer.
+          documents: (documentsByEnc.get(enc.id) || []).map((d: any) => {
+            let data = '';
+            // Cap attachment size so a large scan can't bloat the encrypted
+            // push past HIU limits. 5 MB decoded is well within ABDM's page
+            // budget and covers every generated PDF we produce.
+            const MAX_DOC_BYTES = 5 * 1024 * 1024;
+            try {
+              if (typeof d.sizeBytes === 'number' && d.sizeBytes > MAX_DOC_BYTES) {
+                logger.warn('Worker: document exceeds size cap, skipping', { documentId: d.id, sizeBytes: d.sizeBytes });
+              } else if (d.storageUrl && fs.existsSync(d.storageUrl)) {
+                const buf = fs.readFileSync(d.storageUrl);
+                if (buf.length > MAX_DOC_BYTES) {
+                  logger.warn('Worker: document exceeds size cap, skipping', { documentId: d.id, bytes: buf.length });
+                } else {
+                  data = buf.toString('base64');
+                }
+              } else {
+                logger.warn('Worker: document file missing on disk, skipping', { documentId: d.id, storageUrl: d.storageUrl });
+              }
+            } catch (readErr: any) {
+              logger.warn('Worker: failed to read document for FHIR push', { documentId: d.id, error: readErr?.message });
+            }
+            return {
+              id: d.id,
+              title: d.fileName,
+              docType: d.type,
+              contentType: d.mimeType || 'application/pdf',
+              data,
+              size: d.sizeBytes ?? undefined,
+              creation: d.createdAt,
+            };
+          }).filter((d: any) => !!d.data),
           profileOverride,
         });
         entries.push({ ...makeEntry(JSON.stringify(fhirBundle), cc.careContextId), hiType });

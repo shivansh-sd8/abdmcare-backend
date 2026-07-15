@@ -103,7 +103,8 @@ export class AbhaController {
   });
 
   loginVerifyUser = asyncHandler(async (req: Request, res: Response) => {
-    const data = await abhaService.loginVerifyUser(req.body.abhaNumber, req.body.txnId);
+    const transferToken = (req.body.transferToken as string) || getXToken(req);
+    const data = await abhaService.loginVerifyUser(req.body.abhaNumber, req.body.txnId, transferToken);
     res.json({ success: true, data });
   });
 

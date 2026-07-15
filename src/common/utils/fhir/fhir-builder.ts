@@ -18,6 +18,7 @@ import { buildImmunizationRecordBundle } from './profiles/immunization-record';
 import { buildWellnessRecordBundle } from './profiles/wellness-record';
 import { buildInvoiceRecordBundle } from './profiles/invoice-record';
 import { buildInvoices, InvoiceInput } from './resources/invoice';
+import { buildDocumentReferences, documentEntriesFrom, DocumentInput } from './resources/document-reference';
 
 // ─── Input types matching Prisma models ──────────────────────────────────────
 
@@ -124,6 +125,13 @@ export interface FHIRBundleInput {
    * them as FHIR Invoice resources.
    */
   payments?: InvoiceInput[];
+  /**
+   * Uploaded, unstructured artefacts (scanned reports, prescription PDFs,
+   * discharge summaries). Rendered as FHIR DocumentReference resources and
+   * drive the HealthDocumentRecord profile when an encounter has no structured
+   * clinical content of its own.
+   */
+  documents?: DocumentInput[];
   /** Force a specific profile instead of auto-detecting from encounter type */
   profileOverride?: ProfileName;
 }
@@ -177,6 +185,7 @@ function selectProfile(input: FHIRBundleInput): ProfileName {
     enc.provisionalDiagnosis
   );
   const hasPayments = (input.payments?.length || 0) > 0;
+  const hasDocuments = (input.documents?.length || 0) > 0;
 
   if (hasImmunizations && !hasDiagnosis && !hasInvestigations) {
     return 'ImmunizationRecord';
@@ -184,6 +193,12 @@ function selectProfile(input: FHIRBundleInput): ProfileName {
 
   if (enc.type === 'IPD' && enc.admissionId) {
     return 'DischargeSummaryRecord';
+  }
+
+  // Unstructured-only encounter: an uploaded document with no structured
+  // clinical content of its own is shared as a HealthDocumentRecord.
+  if (hasDocuments && !hasDiagnosis && !hasInvestigations && !hasPrescriptions && !hasImmunizations && !hasPayments) {
+    return 'HealthDocumentRecord';
   }
 
   if (hasInvestigations && !hasDiagnosis && !hasPrescriptions) {
@@ -296,6 +311,12 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     { reference: urnUUID(organizationResult.uuid) },
   );
 
+  const documentResults = buildDocumentReferences(
+    input.documents || [],
+    patientRef,
+    practitionerRef,
+  );
+
   // Prepare bundle entries
   const patientEntry: BundleEntry = { fullUrl: urnUUID(patientResult.uuid), resource: patientResult.resource };
   const practitionerEntry: BundleEntry = { fullUrl: urnUUID(practitionerResult.uuid), resource: practitionerResult.resource };
@@ -309,6 +330,7 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
   const allergyEntries: BundleEntry[] = allergyResults.map(a => ({ fullUrl: urnUUID(a.uuid), resource: a.resource }));
   const immunizationEntries: BundleEntry[] = immunizationResults.map(i => ({ fullUrl: urnUUID(i.uuid), resource: i.resource }));
   const invoiceEntries: BundleEntry[] = invoiceResults.map(i => ({ fullUrl: urnUUID(i.uuid), resource: i.resource }));
+  const documentEntries: BundleEntry[] = documentEntriesFrom(documentResults);
 
   const commonPayload = {
     ...input,
@@ -323,6 +345,7 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     allergyEntries,
     immunizationEntries,
     invoiceEntries,
+    documentEntries,
     patientUUID: patientResult.uuid,
     practitionerUUID: practitionerResult.uuid,
     organizationUUID: organizationResult.uuid,
@@ -339,6 +362,7 @@ export function generateFHIRBundle(input: FHIRBundleInput) {
     allergyUUIDs: allergyResults.map(a => a.uuid),
     immunizationUUIDs: immunizationResults.map(i => i.uuid),
     invoiceUUIDs: invoiceResults.map(i => i.uuid),
+    documentUUIDs: documentResults.map(d => d.uuid),
   };
 
   const profile = selectProfile(input);

@@ -1,4 +1,4 @@
-import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID, BUNDLE_IDENTIFIER_SYSTEM } from '../coding-tables';
+import { BundleEntry, FHIRReference, NRCES_PROFILES, urnUUID, generateUUID, COMPOSITION_TYPE, BUNDLE_IDENTIFIER_SYSTEM } from '../coding-tables';
 import { buildComposition, SECTION_CODES, makeTextSection, makeRefSection, CompositionSection } from '../resources/composition';
 import type { FHIRBundleInput } from '../fhir-builder';
 
@@ -11,6 +11,7 @@ export function buildHealthDocumentBundle(input: FHIRBundleInput & {
   conditionEntries: BundleEntry[];
   medicationEntries: BundleEntry[];
   diagnosticEntries: BundleEntry[];
+  documentEntries?: BundleEntry[];
   patientUUID: string;
   practitionerUUID: string;
   organizationUUID: string;
@@ -19,6 +20,7 @@ export function buildHealthDocumentBundle(input: FHIRBundleInput & {
   conditionUUIDs: string[];
   medicationUUIDs: string[];
   diagnosticUUIDs: string[];
+  documentUUIDs?: string[];
 }): { resourceType: string; id: string; meta: any; identifier: any; type: string; timestamp: string; entry: BundleEntry[] } {
   const patientRef: FHIRReference = { reference: urnUUID(input.patientUUID), display: `${input.patient.firstName} ${input.patient.lastName}` };
   const practitionerRef: FHIRReference = { reference: urnUUID(input.practitionerUUID), display: `Dr. ${input.doctor.firstName} ${input.doctor.lastName}` };
@@ -66,6 +68,27 @@ export function buildHealthDocumentBundle(input: FHIRBundleInput & {
     sections.push(makeTextSection('Follow Up', SECTION_CODES.followUp, `Follow-up scheduled: ${followUp}`));
   }
 
+  // The defining section of a HealthDocumentRecord: the uploaded, unstructured
+  // artefacts (scanned reports, PDFs) carried as FHIR DocumentReference.
+  if (input.documentUUIDs?.length) {
+    sections.push(makeRefSection(
+      'Document Reference',
+      SECTION_CODES.documentReference,
+      input.documentUUIDs.map(u => ({ uuid: u })),
+    ));
+  }
+
+  // Defensive: a HealthDocumentRecord MUST have at least one section. If the
+  // encounter carried nothing renderable, add a textual placeholder so the
+  // Composition still validates.
+  if (sections.length === 0) {
+    sections.push(makeTextSection(
+      'Chief Complaint',
+      SECTION_CODES.chiefComplaint,
+      input.encounter.chiefComplaint || 'Health document record.',
+    ));
+  }
+
   const compositionResult = buildComposition({
     profileUrl: NRCES_PROFILES.HealthDocumentRecord,
     title: 'Health Document',
@@ -75,6 +98,7 @@ export function buildHealthDocumentBundle(input: FHIRBundleInput & {
     organizationRef,
     encounterRef,
     sections,
+    typeCoding: COMPOSITION_TYPE.HealthDocumentRecord,
   });
 
   const bundleId = generateUUID();
@@ -95,6 +119,7 @@ export function buildHealthDocumentBundle(input: FHIRBundleInput & {
       ...input.conditionEntries,
       ...input.medicationEntries,
       ...input.diagnosticEntries,
+      ...(input.documentEntries || []),
     ],
   };
 }

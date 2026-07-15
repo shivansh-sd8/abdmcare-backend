@@ -25,6 +25,7 @@ export function buildOPConsultBundle(input: FHIRBundleInput & {
   medicationEntries: BundleEntry[];
   diagnosticEntries: BundleEntry[];
   allergyEntries: BundleEntry[];
+  documentEntries?: BundleEntry[];
   patientUUID: string;
   practitionerUUID: string;
   organizationUUID: string;
@@ -34,6 +35,7 @@ export function buildOPConsultBundle(input: FHIRBundleInput & {
   medicationUUIDs: string[];
   diagnosticUUIDs: string[];
   allergyUUIDs: string[];
+  documentUUIDs?: string[];
 }): { resourceType: string; id: string; meta: any; identifier: any; type: string; timestamp: string; entry: BundleEntry[] } {
   const patientRef: FHIRReference = { reference: urnUUID(input.patientUUID), display: `${input.patient.firstName} ${input.patient.lastName}` };
   const practitionerRef: FHIRReference = { reference: urnUUID(input.practitionerUUID), display: `Dr. ${input.doctor.firstName} ${input.doctor.lastName}` };
@@ -86,6 +88,13 @@ export function buildOPConsultBundle(input: FHIRBundleInput & {
     sections.push(makeTextSection('Follow Up', SECTION_CODES.followUp, `Follow-up scheduled: ${followUp}`));
   }
 
+  // Optional: uploaded, unstructured artefacts attached to this consultation
+  // (scanned reports, referral letters). Shared as FHIR DocumentReference.
+  if (input.documentUUIDs?.length) {
+    sections.push(makeRefSection('Document Reference', SECTION_CODES.documentReference,
+      input.documentUUIDs.map(u => ({ uuid: u }))));
+  }
+
   const compositionResult = buildComposition({
     profileUrl: NRCES_PROFILES.OPConsultRecord,
     title: 'OP Consultation Record',
@@ -116,6 +125,7 @@ export function buildOPConsultBundle(input: FHIRBundleInput & {
       ...input.medicationEntries,
       ...input.diagnosticEntries,
       ...input.allergyEntries,
+      ...(input.documentEntries || []),
     ],
   };
 }

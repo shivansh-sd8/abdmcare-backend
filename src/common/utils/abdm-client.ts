@@ -455,7 +455,7 @@ export class AbdmClient {
 
   // ── Generic HTTP helpers for ABHA server ────────────────────────────────────
 
-  async abhaPost<T = any>(path: string, data?: any, xToken?: string): Promise<T> {
+  async abhaPost<T = any>(path: string, data?: any, xToken?: string, extraHeaders?: Record<string, string>): Promise<T> {
     const fullUrl = `${abdmConfig.abhaUrl}${path}`;
     logger.info(`[ABDM-API] POST ${fullUrl}`, { bodyKeys: data ? Object.keys(data) : [] });
     const token = await this.ensureValidToken();
@@ -463,7 +463,7 @@ export class AbdmClient {
       const response = await this.axiosInstance.post<T>(
         fullUrl,
         data,
-        { headers: this.abhaHeaders(token, xToken) }
+        { headers: { ...this.abhaHeaders(token, xToken), ...(extraHeaders || {}) } }
       );
       logger.info(`[ABDM-API] POST ${path} => ${response.status} OK`);
       return response.data;

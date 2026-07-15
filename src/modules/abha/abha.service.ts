@@ -441,12 +441,22 @@ export class AbhaService {
   }
 
   /**
-   * After mobile OTP login — select which ABHA to use
+   * After mobile OTP login — select which ABHA to use.
    * POST /v3/profile/login/verify/user
+   *
+   * ABDM requires the short-lived *transfer* token returned by
+   * /profile/login/verify to be passed as the `T-token` header here; the
+   * gateway session token stays in Authorization. Without T-token the
+   * gateway rejects the request.
    */
-  async loginVerifyUser(abhaNumber: string, txnId: string) {
+  async loginVerifyUser(abhaNumber: string, txnId: string, transferToken?: string) {
     try {
-      const res = await abdmClient.abhaPost(E.profile.loginVerifyUser, { ABHANumber: abhaNumber, txnId });
+      const res = await abdmClient.abhaPost(
+        E.profile.loginVerifyUser,
+        { ABHANumber: abhaNumber, txnId },
+        undefined,
+        transferToken ? { 'T-token': `Bearer ${transferToken.replace(/^Bearer\s+/i, '')}` } : undefined,
+      );
       return { token: res.token, refreshToken: res.refreshToken };
     } catch (e) { toAppError(e, 'Failed to select ABHA user'); }
   }

@@ -261,6 +261,7 @@ interface EncounterContent {
   hasPrescription?: boolean;
   hasDiagnosis?: boolean;
   hasPayment?: boolean;
+  hasDocument?: boolean;
   isWellnessVisit?: boolean;
 }
 
@@ -285,6 +286,18 @@ export function deriveHiType(content: EncounterContent): AbdmHiType {
   }
   if (content.type === 'IPD' && content.admissionId) {
     return 'DischargeSummary';
+  }
+  // Unstructured-only encounter: an uploaded document with no structured
+  // clinical content of its own is shared as a HealthDocumentRecord.
+  if (
+    content.hasDocument &&
+    !content.hasImmunization &&
+    !content.hasDiagnosis &&
+    !content.hasInvestigation &&
+    !content.hasPrescription &&
+    !content.hasPayment
+  ) {
+    return 'HealthDocumentRecord';
   }
   if (content.hasInvestigation && !content.hasDiagnosis && !content.hasPrescription) {
     return 'DiagnosticReport';
