@@ -8,6 +8,7 @@ import { Request, Response } from 'express';
 import abdmClient from '../../common/utils/abdm-client';
 import { abdmConfig } from '../../common/config/abdm';
 import { purgeByAbdmConsentId } from '../hiu/consent-compliance';
+import redisClient from '../../common/config/redis';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // V3 callback routes mounted at top-level paths that ABDM expects.
@@ -802,27 +803,127 @@ hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(asy
     return;
   }
 
-  // Find patient by abhaAddress / abhaNumber
+  // Resolve the patient this token belongs to. With duplicate ABHAs across
+  // tenants (common in sandbox, where several test patients share
+  // "<abhaNumber>@sbx"), matching by ABHA alone is ambiguous — `findFirst`
+  // previously returned an arbitrary, often already-linked, row and reported
+  // "no PENDING contexts to link", leaving the real batch's care context stuck
+  // PENDING forever. So we:
+  //   1. scope to the inbound X-HIP-ID tenant when we can resolve it, and
+  //   2. among the remaining candidates prefer the one that actually has
+  //      PENDING care contexts (the batch this generate-token was issued for).
+  // PRIMARY (deterministic): ABDM echoes the REQUEST-ID we stamped on
+  // generate-token back here as response.requestId. generateLinkToken stored
+  // `gentoken-req:<requestId>` → patientId, so we can resolve the EXACT patient
+  // row that requested this token — zero ambiguity even when several patients
+  // share the same ABHA. This is the strongest guard against linking the wrong
+  // patient/facility.
+  const echoedRequestId: string | undefined =
+    payload?.response?.requestId || payload?.resp?.requestId || payload?.requestId;
+  let patient: any = null;
+  if (echoedRequestId) {
+    try {
+      const mappedPatientId = await redisClient.get(`gentoken-req:${echoedRequestId}`);
+      if (mappedPatientId) {
+        patient = await prisma.patient.findUnique({
+          where: { id: mappedPatientId },
+          include: { abhaRecord: true },
+        });
+        if (patient) {
+          logger.info('on-generate-token: patient resolved deterministically via REQUEST-ID', {
+            requestId: echoedRequestId,
+            patientId: patient.id,
+          });
+        }
+      }
+    } catch {
+      // Redis unavailable — fall through to the ABHA/tenant heuristic below.
+    }
+  }
+
+  // FALLBACK: no deterministic mapping (Redis expired/unavailable, or a
+  // manually-triggered token). Resolve by ABHA, strictly preferring the inbound
+  // X-HIP-ID tenant and then the candidate with PENDING care contexts.
+  if (!patient) {
   const abhaDigits = (abhaAddress || '').replace(/@.*$/, '').replace(/-/g, '')
     || (abhaNumber || '').replace(/-/g, '');
 
-  const patient = await prisma.patient.findFirst({
-    where: {
-      OR: [
-        ...(abhaAddress ? [{ abhaAddress }] : []),
-        ...(abhaNumber  ? [{ abhaNumber }]  : []),
-        ...(abhaDigits  ? [{ abhaId: { contains: abhaDigits.replace(/(\d{2})(\d{4})(\d{4})(\d{4})/, '$1-$2-$3-$4') } }] : []),
-        { abhaRecord: { OR: [
-          ...(abhaAddress ? [{ abhaAddress }] : []),
-          ...(abhaNumber  ? [{ abhaNumber }]  : []),
-        ]}},
-      ],
-    },
+  const abhaOr = [
+    ...(abhaAddress ? [{ abhaAddress }] : []),
+    ...(abhaNumber  ? [{ abhaNumber }]  : []),
+    ...(abhaDigits  ? [{ abhaId: { contains: abhaDigits.replace(/(\d{2})(\d{4})(\d{4})(\d{4})/, '$1-$2-$3-$4') } }] : []),
+    { abhaRecord: { OR: [
+      ...(abhaAddress ? [{ abhaAddress }] : []),
+      ...(abhaNumber  ? [{ abhaNumber }]  : []),
+    ]}},
+  ];
+
+  // ABDM stamps the X-HIP-ID the token was generated under on the callback.
+  const inboundHipId =
+    (req.headers['x-hip-id'] as string) ||
+    (req.headers['X-HIP-ID'] as unknown as string) ||
+    undefined;
+  let inboundHospitalId: string | undefined;
+  if (inboundHipId) {
+    const h = await prisma.hospital.findFirst({ where: { hipId: inboundHipId }, select: { id: true } });
+    inboundHospitalId = h?.id;
+  }
+
+  const candidates = await prisma.patient.findMany({
+    where: { OR: abhaOr },
     include: { abhaRecord: true },
   });
 
-  if (!patient) {
+  if (!candidates.length) {
     logger.warn('on-generate-token: patient not found', { abhaAddress, abhaNumber });
+    res.status(202).json({ message: 'Patient not found' });
+    return;
+  }
+
+  // Hospital isolation is ABSOLUTE. The same person may be registered at
+  // several hospitals (several HIP IDs) on this platform, and one hospital's
+  // link action must NEVER touch another hospital's records. So we attribute
+  // the token to a hospital only when we can do so unambiguously:
+  //   1. the inbound X-HIP-ID resolves to a candidate  → that tenant, or
+  //   2. exactly one hospital has this ABHA             → that (only) row, else
+  //   3. ambiguous (same ABHA at 2+ hospitals, no tenant signal) → REFUSE.
+  // Guessing across hospitals is never acceptable here.
+  const tenantScoped = inboundHospitalId
+    ? candidates.filter((c) => c.hospitalId === inboundHospitalId)
+    : [];
+
+  if (tenantScoped.length) {
+    patient = tenantScoped[0];
+    if (tenantScoped.length > 1) {
+      // Same ABHA duplicated within ONE hospital — prefer the PENDING row.
+      const pendingCc = await prisma.careContext.findFirst({
+        where: { patientId: { in: tenantScoped.map((c) => c.id) }, linkStatus: 'PENDING' },
+        orderBy: { createdAt: 'desc' },
+        select: { patientId: true },
+      });
+      if (pendingCc) patient = tenantScoped.find((c) => c.id === pendingCc.patientId) || patient;
+    }
+  } else if (candidates.length === 1) {
+    patient = candidates[0];
+  } else {
+    // Multiple hospitals share this ABHA and we cannot determine which one the
+    // token belongs to (no deterministic REQUEST-ID mapping, no resolvable
+    // X-HIP-ID). Refusing is the only isolation-safe choice.
+    logger.warn('on-generate-token: ambiguous cross-hospital ABHA with no tenant signal — refusing to link', {
+      abhaAddress,
+      abhaNumber,
+      candidateCount: candidates.length,
+      inboundHipId,
+    });
+    res.status(202).json({ message: 'Ambiguous patient — cannot safely attribute link' });
+    return;
+  }
+  }
+
+  // If neither the deterministic mapping nor the ABHA fallback resolved a
+  // patient, acknowledge and stop rather than guess.
+  if (!patient) {
+    logger.warn('on-generate-token: patient not found', { abhaAddress, abhaNumber, echoedRequestId });
     res.status(202).json({ message: 'Patient not found' });
     return;
   }

@@ -304,7 +304,7 @@ export class HipService {
     name: string;
     gender: string;
     yearOfBirth: number;
-  }, tenantHospitalId: string) {
+  }, tenantHospitalId: string, patientId?: string) {
     // CRITICAL: abhaNumber MUST be the bare 14 digits with NO dashes. ABDM's
     // generate-token returns a generic HTTP 400 "Bad Request" when dashes are
     // present (verified live against the sandbox). Strip them defensively so a
@@ -324,6 +324,23 @@ export class HipService {
     // platform-default hipId, which would attribute care-context links to the
     // wrong tenant on a multi-facility deployment.
     const tenant = await resolveHipTenant(tenantHospitalId);
+
+    // Deterministic patient correlation. ABDM echoes the REQUEST-ID we send
+    // here back on the on-generate-token callback (as response.requestId). By
+    // stamping a known id and stashing REQUEST-ID → patientId, the callback can
+    // resolve the EXACT patient row that requested the token — instead of
+    // guessing by ABHA, which is ambiguous when the same person is registered
+    // at more than one hospital. This is the primary guard against linking the
+    // wrong facility's care contexts.
+    const linkRequestId = crypto.randomUUID();
+    if (patientId) {
+      try {
+        await redisClient.set(`gentoken-req:${linkRequestId}`, patientId, { EX: 600 });
+      } catch {
+        // Redis down — callback falls back to hipId+PENDING scoping (still
+        // tenant-safe, just less precise).
+      }
+    }
 
     logger.info('HIP: [link] → generate-token request', {
       endpoint: abdmConfig.endpoints.hip.generateToken,
@@ -349,7 +366,7 @@ export class HipService {
           gender: params.gender,
           yearOfBirth: params.yearOfBirth,
         },
-        { 'X-HIP-ID': tenant.hipId },
+        { 'X-HIP-ID': tenant.hipId, 'REQUEST-ID': linkRequestId },
         tenant,
       );
       logger.info('HIP: [link] ← generate-token accepted by ABDM (awaiting on-generate-token callback)', {
@@ -1764,7 +1781,7 @@ export class HipService {
       setImmediate(async () => {
         try {
           logger.info('HIP: [async] Calling generate-token for ABDM linking', { abhaAddress, patientId });
-          await this.generateLinkToken({ abhaNumber, abhaAddress, name: patientName, gender, yearOfBirth }, tenantHospitalId);
+          await this.generateLinkToken({ abhaNumber, abhaAddress, name: patientName, gender, yearOfBirth }, tenantHospitalId, patient.id);
           logger.info('HIP: [async] generate-token sent — awaiting ABDM callback', { abhaAddress });
         } catch (e: any) {
           const abdmCode: string = e?.response?.data?.error?.code || '';
