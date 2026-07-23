@@ -787,20 +787,20 @@ hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(asy
     error:      payload?.error,
   });
 
+  const abdmError = payload?.error;
   if (!linkToken) {
-    // Surface the ABDM error verbatim — this is the authoritative reason
-    // generate-token produced no link token (e.g. invalid ABHA address,
-    // PHR not found). Without it the failure is invisible and linking
-    // silently stalls in PENDING.
+    // No token means ABDM rejected generate-token (blocked/throttled, invalid
+    // ABHA address, PHR not found, …). We do NOT return here — we resolve the
+    // patient below and mark their PENDING contexts FAILED with the reason, so
+    // the UI stops showing "Awaiting confirmation…" forever and surfaces the
+    // actual cause.
     logger.warn('on-generate-token: no link token in payload — ABDM returned an error', {
       keys: Object.keys(payload || {}),
       abhaAddress,
       abhaNumber,
-      error: payload?.error,
+      error: abdmError,
       response: payload?.response,
     });
-    res.status(202).json({ message: 'No token found' });
-    return;
   }
 
   // Resolve the patient this token belongs to. With duplicate ABHAs across
@@ -925,6 +925,29 @@ hipTokenV3Routes.post('/on-generate-token', verifyAbdmCallback, asyncHandler(asy
   if (!patient) {
     logger.warn('on-generate-token: patient not found', { abhaAddress, abhaNumber, echoedRequestId });
     res.status(202).json({ message: 'Patient not found' });
+    return;
+  }
+
+  // ABDM returned an error and no token: record it on this patient's PENDING
+  // contexts so they move out of PENDING and the UI shows the real reason
+  // (e.g. "ABDM-1027: You are blocked. Please try again after 24 hours.")
+  // instead of "Awaiting ABDM confirmation…" indefinitely.
+  if (!linkToken) {
+    const reason = [abdmError?.code, abdmError?.message]
+      .map((s) => (s || '').toString().trim())
+      .filter(Boolean)
+      .join(' ')
+      .trim() || 'ABDM did not return a link token';
+    const updated = await prisma.careContext.updateMany({
+      where: { patientId: patient.id, linkStatus: 'PENDING' },
+      data: { linkStatus: 'FAILED', linkError: reason },
+    });
+    logger.warn('on-generate-token: marked care contexts FAILED', {
+      patientId: patient.id,
+      count: updated.count,
+      reason,
+    });
+    res.status(202).json({ message: 'ABDM error recorded' });
     return;
   }
 
