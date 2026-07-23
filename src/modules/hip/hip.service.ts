@@ -9,6 +9,7 @@ import { healthDataPushQueue, HealthDataPushJobData } from '../../common/config/
 import redisClient from '../../common/config/redis';
 import { pickPatientByCascade, deriveHiType, AbdmHiType, careContextIdForEncounter } from './discovery-helpers';
 import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import smsService from '../../common/utils/smsService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Logging helpers (link care context flow)
@@ -20,6 +21,13 @@ function maskAbha(value?: string): string {
   if (!digits) return '(none)';
   if (digits.length <= 6) return '****';
   return `${digits.slice(0, 2)}******${digits.slice(-4)}`;
+}
+
+/** Mask a mobile number for OTP hints/logs: keep only the last 4 digits. */
+function maskMobile(value?: string): string {
+  const digits = (value || '').replace(/\D/g, '');
+  if (digits.length < 4) return '****';
+  return `${'X'.repeat(digits.length - 4)}${digits.slice(-4)}`;
 }
 
 /**
@@ -717,7 +725,7 @@ export class HipService {
         }
       }
 
-      const [pcounts, icounts, immcounts, paymentRows, docRows] = await Promise.all([
+      const [pcounts, icounts, immcounts, vcounts, paymentRows, docRows] = await Promise.all([
         encIds.length
           ? prisma.encounterPrescription.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
           : Promise.resolve([]),
@@ -726,6 +734,9 @@ export class HipService {
           : Promise.resolve([]),
         encIds.length
           ? prisma.immunization.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
+          : Promise.resolve([]),
+        encIds.length
+          ? prisma.vitals.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
           : Promise.resolve([]),
         (apptIds.length || admIds.length)
           ? prisma.payment.findMany({
@@ -756,6 +767,7 @@ export class HipService {
       const prescByEnc = new Map(pcounts.map(p => [p.encounterId!, p._count as any]));
       const invByEnc = new Map(icounts.map(i => [i.encounterId!, i._count as any]));
       const immByEnc = new Map(immcounts.map(i => [i.encounterId!, i._count as any]));
+      const vitByEnc = new Map(vcounts.map(v => [v.encounterId!, v._count as any]));
       const docEncIds = new Set(docRows.map((d: any) => d.encounterId).filter(Boolean));
       const docAdmIds = new Set(docRows.map((d: any) => d.admissionId).filter(Boolean));
       const docByEnc = new Map<string, boolean>();
@@ -849,6 +861,7 @@ export class HipService {
           hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
           hasPayment: !!payByEnc.get(enc.id),
           hasDocument: !!docByEnc.get(enc.id),
+          hasVitals: !!vitByEnc.get(enc.id),
         });
         const cc = ccByEncId.get(enc.id);
         return {
@@ -967,14 +980,60 @@ export class HipService {
         // Redis unavailable — confirm will fall back to transactionId/abhaAddress.
       }
 
+      // Decide the authentication mode. MEDIATED (OTP challenge) is the ABDM-
+      // recommended default for user-initiated linking: we issue a one-time
+      // code to the patient's registered mobile and only link once they confirm
+      // it back through their PHR app (the code arrives on the confirm callback
+      // as `confirmation.token`). We downgrade to DIRECT — link on confirm with
+      // no code — only when we genuinely can't challenge: no usable mobile on
+      // file, Redis (the challenge store) is down, or an operator forces it via
+      // ABDM_LINK_AUTH_MODE=DIRECT.
+      const configuredMode = (process.env.ABDM_LINK_AUTH_MODE || 'MEDIATED').toUpperCase();
+      const mobile = (patient.mobile || '').replace(/\D/g, '');
+      const canChallenge = /^\d{10,15}$/.test(mobile);
+      let authenticationType: 'DIRECT' | 'MEDIATED' =
+        configuredMode === 'DIRECT' || !canChallenge ? 'DIRECT' : 'MEDIATED';
+      let communicationHint = 'OTP';
+
+      if (authenticationType === 'MEDIATED') {
+        // 6-digit OTP; store only its SHA-256 hash (+ an attempt counter) keyed
+        // by linkRefNumber so the confirm callback can verify without keeping
+        // the plaintext at rest.
+        const otp = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+        const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
+        try {
+          await redisClient.set(
+            `link-otp:${linkRefNumber}`,
+            JSON.stringify({ otpHash, attempts: 0 }),
+            { EX: 600 },
+          );
+          communicationHint = maskMobile(mobile);
+          // Deliver the code. Fire-and-forget so a slow SMS gateway can't stall
+          // the callback (ABDM times out ~1s). With SMS_PROVIDER=console the
+          // code is printed to the server log for sandbox testing.
+          smsService
+            .sendOTP({ mobile, otp, purpose: 'linking your health records' })
+            .catch((e: any) => logger.warn('HIP: link OTP SMS failed', { message: e?.message }));
+          logger.info('HIP: link MEDIATED — OTP issued', {
+            patientId: patient.id,
+            linkRefNumber,
+            mobile: maskMobile(mobile),
+          });
+        } catch {
+          // Redis down — cannot persist the challenge, so we can't verify it on
+          // confirm. Downgrade to DIRECT rather than lock the patient out.
+          authenticationType = 'DIRECT';
+        }
+      }
+
       const response = {
         transactionId: request.transactionId,
         link: {
           referenceNumber: linkRefNumber,
-          authenticationType: 'DIRECT',
+          authenticationType,
           meta: {
             communicationMedium: 'MOBILE',
-            communicationHint: 'OTP',
+            communicationHint,
             communicationExpiry: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
           },
         },
@@ -983,7 +1042,7 @@ export class HipService {
       };
 
       await abdmClient.post(abdmConfig.endpoints.hip.onLinkInit, response);
-      logger.info('HIP: on-init sent', { patientId: patient.id, linkRefNumber });
+      logger.info('HIP: on-init sent', { patientId: patient.id, linkRefNumber, authenticationType });
       return response;
     } catch (error: any) {
       logger.error('HIP: Failed to link care contexts', describeAbdmError(error));
@@ -1005,13 +1064,73 @@ export class HipService {
       const linkRefNumber: string | undefined =
         request?.confirmation?.linkRefNumber || request?.linkRefNumber;
       const transactionId: string | undefined = request?.transactionId;
+      const token: string | undefined = request?.confirmation?.token || request?.token;
 
       logger.info('HIP: Confirming link (user-initiated)', {
         requestId: request?.requestId,
         transactionId,
         linkRefNumber,
+        hasToken: !!token,
         bodyKeys: request && typeof request === 'object' ? Object.keys(request) : typeof request,
       });
+
+      // MEDIATED challenge validation. If on-init issued an OTP for this
+      // linkRefNumber, a `link-otp:*` entry exists and the patient MUST present
+      // the matching code (as `confirmation.token`) before we link anything. A
+      // DIRECT link has no such entry and skips straight through.
+      if (linkRefNumber) {
+        let otpState: { otpHash: string; attempts: number } | null = null;
+        try {
+          const raw = await redisClient.get(`link-otp:${linkRefNumber}`);
+          if (raw) otpState = JSON.parse(raw);
+        } catch {
+          // Redis unavailable — treat as DIRECT (nothing to validate against).
+        }
+
+        if (otpState) {
+          const provided = String(token || '').trim();
+          const providedHash = provided
+            ? crypto.createHash('sha256').update(provided).digest('hex')
+            : '';
+          const verified = !!provided && providedHash === otpState.otpHash;
+
+          if (!verified) {
+            const attempts = (otpState.attempts || 0) + 1;
+            const MAX_ATTEMPTS = 5;
+            const exhausted = attempts >= MAX_ATTEMPTS;
+            try {
+              if (exhausted) {
+                await redisClient.del(`link-otp:${linkRefNumber}`);
+              } else {
+                await redisClient.set(
+                  `link-otp:${linkRefNumber}`,
+                  JSON.stringify({ ...otpState, attempts }),
+                  { EX: 600 },
+                );
+              }
+            } catch { /* best-effort */ }
+            logger.warn('HIP: link confirm OTP mismatch', { linkRefNumber, attempts, exhausted });
+            // Report the failed challenge to ABDM; the CM surfaces this to the
+            // patient's PHR app ("incorrect OTP"). ABDM error code 1408 = OTP
+            // verification failed.
+            const errResponse = {
+              error: {
+                code: 1408,
+                message: exhausted
+                  ? 'OTP attempts exceeded. Please restart linking.'
+                  : 'Incorrect OTP. Please try again.',
+              },
+              response: { requestId: request?.requestId },
+            };
+            await abdmClient.post(abdmConfig.endpoints.hip.onLinkConfirm, errResponse);
+            return errResponse;
+          }
+
+          // Verified — consume the challenge so it can't be replayed.
+          try { await redisClient.del(`link-otp:${linkRefNumber}`); } catch { /* best-effort */ }
+          logger.info('HIP: link confirm OTP verified', { linkRefNumber });
+        }
+      }
 
       let patientId: string | null = null;
       try {
@@ -2104,7 +2223,7 @@ export class HipService {
     const apptIds = Array.from(apptIdsByEnc.values());
     const admIds = Array.from(new Set(admIdsByEnc.values()));
 
-    const [pcounts, icounts, immcounts, payRows, docRows] = await Promise.all([
+    const [pcounts, icounts, immcounts, vcounts, payRows, docRows] = await Promise.all([
       encIds.length
         ? prisma.encounterPrescription.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
         : Promise.resolve([]),
@@ -2113,6 +2232,9 @@ export class HipService {
         : Promise.resolve([]),
       encIds.length
         ? prisma.immunization.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
+        : Promise.resolve([]),
+      encIds.length
+        ? prisma.vitals.groupBy({ by: ['encounterId'], where: { encounterId: { in: encIds } }, _count: true })
         : Promise.resolve([]),
       (apptIds.length || admIds.length)
         ? prisma.payment.findMany({
@@ -2142,6 +2264,7 @@ export class HipService {
     const prescByEnc = new Map(pcounts.map(p => [p.encounterId!, p._count as any]));
     const invByEnc = new Map(icounts.map(i => [i.encounterId!, i._count as any]));
     const immByEnc = new Map(immcounts.map(i => [i.encounterId!, i._count as any]));
+    const vitByEnc = new Map(vcounts.map(v => [v.encounterId!, v._count as any]));
     const docEncIds = new Set(docRows.map((d: any) => d.encounterId).filter(Boolean));
     const docAdmIds = new Set(docRows.map((d: any) => d.admissionId).filter(Boolean));
     const docByEnc = new Map<string, boolean>();
@@ -2174,6 +2297,7 @@ export class HipService {
             hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
             hasPayment: !!payByEnc.get(enc.id),
             hasDocument: !!docByEnc.get(enc.id),
+            hasVitals: !!vitByEnc.get(enc.id),
           })
         : 'OPConsultation';
       const list = groups.get(hiType) || [];

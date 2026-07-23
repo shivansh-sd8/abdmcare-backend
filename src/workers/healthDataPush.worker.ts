@@ -230,6 +230,7 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
         hasDiagnosis: !!(enc.finalDiagnosis || enc.diagnosis || enc.provisionalDiagnosis),
         hasPayment: (paymentsByEnc.get(enc.id)?.length || 0) > 0,
         hasDocument: (documentsByEnc.get(enc.id)?.length || 0) > 0,
+        hasVitals: allVitals.some((v) => v.encounterId === enc.id),
       });
       return { cc, hiType: ccHiType };
     });
@@ -633,10 +634,13 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
       }
     }
 
-    // Per-care-context delivery status for the data-flow notification.
+    // Per-care-context delivery status for the data-flow notification. ABDM's
+    // statusResponses hiStatus enum is OK | ERRORED (same as the HIU receive
+    // side); 'DELIVERED' is not a valid hiStatus value. sessionStatus carries
+    // the TRANSFERRED/FAILED signal.
     const statusResponses = entries.map((e) => ({
       careContextReference: e.careContextReference,
-      hiStatus: 'DELIVERED',
+      hiStatus: 'OK',
       description: 'Transferred',
     }));
 
@@ -686,36 +690,59 @@ async function processHealthDataPush(job: Job<HealthDataPushJobData>): Promise<v
     const isLastAttempt = (job.attemptsMade + 1) >= (job.opts?.attempts || 1);
     const shouldNotify = isUnrecoverable || isLastAttempt;
     if (shouldNotify) {
-      try {
-        const failTenant = tenantHospitalId
-          ? await resolveHipTenant(tenantHospitalId).catch(() => null)
-          : null;
-        const failHipId = failTenant?.hipId || tenantHipId || abdmConfig.hip.id;
-        await abdmClient.post(
-          abdmConfig.endpoints.hip.dataFlowNotify,
-          {
-            notification: {
-              consentId: consentAbdmId,
-              transactionId,
-              doneAt: new Date().toISOString(),
-              notifier: { type: 'HIP', id: failHipId },
-              statusNotification: {
-                sessionStatus: 'FAILED',
-                hipId: failHipId,
-                // ABDM requires a non-empty statusResponses array even on failure.
-                statusResponses: (careContextRefs.length > 0 ? careContextRefs : ['']).map((ref) => ({
-                  careContextReference: ref,
-                  hiStatus: 'FAILED',
-                  description,
-                })),
+      // Build the per-care-context FAILED statuses. The gateway validates this
+      // payload strictly and rejects it with a generic 400 when either:
+      //   (a) `hiStatus` is not one of OK | ERRORED  — 'FAILED' is a
+      //       *sessionStatus* value, never an hiStatus (see hiu.service.ts), or
+      //   (b) a `careContextReference` is empty/blank ("statusResponses is
+      //       mandatory" / invalid reference).
+      // Prefer the references ABDM actually authorised for this transaction
+      // (job.data.authorisedCareContextRefs); fall back to the ones we resolved
+      // locally. Drop any blank refs. If nothing valid remains there is no
+      // well-formed FAILED notify we can send, so we skip it (the CM expires the
+      // session on its own) rather than POST malformed JSON that just 400s.
+      const failRefs = (authorisedCareContextRefs && authorisedCareContextRefs.length > 0)
+        ? authorisedCareContextRefs
+        : careContextRefs;
+      const cleanFailRefs = failRefs.filter((ref) => typeof ref === 'string' && ref.trim().length > 0);
+
+      if (cleanFailRefs.length === 0) {
+        logger.warn('Worker: Skipping FAILED notification — no valid careContextReference to report', {
+          transactionId,
+          consentAbdmId,
+          description,
+        });
+      } else {
+        try {
+          const failTenant = tenantHospitalId
+            ? await resolveHipTenant(tenantHospitalId).catch(() => null)
+            : null;
+          const failHipId = failTenant?.hipId || tenantHipId || abdmConfig.hip.id;
+          await abdmClient.post(
+            abdmConfig.endpoints.hip.dataFlowNotify,
+            {
+              notification: {
+                consentId: consentAbdmId,
+                transactionId,
+                doneAt: new Date().toISOString(),
+                notifier: { type: 'HIP', id: failHipId },
+                statusNotification: {
+                  sessionStatus: 'FAILED',
+                  hipId: failHipId,
+                  statusResponses: cleanFailRefs.map((ref) => ({
+                    careContextReference: ref,
+                    hiStatus: 'ERRORED',
+                    description,
+                  })),
+                },
               },
             },
-          },
-          { 'X-HIP-ID': failHipId },
-          failTenant,
-        );
-      } catch (notifyErr: any) {
-        logger.error('Worker: Failed to send FAILED notification to ABDM', { error: notifyErr.message });
+            { 'X-HIP-ID': failHipId },
+            failTenant,
+          );
+        } catch (notifyErr: any) {
+          logger.error('Worker: Failed to send FAILED notification to ABDM', { error: notifyErr.message });
+        }
       }
     } else {
       logger.info('Worker: Skipping FAILED notification — will retry', {

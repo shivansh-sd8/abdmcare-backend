@@ -262,6 +262,7 @@ interface EncounterContent {
   hasDiagnosis?: boolean;
   hasPayment?: boolean;
   hasDocument?: boolean;
+  hasVitals?: boolean;
   isWellnessVisit?: boolean;
 }
 
@@ -313,6 +314,22 @@ export function deriveHiType(content: EncounterContent): AbdmHiType {
     !content.hasImmunization
   ) {
     return 'Invoice';
+  }
+  // Vitals-only visit (nurse recorded BP/temp/weight etc. with no diagnosis,
+  // prescription, investigation, immunization, document or bill of its own) is
+  // a WellnessRecord — the ABDM type for vital signs / body measurements /
+  // general assessment. Lowest clinical priority so any structured clinical
+  // content above wins first.
+  if (
+    content.hasVitals &&
+    !content.hasDiagnosis &&
+    !content.hasInvestigation &&
+    !content.hasPrescription &&
+    !content.hasImmunization &&
+    !content.hasDocument &&
+    !content.hasPayment
+  ) {
+    return 'WellnessRecord';
   }
   return 'OPConsultation';
 }

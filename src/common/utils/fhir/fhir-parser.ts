@@ -34,6 +34,19 @@ export interface ParsedFHIRData {
     size?: number;
     creation?: string;
   }>;
+  // FHIR R4 Invoice resources from the NRCeS InvoiceRecord profile. Previously
+  // dropped by the parser, so a received bill only ever showed via the
+  // Composition narrative and never as structured billing lines.
+  invoices: Array<{
+    invoiceNumber: string;
+    status: string;
+    totalAmount: number;
+    currency: string;
+    date: string;
+    description?: string;
+    paymentTerms?: string;
+    lineItems: Array<{ label: string; amount: number; currency: string }>;
+  }>;
   sourceHIP?: string;
   compositionTitle?: string;
   compositionDate?: string;
@@ -45,6 +58,38 @@ function extractCoding(codeableConcept: any): { code: string; display: string } 
   return {
     code: coding.code || codeableConcept.code || '',
     display: coding.display || codeableConcept.text || '',
+  };
+}
+
+function extractInvoice(resource: any): ParsedFHIRData['invoices'][0] {
+  const identifiers: any[] = Array.isArray(resource.identifier) ? resource.identifier : [];
+  const invoiceNumber =
+    identifiers.find((i: any) => i?.type?.coding?.[0]?.code === 'INV')?.value ||
+    identifiers[0]?.value ||
+    '';
+  const total = resource.totalGross || resource.totalNet || {};
+  const lineItems = Array.isArray(resource.lineItem)
+    ? resource.lineItem.map((li: any) => {
+        const price = li?.priceComponent?.[0]?.amount || {};
+        return {
+          label:
+            li?.chargeItemCodeableConcept?.text ||
+            li?.chargeItemReference?.display ||
+            'Charge',
+          amount: Number(price.value ?? 0),
+          currency: price.currency || 'INR',
+        };
+      })
+    : [];
+  return {
+    invoiceNumber,
+    status: resource.status || 'unknown',
+    totalAmount: Number(total.value ?? 0),
+    currency: total.currency || 'INR',
+    date: resource.date || resource.meta?.lastUpdated || '',
+    description: resource.type?.text || '',
+    paymentTerms: typeof resource.paymentTerms === 'string' ? resource.paymentTerms : '',
+    lineItems,
   };
 }
 
@@ -219,6 +264,7 @@ export function parseFHIRBundle(bundle: any): ParsedFHIRData {
     immunizations: [],
     allergies: [],
     documents: [],
+    invoices: [],
   };
 
   if (!bundle || !Array.isArray(bundle.entry)) return result;
@@ -292,6 +338,10 @@ export function parseFHIRBundle(bundle: any): ParsedFHIRData {
 
       case 'DocumentReference':
         result.documents.push(extractDocumentReference(resource));
+        break;
+
+      case 'Invoice':
+        result.invoices.push(extractInvoice(resource));
         break;
 
       case 'Organization':

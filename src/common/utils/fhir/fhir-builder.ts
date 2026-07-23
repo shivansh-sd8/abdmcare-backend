@@ -186,6 +186,7 @@ function selectProfile(input: FHIRBundleInput): ProfileName {
   );
   const hasPayments = (input.payments?.length || 0) > 0;
   const hasDocuments = (input.documents?.length || 0) > 0;
+  const hasVitals = (input.vitals?.length || 0) > 0;
 
   if (hasImmunizations && !hasDiagnosis && !hasInvestigations) {
     return 'ImmunizationRecord';
@@ -211,6 +212,12 @@ function selectProfile(input: FHIRBundleInput): ProfileName {
 
   if (hasPayments && !hasDiagnosis && !hasInvestigations && !hasPrescriptions && !hasImmunizations) {
     return 'InvoiceRecord';
+  }
+
+  // Vitals-only visit → WellnessRecord (ABDM vital signs / body measurements).
+  // Lowest clinical priority: any structured clinical content above wins.
+  if (hasVitals && !hasDiagnosis && !hasInvestigations && !hasPrescriptions && !hasImmunizations && !hasDocuments && !hasPayments) {
+    return 'WellnessRecord';
   }
 
   // Default — covers OPD, TELECONSULTATION, EMERGENCY, and any encounter
