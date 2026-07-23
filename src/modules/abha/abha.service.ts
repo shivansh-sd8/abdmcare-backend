@@ -468,7 +468,9 @@ export class AbhaService {
         } catch { /* not decodable — leave nulls, logged below */ }
       }
       const nowSec = Math.floor(Date.now() / 1000);
-      const expired = tokenExp != null && tokenExp <= nowSec;
+      // NOTE: we deliberately do NOT pre-reject on our own clock (server time
+      // may differ from ABDM's). ABDM is the sole authority on token validity;
+      // we only log what we observed for diagnostics.
       logger.info('ABHA: [login] → verify/user', {
         abhaNumberPresent: !!abhaNumber,
         txnIdPresent: !!txnId,
@@ -478,13 +480,6 @@ export class AbhaService {
         transferTokenType: tokenType,
         transferTokenExpiresInSec: tokenExp != null ? tokenExp - nowSec : null,
       });
-
-      if (!rawToken) {
-        throw new AppError('Login session token missing — please re-verify the OTP and try again.', 400);
-      }
-      if (expired) {
-        throw new AppError('Login session expired — please request a new OTP and select the ABHA again.', 400);
-      }
 
       const res = await abdmClient.abhaPost(
         E.profile.loginVerifyUser,
