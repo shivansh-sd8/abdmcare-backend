@@ -8,52 +8,52 @@ const router = Router();
 router.use(authenticate);
 router.use(auditLog('PAYMENT'));
 
-// Get payment stats - ADMIN, SUPER_ADMIN (must be before /:id)
+// Get payment stats (must be before /:id)
 router.get(
   '/stats',
-  authorize('SUPER_ADMIN', 'ADMIN'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
   paymentController.getPaymentStats
 );
 
 // Consolidated billing view - all pending bills across OPD, IPD, payments
 router.get(
   '/consolidated',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
   paymentController.getConsolidatedBilling
 );
 
-// Create payment - RECEPTIONIST, BILLING_STAFF, ADMIN, SUPER_ADMIN
+// Create payment - RECEPTIONIST, ADMIN, SUPER_ADMIN
 router.post(
   '/',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
   paymentController.createPayment
 );
 
-// Get all payments - RECEPTIONIST, BILLING_STAFF, ADMIN, SUPER_ADMIN
+// Get all payments - RECEPTIONIST, ADMIN, SUPER_ADMIN
 router.get(
   '/',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
   paymentController.getAllPayments
 );
 
 // Get payment by ID
 router.get(
   '/:id',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
   paymentController.getPaymentById
 );
 
-// Update payment - RECEPTIONIST, BILLING_STAFF, ADMIN, SUPER_ADMIN
+// Update payment - RECEPTIONIST, ADMIN, SUPER_ADMIN
 router.put(
   '/:id',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
   paymentController.updatePayment
 );
 
-// Mark as paid - RECEPTIONIST, BILLING_STAFF, ADMIN, SUPER_ADMIN
+// Mark as paid - RECEPTIONIST, ADMIN, SUPER_ADMIN
 router.post(
   '/:id/mark-paid',
-  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST', 'BILLING_STAFF'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'RECEPTIONIST'),
   paymentController.markAsPaid
 );
 

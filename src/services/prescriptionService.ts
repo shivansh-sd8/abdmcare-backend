@@ -1,5 +1,8 @@
 import prisma from '../common/config/database';
 import { AppError } from '../common/middleware/errorHandler';
+import pharmacyService from '../modules/pharmacy/pharmacy.service';
+import logger from '../common/config/logger';
+import { getEffectiveHospitalId } from '../common/utils/scope';
 
 interface Medication {
   name: string;
@@ -20,7 +23,39 @@ interface CreatePrescriptionDTO {
 }
 
 class PrescriptionService {
-  async createPrescription(data: CreatePrescriptionDTO) {
+  async createPrescription(data: CreatePrescriptionDTO, currentUser?: any) {
+    // Multi-tenant guard: verify patient and doctor are in the caller's
+    // hospital before allowing the prescription. This prevents a doctor at
+    // hospital A from prescribing into hospital B's patient record (which
+    // would also corrupt the patient's pharmacy / billing chain).
+    const [patient, doctor] = await Promise.all([
+      prisma.patient.findUnique({
+        where: { id: data.patientId },
+        select: { id: true, hospitalId: true },
+      }),
+      prisma.doctor.findUnique({
+        where: { id: data.doctorId },
+        select: { id: true, hospitalId: true },
+      }),
+    ]);
+    if (!patient) throw new AppError('Patient not found', 404);
+    if (!doctor) throw new AppError('Doctor not found', 404);
+
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      if (!currentUser.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      if (patient.hospitalId && patient.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Patient does not belong to your hospital', 403);
+      }
+      if (doctor.hospitalId && doctor.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Doctor does not belong to your hospital', 403);
+      }
+    }
+    if (patient.hospitalId && doctor.hospitalId && patient.hospitalId !== doctor.hospitalId) {
+      throw new AppError('Patient and doctor must belong to the same hospital', 400);
+    }
+
     const prescription = await prisma.prescription.create({
       data: {
         patientId: data.patientId,
@@ -64,15 +99,27 @@ class PrescriptionService {
     hospitalId?: string;
     page?: number;
     limit?: number;
-  }) {
+  }, currentUser?: any) {
     const { patientId, doctorId, encounterId, hospitalId, page = 1, limit = 10 } = filters;
 
+    // Resolve effective hospital: non-SUPER_ADMIN → JWT; SUPER_ADMIN → the
+    // global "viewing as" scope (scopedHospitalId) or an explicit query
+    // hospitalId; if neither, all hospitals.
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser) || hospitalId;
+
+    // Doctors are restricted to their own prescriptions even when the
+    // controller didn't pass an explicit doctorId. Other roles can still
+    // pass doctorId through to filter or leave it blank for hospital-wide.
+    const effectiveDoctorId =
+      currentUser?.role === 'DOCTOR' && currentUser?.doctorId
+        ? (currentUser.doctorId as string)
+        : doctorId;
+
     const where: any = {};
-    if (patientId)  where.patientId  = patientId;
-    if (doctorId)   where.doctorId   = doctorId;
-    if (encounterId) where.encounterId = encounterId;
-    // Filter by hospital via the patient relation (Prescription has no hospitalId column)
-    if (hospitalId) where.patient = { hospitalId };
+    if (patientId)        where.patientId   = patientId;
+    if (effectiveDoctorId) where.doctorId   = effectiveDoctorId;
+    if (encounterId)      where.encounterId = encounterId;
+    if (effectiveHospitalId) where.patient = { hospitalId: effectiveHospitalId };
 
     const [prescriptions, total] = await Promise.all([
       prisma.prescription.findMany({
@@ -180,7 +227,7 @@ class PrescriptionService {
   }
 
   async dispensePrescription(id: string, data: {
-    medicines: Array<{ name: string; price: number; quantity: number }>;
+    medicines: Array<{ name: string; price: number; quantity: number; medicineId?: string }>;
     dispensedBy?: string;
     notes?: string;
   }, currentUser?: any) {
@@ -265,7 +312,27 @@ class PrescriptionService {
       }
     }
 
-    return { ...updated, totalCharges };
+    // Stock deduction for medicines with medicineId (FEFO)
+    const stockResults: Array<{ name: string; medicineId?: string; deducted: number; shortfall: number }> = [];
+    for (const m of data.medicines) {
+      if (m.medicineId) {
+        try {
+          const result = await pharmacyService.deductStockForDispense(
+            currentUser?.hospitalId,
+            data.dispensedBy || currentUser?.id || '',
+            m.medicineId,
+            m.quantity,
+            id,
+          );
+          stockResults.push({ name: m.name, medicineId: m.medicineId, ...result });
+        } catch (stockErr: any) {
+          logger.warn(`Stock deduction failed for ${m.name}: ${stockErr.message}`);
+          stockResults.push({ name: m.name, medicineId: m.medicineId, deducted: 0, shortfall: m.quantity });
+        }
+      }
+    }
+
+    return { ...updated, totalCharges, stockResults };
   }
 
   async deletePrescription(id: string, currentUser?: any) {

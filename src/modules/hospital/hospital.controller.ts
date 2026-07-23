@@ -47,7 +47,8 @@ export class HospitalController {
   updateHospital = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.hospitalService.updateHospital(id, req.body);
+      const currentUser = (req as any).user;
+      const result = await this.hospitalService.updateHospital(id, req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data);
     }
   );
@@ -70,6 +71,17 @@ export class HospitalController {
     }
   );
 
+  // Per-hospital performance snapshot — drives the Hospital Performance page.
+  // SUPER_ADMIN can hit this for any hospital; ADMIN only for their own.
+  getHospitalPerformance = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const currentUser = (req as any).user;
+      const result = await this.hospitalService.getHospitalPerformance(id, currentUser);
+      ResponseHandler.success(res, 'Hospital performance fetched successfully', result.data);
+    }
+  );
+
   // Delete hospital (SUPER_ADMIN only)
   deleteHospital = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
@@ -82,7 +94,8 @@ export class HospitalController {
   updateSchedule = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.hospitalService.updateSchedule(id, req.body);
+      const currentUser = (req as any).user;
+      const result = await this.hospitalService.updateSchedule(id, req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data);
     }
   );
@@ -90,7 +103,8 @@ export class HospitalController {
   getSchedule = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.hospitalService.getSchedule(id);
+      const currentUser = (req as any).user;
+      const result = await this.hospitalService.getSchedule(id, currentUser);
       ResponseHandler.success(res, 'Hospital schedule fetched', result.data);
     }
   );

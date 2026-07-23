@@ -8,9 +8,24 @@ const GATEWAY_BASE = process.env.ABDM_GATEWAY_BASE || 'https://dev.abdm.gov.in';
 export const abdmConfig = {
   // ── Base URLs ──────────────────────────────────────────────────────────────
   gatewayUrl: process.env.ABDM_GATEWAY_URL || `${GATEWAY_BASE}/api/hiecm/gateway/v3`,
+  // Public JWKS endpoint used to verify the signature on inbound ABDM callbacks.
+  // NOTE: this lives at /gateway/v0.5/certs (returns 200 with a keys[] JWKS).
+  // The HIECM gateway path (/api/hiecm/gateway/v3/certs) returns 401, which
+  // would make EVERY callback verification fail (401) and leave care contexts
+  // stuck PENDING. Keep this separate from gatewayUrl.
+  certsUrl: process.env.ABDM_CERTS_URL || `${GATEWAY_BASE}/gateway/v0.5/certs`,
   abhaUrl: process.env.ABDM_ABHA_URL || 'https://abhasbx.abdm.gov.in/abha/api',
   phrUrl: process.env.ABDM_PHR_URL || 'https://abhasbx.abdm.gov.in/abha/api/v3/phr/web',
   facilityUrl: process.env.ABDM_FACILITY_URL || 'https://apihspsbx.abdm.gov.in/v4/int',
+  // Public deep-link host the ABHA / PHR app expects inside a Health Facility
+  // QR. Per ABDM spec the QR contents must be a URL of the form
+  //   https://phrsbx.abdm.gov.in/share-profile?hip-id={HFR_ID}&counter-id={CTR}
+  // Sandbox: phrsbx.abdm.gov.in   Production: phr.abdm.gov.in
+  scanShareBaseUrl:
+    process.env.ABDM_SCAN_SHARE_BASE_URL ||
+    (process.env.ABDM_CM_ID === 'abdm'
+      ? 'https://phr.abdm.gov.in'
+      : 'https://phrsbx.abdm.gov.in'),
 
   // ── Client credentials ─────────────────────────────────────────────────────
   clientId: process.env.ABDM_CLIENT_ID || '',
@@ -124,6 +139,9 @@ export const abdmConfig = {
       consentOnNotify: `${GATEWAY_BASE}/api/hiecm/consent/v3/request/hip/on-notify`,
       healthInfoOnRequest: `${GATEWAY_BASE}/api/hiecm/data-flow/v3/health-information/hip/on-request`,
       dataFlowNotify: `${GATEWAY_BASE}/api/hiecm/data-flow/v3/health-information/notify`,
+      // Patient lifecycle ack (DEACTIVATED/DELETED → HIP must wipe; spec: ndhm-hip
+      // /v0.5/patients/status/on-notify; V3 path mirrors the consent/hip pattern).
+      patientStatusOnNotify: `${GATEWAY_BASE}/api/hiecm/patients/v3/status/on-notify`,
     },
 
     // ┌─────────────────────────────────────────────────────────────────────┐

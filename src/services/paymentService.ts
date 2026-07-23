@@ -1,5 +1,6 @@
 import prisma from '../common/config/database';
 import { AppError } from '../common/middleware/errorHandler';
+import { istDayRange } from '../common/utils/dateRange';
 
 interface CreatePaymentDTO {
   patientId: string;
@@ -10,6 +11,14 @@ interface CreatePaymentDTO {
   description?: string;
   items?: any;
   createdBy?: string;
+  /**
+   * The user who actually took the money. Should be the receptionist
+   * (or whoever) at the counter — falls back to `createdBy` when the
+   * caller didn't pass it explicitly.
+   */
+  collectedById?: string;
+  /** Marks the payment PAID immediately; useful for cash collections. */
+  markPaid?: boolean;
 }
 
 interface UpdatePaymentDTO {
@@ -17,6 +26,24 @@ interface UpdatePaymentDTO {
   transactionId?: string;
   paidAt?: Date;
 }
+
+/**
+ * Standard include shape for payments that surfaces the collector's name
+ * & role on every read so frontends and exports never have to do another
+ * lookup. Kept here (not duplicated per call site) so the receipt UI,
+ * payment list, and IPD/encounter responses all stay consistent.
+ */
+const collectorInclude = {
+  collectedBy: {
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      role: true,
+      email: true,
+    },
+  },
+} as const;
 
 class PaymentService {
   async createPayment(data: CreatePaymentDTO) {
@@ -30,7 +57,36 @@ class PaymentService {
       throw new AppError('Hospital ID is required', 400);
     }
 
+    // Multi-tenant guard: the patient must belong to the same hospital the
+    // payment is being created in. The controller forces hospitalId to the
+    // caller's JWT for non-SUPER_ADMIN, so this catches a UUID-guessing
+    // attempt to attach a payment to another hospital's patient.
+    const patient = await prisma.patient.findUnique({
+      where: { id: data.patientId },
+      select: { id: true, hospitalId: true },
+    });
+    if (!patient) throw new AppError('Patient not found', 404);
+    if (patient.hospitalId && patient.hospitalId !== data.hospitalId) {
+      throw new AppError('Patient does not belong to this hospital', 403);
+    }
+
     const receiptNumber = `RCP-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+
+    // Two distinct flows merge here:
+    //
+    //   1. Counter-cash style (`markPaid: true`) — the staff is creating
+    //      and collecting in the same call, so attribute the collection to
+    //      them right now.
+    //   2. Bill-now-collect-later — admin/clinician records a charge but
+    //      the receptionist will physically take the money later. We
+    //      deliberately leave `collectedById` NULL on the row so the
+    //      eventual mark-as-paid call (which knows who's actually at the
+    //      counter) can stamp it without us pre-attributing to whoever
+    //      happened to type the bill.
+    const willMarkPaid = data.markPaid === true;
+    const collectorIdForRow = willMarkPaid
+      ? (data.collectedById || data.createdBy)
+      : undefined;
 
     const payment = await prisma.payment.create({
       data: {
@@ -43,7 +99,10 @@ class PaymentService {
         items: data.items,
         receiptNumber,
         createdBy: data.createdBy,
-        status: 'PENDING',
+        collectedById: collectorIdForRow,
+        collectedAt: willMarkPaid ? new Date() : undefined,
+        status: willMarkPaid ? 'PAID' : 'PENDING',
+        paidAt: willMarkPaid ? new Date() : undefined,
       },
       include: {
         patient: {
@@ -66,6 +125,7 @@ class PaymentService {
             scheduledAt: true,
           },
         },
+        ...collectorInclude,
       },
     });
 
@@ -80,8 +140,18 @@ class PaymentService {
     endDate?: Date;
     page?: number;
     limit?: number;
+    collectedById?: string;
   }) {
-    const { hospitalId, patientId, status, startDate, endDate, page = 1, limit = 50 } = filters;
+    const {
+      hospitalId,
+      patientId,
+      status,
+      startDate,
+      endDate,
+      page = 1,
+      limit = 50,
+      collectedById,
+    } = filters;
     const skip = (page - 1) * limit;
 
     const where: any = {};
@@ -89,6 +159,14 @@ class PaymentService {
     if (hospitalId) where.hospitalId = hospitalId;
     if (patientId) where.patientId = patientId;
     if (status) where.status = status;
+    // 'unattributed' is a synthetic value the UI sends so admins can
+    // surface receipts that pre-date the collector field (or were
+    // imported from outside). Treat it as "no collector linked".
+    if (collectedById === 'unattributed') {
+      where.collectedById = null;
+    } else if (collectedById) {
+      where.collectedById = collectedById;
+    }
 
     if (startDate || endDate) {
       where.createdAt = {};
@@ -123,6 +201,7 @@ class PaymentService {
               scheduledAt: true,
             },
           },
+          ...collectorInclude,
         },
       }),
       prisma.payment.count({ where }),
@@ -173,6 +252,7 @@ class PaymentService {
             },
           },
         },
+        ...collectorInclude,
       },
     });
 
@@ -202,12 +282,26 @@ class PaymentService {
       throw new AppError('Access denied: Payment belongs to different hospital', 403);
     }
 
+    // When this update is the moment a PENDING payment becomes PAID, the
+    // current user IS the collector — stamp them onto the row so dashboards
+    // and reports can credit the right person. We don't overwrite an
+    // existing collector (e.g. for a transactionId-only edit on an already
+    // paid row).
+    const becomingPaid =
+      data.status === 'PAID' && payment.status !== 'PAID';
+
     const updated = await prisma.payment.update({
       where: { id },
       data: {
         status: data.status as any,
         transactionId: data.transactionId || undefined,
         paidAt: data.paidAt,
+        ...(becomingPaid && currentUser?.id
+          ? {
+              collectedById: payment.collectedById ?? currentUser.id,
+              collectedAt: payment.collectedAt ?? new Date(),
+            }
+          : {}),
       },
       include: {
         patient: {
@@ -217,6 +311,7 @@ class PaymentService {
             uhid: true,
           },
         },
+        ...collectorInclude,
       },
     });
 
@@ -273,7 +368,10 @@ class PaymentService {
       }),
       prisma.payment.findMany({
         where: directFilter,
-        include: { patient: { select: patientSelect } },
+        include: {
+          patient: { select: patientSelect },
+          ...collectorInclude,
+        },
         orderBy: { createdAt: 'desc' },
         take: 500,
       }),
@@ -344,13 +442,15 @@ class PaymentService {
         id: e.id, type: 'OPD', patient: e.patient, doctor: e.doctor,
         date: e.visitDate, consultation, lab, medicine, scan, ward: 0,
         total: effectiveTotal, discount, paid, outstanding: Math.max(0, effectiveTotal - paid),
+        discountReason: e.discountReason || null,
+        discountApprovedBy: e.discountApprovedBy || null,
         status: e.paymentStatus || 'PENDING', diagnosis: e.finalDiagnosis || e.diagnosis,
       });
     });
 
     // 2. IPD Admissions — ward charges + actual linked round encounter charges
     allAdmissions.forEach((a: any) => {
-      const wardRate = a.dailyCharges || a.ward?.dailyCharges || 0;
+      const wardRate = parseFloat(a.dailyCharges || a.ward?.dailyCharges || '0');
       const days = a.dischargedAt
         ? Math.max(1, Math.ceil((new Date(a.dischargedAt).getTime() - new Date(a.admittedAt).getTime()) / 86400000))
         : Math.max(1, Math.ceil((Date.now() - new Date(a.admittedAt).getTime()) / 86400000));
@@ -370,11 +470,11 @@ class PaymentService {
           });
       }
 
-      const grossTotal = a.totalAmount || (wardCharges + roundConsultation + roundLab + roundMedicine + roundScan);
-      const discount = a.discountAmount || 0;
+      const grossTotal = parseFloat(a.totalAmount || '0') || (wardCharges + roundConsultation + roundLab + roundMedicine + roundScan);
+      const discount = parseFloat(a.discountAmount || '0');
       const total = Math.max(0, grossTotal - discount);
-      const advancePaid = a.advancePaid || 0;
-      const dischargePaid = a.paymentCollected || 0;
+      const advancePaid = parseFloat(a.advancePaid || '0');
+      const dischargePaid = parseFloat(a.paymentCollected || '0');
       const totalReceived = advancePaid + dischargePaid;
       allBills.push({
         id: a.id, type: 'IPD', patient: a.patient, ward: a.ward, bed: a.bed,
@@ -382,6 +482,8 @@ class PaymentService {
         consultation: roundConsultation, lab: roundLab, medicine: roundMedicine, scan: roundScan,
         wardCharges, wardRate, days, advancePaid, discount,
         total, paid: totalReceived, outstanding: Math.max(0, total - totalReceived),
+        discountReason: a.discountReason || null,
+        discountApprovedBy: a.discountApprovedBy || null,
         status: a.paymentStatus || 'PENDING', diagnosis: a.diagnosis, admissionNumber: a.admissionNumber,
       });
     });
@@ -429,25 +531,36 @@ class PaymentService {
       }
     });
 
-    // Separate bills into primary (used for stats) and detail (for visibility only)
-    const primaryBills = allBills.filter(b => !b.isDetail);
-    const pendingBills = primaryBills.filter(b => b.status !== 'PAID' && b.outstanding > 0);
-
-    // Completed Payment rows (receipts) — not billed items, just records of money received
+    // Standalone pending payments (not linked to encounter/admission) ARE
+    // bills in their own right — admins type these up so the receptionist
+    // can later collect. We add them to `allBills` first so every
+    // downstream consumer (Billing analytics, "Outstanding by service",
+    // patient charge breakdown) sees them; they'll naturally also appear
+    // in `pendingBills` once we derive that below.
     const completedPayments = allPayments.filter((p: any) => p.status === 'PAID');
     const pendingPaymentRecords = allPayments.filter((p: any) => p.status === 'PENDING');
 
-    // Standalone pending payments (not linked to encounter/admission) are actual bills
     pendingPaymentRecords.forEach((p: any) => {
       const isReceipt = p.admissionId && admissionIds.has(p.admissionId);
-      if (!isReceipt) {
-        pendingBills.push({
-          id: p.id, type: 'PAYMENT', patient: p.patient, date: p.createdAt,
-          total: p.amount, paid: 0, outstanding: p.amount,
-          description: p.description, status: 'PENDING',
-        });
-      }
+      if (isReceipt) return;
+      const amt = parseFloat(p.amount || '0');
+      if (amt <= 0) return;
+      allBills.push({
+        id: p.id,
+        type: 'PAYMENT',
+        patient: p.patient,
+        date: p.createdAt,
+        total: amt,
+        paid: 0,
+        outstanding: amt,
+        description: p.description,
+        status: 'PENDING',
+      });
     });
+
+    // Separate bills into primary (used for stats) and detail (for visibility only)
+    const primaryBills = allBills.filter(b => !b.isDetail);
+    const pendingBills = primaryBills.filter(b => b.status !== 'PAID' && b.outstanding > 0);
 
     // ── Patient-wise aggregation — primary sources only ──────────────────────
     const patientAgg: Record<string, any> = {};
@@ -498,16 +611,21 @@ class PaymentService {
 
     // ── Stats ────────────────────────────────────────────────────────────────
     const totalOutstanding = pendingBills.reduce((s, b) => s + (b.outstanding || 0), 0);
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    // IST-anchored: "today" and "this month" should match the user's wall
+    // clock, not the server's. UTC servers would otherwise drop the first
+    // ~5.5 hours of an IST day from these totals.
+    const todayStart = istDayRange(0).start;
+    const istNow = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const istMonthStartIso = `${istNow.getUTCFullYear()}-${String(istNow.getUTCMonth() + 1).padStart(2, '0')}-01T00:00:00+05:30`;
+    const monthStart = new Date(istMonthStartIso);
 
     // Revenue = Payment rows (receipts) — single source of truth for collected money
     const todayCollections = completedPayments
       .filter((p: any) => p.paidAt && new Date(p.paidAt) >= todayStart)
-      .reduce((s: number, p: any) => s + (p.amount || 0), 0);
+      .reduce((s: number, p: any) => s + parseFloat(p.amount || '0'), 0);
     const monthRevenue = completedPayments
       .filter((p: any) => p.paidAt && new Date(p.paidAt) >= monthStart)
-      .reduce((s: number, p: any) => s + (p.amount || 0), 0);
+      .reduce((s: number, p: any) => s + parseFloat(p.amount || '0'), 0);
 
     return {
       stats: {
@@ -538,7 +656,7 @@ class PaymentService {
           ...where,
           status: 'PAID',
           paidAt: {
-            gte: new Date(new Date().setHours(0, 0, 0, 0)),
+            gte: istDayRange(0).start,
           },
         },
         _sum: { amount: true },
@@ -552,8 +670,8 @@ class PaymentService {
     ]);
 
     return {
-      totalRevenue: totalRevenue._sum.amount || 0,
-      todayRevenue: todayRevenue._sum.amount || 0,
+      totalRevenue: Number(totalRevenue._sum.amount || 0),
+      todayRevenue: Number(todayRevenue._sum.amount || 0),
       pendingPayments,
       paidPayments,
     };

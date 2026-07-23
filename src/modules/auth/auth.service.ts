@@ -15,7 +15,7 @@ interface RegisterData {
   firstName: string;
   lastName: string;
   phone?: string;
-  role?: 'SUPER_ADMIN' | 'ADMIN' | 'DOCTOR' | 'NURSE' | 'RECEPTIONIST' | 'LAB_TECHNICIAN' | 'PHARMACIST' | 'BILLING_STAFF' | 'RADIOLOGIST';
+  role?: 'SUPER_ADMIN' | 'ADMIN' | 'DOCTOR' | 'NURSE' | 'RECEPTIONIST' | 'LAB_TECHNICIAN' | 'PHARMACIST';
   hospitalId?: string;
   // Doctor-specific fields
   specialization?: string;
@@ -96,77 +96,10 @@ export class AuthService {
     };
   }
 
-  async superAdminSignup(data: RegisterData, secretKey: string) {
-    // Validate secret key
-    const SUPER_ADMIN_SECRET = process.env.SUPER_ADMIN_SECRET_KEY || 'medisync-super-secret-2026';
-    
-    if (secretKey !== SUPER_ADMIN_SECRET) {
-      throw new AppError('Invalid secret key', 403);
-    }
-
-    // Check if any super admin already exists
-    const existingSuperAdmin = await prisma.user.findFirst({
-      where: { role: 'SUPER_ADMIN' },
-    });
-
-    if (existingSuperAdmin) {
-      throw new AppError('Super Admin already exists. Contact existing Super Admin for access.', 409);
-    }
-
-    // Check if email already exists
-    const existingUser = await prisma.user.findUnique({
-      where: { email: data.email },
-    });
-
-    if (existingUser) {
-      throw new AppError('Email already registered', 409);
-    }
-
-    const hashedPassword = await bcrypt.hash(data.password, 10);
-
-    const user = await prisma.user.create({
-      data: {
-        email: data.email,
-        password: hashedPassword,
-        username: data.username,
-        firstName: data.firstName,
-        lastName: data.lastName,
-        role: 'SUPER_ADMIN',
-        hospitalId: null,
-      },
-    });
-
-    const token = generateToken({
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      hospitalId: undefined,
-    });
-
-    const refreshToken = generateRefreshToken({
-      id: user.id,
-      email: user.email,
-      role: user.role,
-    });
-
-    return {
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-      },
-      token,
-      refreshToken,
-    };
-  }
-
   async register(data: RegisterData, currentUser?: any) {
     // Role escalation prevention
     const adminOnlyRoles: string[] = ['SUPER_ADMIN'];
-    const staffRoles: string[] = ['DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST', 'BILLING_STAFF', 'RADIOLOGIST'];
+    const staffRoles: string[] = ['DOCTOR', 'NURSE', 'RECEPTIONIST', 'LAB_TECHNICIAN', 'PHARMACIST'];
 
     if (currentUser?.role === 'ADMIN') {
       // ADMIN can only create staff roles within their hospital
@@ -194,12 +127,26 @@ export class AuthService {
       throw new AppError('Hospital ID is required for all non-Super Admin users', 400);
     }
 
-    const existingUser = await prisma.user.findUnique({
-      where: { email: data.email },
-    });
+    // Pre-check uniqueness so we return clean 409 errors instead of raw P2002.
+    const [byEmail, byUsername] = await Promise.all([
+      prisma.user.findUnique({ where: { email: data.email } }),
+      data.username ? prisma.user.findUnique({ where: { username: data.username } }) : null,
+    ]);
+    if (byEmail) throw new AppError('A user with this email already exists', 409);
+    if (byUsername) throw new AppError('This username is already taken', 409);
 
-    if (existingUser) {
-      throw new AppError('User already exists', 409);
+    // Enforce per-hospital plan limit (maxUsers) for non-SUPER_ADMIN tenants.
+    if (hospitalId) {
+      const [hospital, currentUserCount] = await Promise.all([
+        prisma.hospital.findUnique({ where: { id: hospitalId }, select: { maxUsers: true } }),
+        prisma.user.count({ where: { hospitalId, isActive: true } }),
+      ]);
+      if (hospital?.maxUsers && currentUserCount >= hospital.maxUsers) {
+        throw new AppError(
+          `User limit (${hospital.maxUsers}) reached for this hospital's plan. Upgrade the plan or deactivate unused users.`,
+          409,
+        );
+      }
     }
 
     const hashedPassword = await bcrypt.hash(data.password, 10);
@@ -211,6 +158,7 @@ export class AuthService {
         username: data.username,
         firstName: data.firstName,
         lastName: data.lastName,
+        phone: data.phone || null,
         role: data.role || 'RECEPTIONIST',
         hospitalId,
       },
@@ -335,7 +283,11 @@ export class AuthService {
     else if (currentUser.role !== 'SUPER_ADMIN') {
       where.role = { not: 'SUPER_ADMIN' };
     }
-    // SUPER_ADMIN sees all users
+    // SUPER_ADMIN with the global "viewing as" hospital scope: only show
+    // users that belong to that hospital. Without a scope, show all users.
+    else if (currentUser.role === 'SUPER_ADMIN' && currentUser.scopedHospitalId) {
+      where.hospitalId = currentUser.scopedHospitalId;
+    }
 
     const users = await prisma.user.findMany({
       where,
@@ -418,19 +370,42 @@ export class AuthService {
       }
     }
 
+    // Build a whitelist update payload — never trust the entire body. Optional
+    // password change runs through bcrypt; passwords sent as empty strings (the
+    // common FE pattern when "Edit user" reuses the create form) are ignored.
+    const update: any = {};
+    if (data.firstName !== undefined) update.firstName = data.firstName;
+    if (data.lastName !== undefined) update.lastName = data.lastName;
+    if (data.phone !== undefined) update.phone = data.phone || null;
+    if (data.role !== undefined) update.role = data.role;
+    if (data.isActive !== undefined) update.isActive = !!data.isActive;
+
+    if (data.email && data.email !== existingUser.email) {
+      const dup = await prisma.user.findUnique({ where: { email: data.email } });
+      if (dup) throw new AppError('Another user already uses this email', 409);
+      update.email = data.email;
+    }
+
+    if (typeof data.password === 'string' && data.password.length > 0) {
+      if (data.password.length < 8) {
+        throw new AppError('Password must be at least 8 characters', 400);
+      }
+      update.password = await bcrypt.hash(data.password, 10);
+    }
+
+    // SUPER_ADMIN may move a user across hospitals; ADMIN cannot.
+    if (data.hospitalId && currentUser?.role === 'SUPER_ADMIN') {
+      update.hospitalId = data.hospitalId;
+    }
+
     const user = await prisma.user.update({
       where: { id },
-      data: {
-        firstName: data.firstName,
-        lastName: data.lastName,
-        email: data.email,
-        role: data.role,
-        hospitalId: data.hospitalId,
-      },
+      data: update,
       select: {
         id: true,
         username: true,
         email: true,
+        phone: true,
         firstName: true,
         lastName: true,
         role: true,
@@ -493,10 +468,16 @@ export class AuthService {
 
     logger.info('Password reset OTP generated', { email, otp });
 
-    // In production, send via email/SMS. For sandbox, return OTP in response.
+    // SECURITY: never echo the OTP in the API response in non-development
+    // environments. In dev we still return it so engineers can complete the
+    // flow without an email gateway, but we gate it on NODE_ENV.
+    const isDev =
+      process.env.NODE_ENV !== 'production' &&
+      process.env.RETURN_OTP_IN_RESPONSE === 'true';
+
     return {
-      message: 'Reset code generated. Check your email/console.',
-      otp, // Remove in production — included for development/testing only
+      message: 'If an account with that email exists, a reset code has been sent.',
+      ...(isDev ? { otp } : {}),
       expiresIn: '15 minutes',
     };
   }
@@ -577,7 +558,12 @@ export class AuthService {
     const updateData: any = {};
     if (data.firstName) updateData.firstName = data.firstName;
     if (data.lastName) updateData.lastName = data.lastName;
-    if (data.email) updateData.email = data.email;
+    if (data.email && data.email !== user.email) {
+      const dup = await prisma.user.findUnique({ where: { email: data.email } });
+      if (dup) throw new AppError('Another user already uses this email', 409);
+      updateData.email = data.email;
+    }
+    if (data.phone !== undefined) updateData.phone = data.phone || null;
 
     const updated = await prisma.user.update({
       where: { id: userId },
@@ -586,6 +572,7 @@ export class AuthService {
         id: true,
         username: true,
         email: true,
+        phone: true,
         firstName: true,
         lastName: true,
         role: true,

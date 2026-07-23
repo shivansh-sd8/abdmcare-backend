@@ -24,7 +24,8 @@ class AuditLogController {
         limit: parseInt(limit as string, 10),
       };
 
-      const result = await auditLogService.getAuditLogs(filters);
+      const currentUser = (req as any).user;
+      const result = await auditLogService.getAuditLogs(filters, currentUser);
 
       return res.status(200).json({
         success: true,
@@ -40,9 +41,11 @@ class AuditLogController {
       const { userId } = req.params;
       const { limit = 20 } = req.query;
 
+      const currentUser = (req as any).user;
       const activity = await auditLogService.getUserActivity(
         userId,
-        parseInt(limit as string, 10)
+        parseInt(limit as string, 10),
+        currentUser
       );
 
       return res.status(200).json({
@@ -58,7 +61,8 @@ class AuditLogController {
     try {
       const { entity, entityId } = req.params;
 
-      const history = await auditLogService.getEntityHistory(entity, entityId);
+      const currentUser = (req as any).user;
+      const history = await auditLogService.getEntityHistory(entity, entityId, currentUser);
 
       return res.status(200).json({
         success: true,

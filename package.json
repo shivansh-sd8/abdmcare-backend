@@ -1,7 +1,7 @@
 {
-  "name": "medisync-abdm-backend",
+  "name": "abhaayushman-abdm-backend",
   "version": "1.0.0",
-  "description": "MediSync ABDM - Production-grade ABDM-compliant HIMS Backend",
+  "description": "AbhaAyushman ABDM - Production-grade ABDM-compliant HIMS Backend",
   "main": "dist/server.js",
   "scripts": {
     "dev": "nodemon src/server.ts",
@@ -16,9 +16,13 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "prisma:seed": "ts-node src/database/seed.ts",
-    "seed": "ts-node src/database/seed.ts",
-    "docker:build": "docker build -t medisync-backend .",
+    "prisma:seed": "ts-node src/database/seed-abdm.ts",
+    "seed": "ts-node src/database/seed-abdm.ts",
+    "seed:abdm": "ts-node src/database/seed-abdm.ts",
+    "seed:superadmin": "ts-node src/database/seed-superadmin.ts",
+    "abdm:setup": "ts-node scripts/abdm-sandbox-setup.ts",
+    "abdm:send-otp": "ts-node scripts/abdm-send-otp.ts",
+    "docker:build": "docker build -t abhaayushman-backend .",
     "docker:run": "docker-compose up"
   },
   "keywords": [
@@ -28,12 +32,15 @@
     "abha",
     "fhir"
   ],
-  "author": "MediSync Team",
+  "author": "AbhaAyushman Team",
   "license": "PROPRIETARY",
   "dependencies": {
+    "@noble/curves": "^1.7.0",
+    "@noble/hashes": "^1.6.1",
     "@opentelemetry/api": "^1.7.0",
     "@prisma/client": "^5.9.1",
-    "@sentry/node": "^7.99.0",
+    "@sentry/node": "^7.120.4",
+    "archiver": "^7.0.1",
     "axios": "^1.6.5",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.1.9",
@@ -42,6 +49,7 @@
     "cors": "^2.8.5",
     "date-fns": "^3.2.0",
     "dotenv": "^16.4.1",
+    "exceljs": "^4.4.0",
     "express": "^4.21.1",
     "express-rate-limit": "^7.1.5",
     "express-validator": "^7.0.1",
@@ -49,15 +57,18 @@
     "joi": "^17.12.0",
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
+    "nodemailer": "^8.0.10",
+    "pdfkit": "^0.19.1",
     "redis": "^4.6.12",
-    "swagger-jsdoc": "^6.2.8",
-    "swagger-ui-express": "^5.0.0",
+    "swagger-jsdoc": "^6.3.0",
+    "swagger-ui-express": "^5.0.1",
     "uuid": "^9.0.1",
     "winston": "^3.11.0",
     "winston-daily-rotate-file": "^4.7.1",
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@types/archiver": "^8.0.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/compression": "^1.7.5",
     "@types/cookie-parser": "^1.4.6",
@@ -67,9 +78,11 @@
     "@types/jsonwebtoken": "^9.0.5",
     "@types/morgan": "^1.9.9",
     "@types/node": "^20.11.5",
+    "@types/nodemailer": "^8.0.0",
+    "@types/pdfkit": "^0.17.6",
     "@types/supertest": "^6.0.2",
     "@types/swagger-jsdoc": "^6.0.4",
-    "@types/swagger-ui-express": "^4.1.6",
+    "@types/swagger-ui-express": "^4.1.8",
     "@types/uuid": "^9.0.7",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
@@ -85,7 +98,7 @@
   },
   "prisma": {
     "schema": "src/database/prisma/schema.prisma",
-    "seed": "ts-node src/database/seed.ts"
+    "seed": "ts-node src/database/seed-abdm.ts"
   },
   "engines": {
     "node": ">=20.0.0",

@@ -20,14 +20,36 @@ export const authenticate = async (
 ): Promise<void> => {
   try {
     const authHeader = req.headers.authorization;
+    let token: string | undefined;
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7);
+    } else if (req.cookies?.token) {
+      token = req.cookies.token;
+    }
+
+    if (!token) {
       throw new AppError('No token provided', 401);
     }
 
-    const token = authHeader.substring(7);
-
     const decoded = jwt.verify(token, config.jwt.secret) as JwtPayload;
+
+    // SUPER_ADMIN can pick a hospital from the global "viewing as" selector;
+    // the frontend axios interceptor propagates it as ?hospitalId=<id> on
+    // every API call. We promote it onto req.user.scopedHospitalId so all
+    // services can transparently scope their queries via the helpers in
+    // common/utils/scope.ts. For non-SUPER_ADMIN users the param is ignored
+    // — their tenancy is bound by the JWT.
+    let scopedHospitalId: string | undefined;
+    if (decoded.role === 'SUPER_ADMIN') {
+      const fromQuery = (req.query?.hospitalId ?? req.query?.scopeHospitalId) as
+        | string
+        | string[]
+        | undefined;
+      if (typeof fromQuery === 'string' && fromQuery.length > 0) {
+        scopedHospitalId = fromQuery;
+      }
+    }
 
     req.user = {
       id: decoded.id,
@@ -35,9 +57,10 @@ export const authenticate = async (
       role: decoded.role,
       hospitalId: decoded.hospitalId,
       doctorId: decoded.doctorId,
+      scopedHospitalId,
     };
 
-    logger.debug('User authenticated', { userId: decoded.id });
+    logger.debug('User authenticated', { userId: decoded.id, scopedHospitalId });
     next();
   } catch (error) {
     if (error instanceof jwt.JsonWebTokenError) {
@@ -53,15 +76,14 @@ export const authenticate = async (
 export const authorize = (...roles: string[]) => {
   return (req: AuthenticatedRequest, _res: Response, next: NextFunction): void => {
     if (!req.user) {
-      throw new AppError('User not authenticated', 401);
+      return next(new AppError('User not authenticated', 401));
     }
 
-    // Case-insensitive role comparison
     const userRole = req.user.role.toUpperCase();
     const allowedRoles = roles.map(r => r.toUpperCase());
-    
+
     if (!allowedRoles.includes(userRole)) {
-      throw new AppError('Insufficient permissions', 403);
+      return next(new AppError('Insufficient permissions', 403));
     }
 
     next();

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import paymentService from '../services/paymentService';
 import { AuthenticatedRequest } from '../common/types';
+import { getEffectiveHospitalId } from '../common/utils/scope';
 
 class PaymentController {
   async createPayment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<Response | void> {
@@ -15,6 +16,7 @@ class PaymentController {
         ...req.body,
         hospitalId,
         createdBy: currentUser?.id,
+        collectedById: currentUser?.id,
       });
 
       return res.status(201).json({
@@ -30,13 +32,12 @@ class PaymentController {
   async getAllPayments(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<Response | void> {
     try {
       const currentUser = req.user;
-      const { patientId, status, startDate, endDate, page, limit } = req.query;
+      const { patientId, status, startDate, endDate, page, limit, collectedById } = req.query;
 
-      // Non-SUPER_ADMIN users see only their own hospital's payments
-      let hospitalId = req.query.hospitalId as string;
-      if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
-        hospitalId = currentUser.hospitalId;
-      }
+      // Non-SUPER_ADMIN: their JWT hospital. SUPER_ADMIN with global "viewing
+      // as" scope: that hospital. SUPER_ADMIN unscoped: explicit query param,
+      // or all hospitals if blank.
+      const hospitalId = getEffectiveHospitalId(currentUser) || (req.query.hospitalId as string) || undefined;
 
       const result = await paymentService.getAllPayments({
         hospitalId,
@@ -46,6 +47,7 @@ class PaymentController {
         endDate: endDate ? new Date(endDate as string) : undefined,
         page: page ? parseInt(page as string) : undefined,
         limit: limit ? parseInt(limit as string) : undefined,
+        collectedById: collectedById as string | undefined,
       });
 
       return res.status(200).json({
@@ -105,10 +107,7 @@ class PaymentController {
   async getConsolidatedBilling(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<Response | void> {
     try {
       const currentUser = req.user;
-      let hospitalId = req.query.hospitalId as string;
-      if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
-        hospitalId = currentUser.hospitalId;
-      }
+      const hospitalId = getEffectiveHospitalId(currentUser) || (req.query.hospitalId as string) || undefined;
       const patientId = req.query.patientId as string;
       const result = await paymentService.getConsolidatedBilling(hospitalId, patientId);
       return res.status(200).json({ success: true, data: result });
@@ -121,11 +120,9 @@ class PaymentController {
     try {
       const currentUser = req.user;
 
-      // Non-SUPER_ADMIN users see only their own hospital's stats
-      let hospitalId = req.query.hospitalId as string;
-      if (currentUser?.role !== 'SUPER_ADMIN' && currentUser?.hospitalId) {
-        hospitalId = currentUser.hospitalId;
-      }
+      // Effective hospital scope (non-SUPER_ADMIN: JWT; SUPER_ADMIN: global
+      // "viewing as" scope; unscoped SUPER_ADMIN: explicit param or platform-wide).
+      const hospitalId = getEffectiveHospitalId(currentUser) || (req.query.hospitalId as string) || undefined;
 
       const stats = await paymentService.getPaymentStats(hospitalId);
 

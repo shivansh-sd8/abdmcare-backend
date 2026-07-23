@@ -12,14 +12,19 @@ export class ConsentController {
 
   createConsentRequest = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.consentService.createConsentRequest(req.body);
+      const currentUser = (req as any).user;
+      const result = await this.consentService.createConsentRequest(req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data, 201);
     }
   );
 
   handleConsentNotification = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
-      const result = await this.consentService.handleConsentNotification(req.body);
+      // ABDM sends the message id in the `REQUEST-ID` header (the notify body is
+      // only { notification }). The on-notify ACK must echo it as
+      // response.requestId, else ABDM rejects the ACK with 400. Pass it through.
+      const requestId = (req.headers['request-id'] as string) || req.body?.requestId;
+      const result = await this.consentService.handleConsentNotification(req.body, requestId);
       ResponseHandler.success(res, result?.message || 'Consent notification processed');
     }
   );
@@ -27,7 +32,8 @@ export class ConsentController {
   fetchConsentArtefact = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.consentService.fetchConsentArtefact(id);
+      const currentUser = (req as any).user;
+      const result = await this.consentService.fetchConsentArtefact(id, currentUser);
       ResponseHandler.success(res, 'Consent artefact fetched', result.data);
     }
   );
@@ -35,7 +41,8 @@ export class ConsentController {
   getPatientConsents = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { patientId } = req.params;
-      const result = await this.consentService.getPatientConsents(patientId);
+      const currentUser = (req as any).user;
+      const result = await this.consentService.getPatientConsents(patientId, currentUser);
       ResponseHandler.success(res, 'Consents fetched successfully', result.data);
     }
   );
@@ -43,7 +50,8 @@ export class ConsentController {
   revokeConsent = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.consentService.revokeConsent(id);
+      const currentUser = (req as any).user;
+      const result = await this.consentService.revokeConsent(id, currentUser);
       ResponseHandler.success(res, result.message);
     }
   );
@@ -61,6 +69,15 @@ export class ConsentController {
       const currentUser = (req as any).user;
       const result = await this.consentService.getConsentStats(currentUser);
       ResponseHandler.success(res, 'Consent stats fetched successfully', result.data);
+    }
+  );
+
+  getConsentStatus = asyncHandler(
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const { id } = req.params;
+      const currentUser = (req as any).user;
+      const result = await this.consentService.getConsentStatusById(id, currentUser);
+      ResponseHandler.success(res, 'Consent status fetched', result.data);
     }
   );
 }

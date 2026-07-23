@@ -3,14 +3,13 @@ import consentController from './consent.controller';
 import { body } from 'express-validator';
 import { validate } from '../../common/middleware/validation';
 import { authenticate, authorize } from '../../common/middleware/auth';
+import { auditLog } from '../../common/middleware/audit';
 
 const router = Router();
 
-// ABDM Gateway callback (no auth)
-router.post('/v0.5/consents/hip/notify', consentController.handleConsentNotification);
-
 // Internal APIs (auth required)
 router.use(authenticate);
+router.use(auditLog('CONSENT'));
 
 router.post(
   '/request',
@@ -28,11 +27,19 @@ router.post(
   consentController.createConsentRequest
 );
 
-router.get('/', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getAllConsents);
+// Reads are open to clinical and front-desk staff so the nurse can
+// confirm consent before a procedure and the receptionist can answer
+// "is consent in place?" at check-in. Writes (request/revoke) stay
+// restricted to clinicians and admins.
+const READ_ROLES = ['SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'] as const;
 
-router.get('/stats', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getConsentStats);
+router.get('/', authorize(...READ_ROLES), consentController.getAllConsents);
 
-router.get('/patient/:patientId', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.getPatientConsents);
+router.get('/stats', authorize(...READ_ROLES), consentController.getConsentStats);
+
+router.get('/patient/:patientId', authorize(...READ_ROLES), consentController.getPatientConsents);
+
+router.get('/:id/status', authorize(...READ_ROLES), consentController.getConsentStatus);
 
 router.get('/:id/artefact', authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'), consentController.fetchConsentArtefact);
 

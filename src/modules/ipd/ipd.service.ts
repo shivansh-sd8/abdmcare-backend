@@ -1,5 +1,7 @@
 import prisma from '../../common/config/database';
 import smsService from '../../common/utils/smsService';
+import documentService from '../document/document.service';
+import logger from '../../common/config/logger';
 
 function generateAdmissionNumber(): string {
   const now = new Date();
@@ -20,9 +22,12 @@ function generateReceiptNumber(): string {
 export class IPDService {
   // ── Ward operations ──────────────────────────────────────────────────────
 
-  async listWards(hospitalId: string) {
+  async listWards(hospitalId?: string) {
+    // SUPER_ADMIN with no explicit ?hospitalId → list across every hospital.
+    const where: any = { isActive: true };
+    if (hospitalId) where.hospitalId = hospitalId;
     return prisma.ward.findMany({
-      where: { hospitalId, isActive: true },
+      where,
       include: {
         _count: { select: { beds: true, admissions: { where: { status: 'ADMITTED' } } } },
         beds: { orderBy: { bedNumber: 'asc' } },
@@ -79,16 +84,54 @@ export class IPDService {
     return prisma.bed.update({ where: { id: bedId }, data: { status: status as any } });
   }
 
+  // ── Delete operations (only if not occupied) ────────────────────────────
+
+  async deleteBed(bedId: string, hospitalId: string) {
+    const bed = await prisma.bed.findFirst({
+      where: { id: bedId, ward: { hospitalId } },
+    });
+    if (!bed) throw new Error('Bed not found');
+    if (bed.status === 'OCCUPIED') throw new Error('Cannot delete an occupied bed');
+
+    const activeAdmission = await prisma.admission.findFirst({
+      where: { bedId, status: { in: ['ADMITTED', 'DISCHARGE_READY'] } },
+    });
+    if (activeAdmission) throw new Error('Cannot delete bed with active admission');
+
+    return prisma.bed.delete({ where: { id: bedId } });
+  }
+
+  async deleteWard(wardId: string, hospitalId: string) {
+    const ward = await prisma.ward.findFirst({
+      where: { id: wardId, hospitalId },
+      include: { beds: { select: { id: true, status: true } } },
+    });
+    if (!ward) throw new Error('Ward not found');
+
+    const occupiedBeds = (ward as any).beds.filter((b: any) => b.status === 'OCCUPIED');
+    if (occupiedBeds.length > 0) throw new Error('Cannot delete ward with occupied beds');
+
+    const activeAdmissions = await prisma.admission.count({
+      where: { wardId, status: { in: ['ADMITTED', 'DISCHARGE_READY'] } },
+    });
+    if (activeAdmissions > 0) throw new Error('Cannot delete ward with active admissions');
+
+    // Delete all beds first, then the ward
+    await prisma.bed.deleteMany({ where: { wardId } });
+    return prisma.ward.delete({ where: { id: wardId } });
+  }
+
   // ── Admission operations ─────────────────────────────────────────────────
 
-  async listAdmissions(hospitalId: string, filters: {
+  async listAdmissions(hospitalId: string | undefined, filters: {
     status?: string;
     wardId?: string;
     page?: number;
     limit?: number;
   } = {}) {
     const { status, wardId, page = 1, limit = 25 } = filters;
-    const where: any = { hospitalId };
+    const where: any = {};
+    if (hospitalId) where.hospitalId = hospitalId;
     if (status) where.status = status;
     if (wardId) where.wardId = wardId;
 
@@ -112,9 +155,13 @@ export class IPDService {
     return { admissions, total, page, limit };
   }
 
-  async getAdmissionById(admissionId: string, hospitalId: string) {
+  async getAdmissionById(admissionId: string, hospitalId?: string) {
+    // hospitalId may be undefined for SUPER_ADMIN cross-hospital reads;
+    // omit it from the where-clause so we can fetch by id alone.
+    const where: any = { id: admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
     const admission = await prisma.admission.findFirst({
-      where: { id: admissionId, hospitalId },
+      where,
       include: {
         patient:  { select: { id: true, firstName: true, lastName: true, uhid: true, mobile: true, gender: true, dob: true, bloodGroup: true } },
         ward:     { include: { beds: true } },
@@ -181,7 +228,19 @@ export class IPDService {
     advanceMethod?: string;
     advanceTransactionRef?: string;
     notes?: string;
+    /** User who actually took the advance payment at the counter. */
+    collectedById?: string;
   }) {
+    // Verify patient belongs to this hospital
+    const patient = await prisma.patient.findUnique({
+      where: { id: data.patientId },
+      select: { hospitalId: true },
+    });
+    if (!patient) throw new Error('Patient not found');
+    if (patient.hospitalId !== hospitalId) {
+      throw new Error('Access denied: Patient belongs to a different hospital');
+    }
+
     // Prevent duplicate active admissions for the same patient (ADMITTED or DISCHARGE_READY)
     const existingActive = await prisma.admission.findFirst({
       where: { patientId: data.patientId, hospitalId, status: { in: ['ADMITTED', 'DISCHARGE_READY'] } },
@@ -234,7 +293,19 @@ export class IPDService {
       await prisma.bed.update({ where: { id: data.bedId }, data: { status: 'OCCUPIED' } });
     }
 
-    // If advance was paid, record a payment entry
+    // Clear the doctor's "admission recommended" flag on the originating OPD
+    // encounter — the recommendation has been acted on, so the warning badge
+    // should disappear from appointment / encounter / patient profile rows.
+    if (data.encounterId) {
+      await prisma.encounter.updateMany({
+        where: { id: data.encounterId, admissionRequired: true },
+        data:  { admissionRequired: false },
+      });
+    }
+
+    // If advance was paid, record a payment entry. The user driving this
+    // request is the staff who took the cash, so attribute the collection
+    // to them — that's what shows up under "Staff collections" on reports.
     if (data.advancePaid && data.advancePaid > 0) {
       await prisma.payment.create({
         data: {
@@ -248,6 +319,9 @@ export class IPDService {
           transactionId: data.advanceTransactionRef || undefined,
           receiptNumber: generateReceiptNumber(),
           description:   `IPD Advance — ${admissionNumber}`,
+          createdBy:     data.collectedById,
+          collectedById: data.collectedById,
+          collectedAt:   new Date(),
         },
       });
     }
@@ -271,9 +345,11 @@ export class IPDService {
 
   // ── IPD Daily Rounds ─────────────────────────────────────────────────────
 
-  async getAdmissionRounds(admissionId: string, hospitalId: string) {
-    // Verify admission belongs to this hospital
-    const admission = await prisma.admission.findFirst({ where: { id: admissionId, hospitalId } });
+  async getAdmissionRounds(admissionId: string, hospitalId?: string) {
+    // hospitalId may be undefined for SUPER_ADMIN cross-hospital reads.
+    const where: any = { id: admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
+    const admission = await prisma.admission.findFirst({ where });
     if (!admission) throw new Error('Admission not found');
 
     return prisma.encounter.findMany({
@@ -453,7 +529,9 @@ export class IPDService {
     paymentCollected?: number;
     paymentMethod?: string;   // CASH, UPI, CARD, BANK_TRANSFER
     transactionRef?: string;
-  }, userRole?: string) {
+    /** Staff who actually collected the discharge settlement. */
+    collectedById?: string;
+  }, _userRole?: string) {
     const admission = await prisma.admission.findFirst({
       where:   { id: admissionId, hospitalId },
       include: { patient: { select: { firstName: true, lastName: true, mobile: true } } },
@@ -464,12 +542,15 @@ export class IPDService {
       throw new Error('Patient is already discharged');
     }
 
-    // Require doctor to mark discharge-ready first, unless SUPER_ADMIN force-discharge
-    if (admission.status === 'ADMITTED' && userRole !== 'SUPER_ADMIN') {
+    // Discharge-ready is a hard prerequisite for *every* role — including
+    // SUPER_ADMIN. Clinical sign-off must always come from a doctor before
+    // billing settles. If a force-override is ever needed, that should be a
+    // separate, audited endpoint — not a quiet bypass here.
+    if (admission.status === 'ADMITTED') {
       throw new Error('Doctor must mark patient as discharge-ready before discharge can proceed');
     }
 
-    if (!['ADMITTED', 'DISCHARGE_READY'].includes(admission.status)) {
+    if (admission.status !== 'DISCHARGE_READY') {
       throw new Error(`Cannot discharge from status: ${admission.status}`);
     }
 
@@ -477,7 +558,7 @@ export class IPDService {
     const days          = Math.max(1, Math.ceil(
       (dischargedAt.getTime() - admission.admittedAt.getTime()) / (1000 * 60 * 60 * 24),
     ));
-    const wardCharges   = days * admission.dailyCharges;
+    const wardCharges   = days * Number(admission.dailyCharges);
 
     // Aggregate lab/medicine charges from IPD round encounters + admission-linked items ONLY
     // Do NOT re-include OPD encounter charges if OPD was already billed/paid
@@ -537,7 +618,7 @@ export class IPDService {
     const afterDiscount = Math.max(0, computedTotal - discount);
     const totalAmount   = data.totalAmount ?? afterDiscount;
     const collected     = data.paymentCollected ?? 0;
-    const alreadyPaid   = admission.advancePaid;
+    const alreadyPaid   = Number(admission.advancePaid);
     const totalReceived = collected + alreadyPaid;
     const paymentStatus = totalReceived >= totalAmount ? 'PAID'
                         : totalReceived > 0            ? 'PARTIAL'
@@ -577,6 +658,9 @@ export class IPDService {
           transactionId: data.transactionRef || undefined,
           receiptNumber: generateReceiptNumber(),
           description:   `IPD Discharge — ${admission.admissionNumber} (${days}d)`,
+          createdBy:     data.collectedById,
+          collectedById: data.collectedById,
+          collectedAt:   new Date(),
         },
       });
     }
@@ -602,17 +686,82 @@ export class IPDService {
       });
     }
 
-    // SMS notification
-    if (admission.patient?.mobile) {
-      smsService.sendDischargeNotification({
-        mobile:          admission.patient.mobile,
-        patientName:     `${admission.patient.firstName} ${admission.patient.lastName}`,
-        hospitalName:    'MediSync Hospital',
-        admissionNumber: admission.admissionNumber,
-      }).catch(() => {/* silent */});
+    // ── ABDM auto-share ───────────────────────────────────────────────────────
+    // When the hospital has abdmAutoShare enabled and the patient has an ABHA,
+    // auto-link this admission's encounters (the IPD stay → DischargeSummary,
+    // plus any linked OPD encounter) as ABDM care contexts. Fire-and-forget;
+    // autoShareEncounter is idempotent and swallows its own errors.
+    {
+      const autoShareEncIds = Array.from(new Set([
+        ...(opdEncounterId ? [opdEncounterId] : []),
+        ...roundIds,
+      ]));
+      if (autoShareEncIds.length) {
+        setImmediate(async () => {
+          try {
+            const hipService = (await import('../hip/hip.service')).default;
+            for (const encId of autoShareEncIds) {
+              await hipService.autoShareEncounter(encId);
+            }
+          } catch { /* non-fatal */ }
+        });
+      }
     }
 
-    return { ...updated, days, wardCharges, labCharges, medicineCharges, totalAmount, balance: Math.max(0, totalAmount - totalReceived) };
+    // Fire-and-forget: generate discharge summary document + SMS with download link
+    try {
+      const hospitalRecord = await prisma.hospital.findUnique({
+        where: { id: hospitalId },
+        select: { name: true },
+      });
+      const hospitalName = hospitalRecord?.name || 'AbhaAyushman Hospital';
+      const patientName = `${admission.patient?.firstName || ''} ${admission.patient?.lastName || ''}`.trim();
+      const baseUrl = process.env.APP_BASE_URL || 'http://localhost:5000';
+
+      // Generate discharge summary data and store as document
+      this.getDischargeSummary(admissionId, hospitalId)
+        .then(async (summaryData) => {
+          const summaryJson = Buffer.from(JSON.stringify(summaryData), 'utf-8');
+
+          const doc = await documentService.generateDocument({
+            patientId:   admission.patientId,
+            admissionId,
+            type:        'DISCHARGE_SUMMARY',
+            hospitalId,
+            generatedBy: 'system',
+            content:     summaryJson,
+            fileName:    `discharge_summary_${admission.admissionNumber}.pdf`,
+          });
+
+          // Send SMS with time-limited download link
+          if (admission.patient?.mobile) {
+            const token = documentService.generateDownloadToken(doc.id, 60 * 24);
+            const downloadUrl = `${baseUrl}/api/documents/public/${token}`;
+
+            await smsService.sendSMS({
+              to: admission.patient.mobile,
+              message: `Dear ${patientName}, you have been discharged from ${hospitalName} (Admission: ${admission.admissionNumber}). Download your discharge summary: ${downloadUrl} (valid 24hrs). Thank you. - AbhaAyushman`,
+            });
+          }
+        })
+        .catch((docErr) => {
+          logger.error('Failed to generate discharge document or send SMS', { error: docErr.message, admissionId });
+        });
+
+      // Fallback: still send basic discharge SMS even if document generation is slow
+      if (admission.patient?.mobile) {
+        smsService.sendDischargeNotification({
+          mobile:          admission.patient.mobile,
+          patientName,
+          hospitalName,
+          admissionNumber: admission.admissionNumber,
+        }).catch(() => {/* silent */});
+      }
+    } catch (smsDocErr) {
+      logger.error('Discharge SMS/document block failed', { error: (smsDocErr as any).message, admissionId });
+    }
+
+    return { ...updated, days, wardCharges, consultationFee, labCharges, medicineCharges, totalAmount, balance: Math.max(0, totalAmount - totalReceived) };
   }
 
   // ── Apply Discount (ADMIN/SUPER_ADMIN only) ─────────────────────────────
@@ -644,6 +793,8 @@ export class IPDService {
     amount: number;
     paymentMethod: string;
     transactionRef?: string;
+    /** Staff who took the payment at the counter. */
+    collectedById?: string;
   }) {
     const admission = await prisma.admission.findFirst({
       where: { id: admissionId, hospitalId },
@@ -655,7 +806,7 @@ export class IPDService {
     if (admission.paymentStatus === 'PAID') throw new Error('All payments have already been collected for this admission');
     if (data.amount <= 0) throw new Error('Amount must be greater than zero');
 
-    const newAdvance = (admission.advancePaid || 0) + data.amount;
+    const newAdvance = (Number(admission.advancePaid) || 0) + data.amount;
 
     await prisma.admission.update({
       where: { id: admissionId },
@@ -677,6 +828,14 @@ export class IPDService {
         transactionId: data.transactionRef || undefined,
         receiptNumber: generateReceiptNumber(),
         description:   `IPD Payment — ${admission.admissionNumber}`,
+        createdBy:     data.collectedById,
+        collectedById: data.collectedById,
+        collectedAt:   new Date(),
+      },
+      include: {
+        collectedBy: {
+          select: { id: true, firstName: true, lastName: true, role: true },
+        },
       },
     });
 
@@ -685,9 +844,11 @@ export class IPDService {
 
   // ── Get itemized bill preview for an admission ──────────────────────────
 
-  async getAdmissionBill(admissionId: string, hospitalId: string) {
+  async getAdmissionBill(admissionId: string, hospitalId?: string) {
+    const where: any = { id: admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
     const admission = await prisma.admission.findFirst({
-      where: { id: admissionId, hospitalId },
+      where,
       select: {
         admittedAt: true, dischargedAt: true,
         dailyCharges: true, advancePaid: true, admissionNumber: true,
@@ -703,7 +864,7 @@ export class IPDService {
     const endDate     = admission.dischargedAt ?? now;
     const days        = Math.max(1, Math.ceil(
       (endDate.getTime() - admission.admittedAt.getTime()) / (1000 * 60 * 60 * 24)));
-    const wardCharges = days * admission.dailyCharges;
+    const wardCharges = days * Number(admission.dailyCharges);
 
     // IPD daily-round encounter IDs
     const roundEncounters = await prisma.encounter.findMany({
@@ -798,7 +959,13 @@ export class IPDService {
       select: { medicineName: true, dosage: true, frequency: true, duration: true, quantity: true, price: true, encounterId: true },
     }) : [];
 
-    const labCharges      = labInvestigations.reduce((s, i) => s + Number(i.amount ?? 0), 0);
+    // Bill only investigations that are actually completed. Pending / in-progress
+    // tests will be billed once they finish — including them here causes patients
+    // to pay for samples that were never reported. Cancelled tests are skipped.
+    const billableInvestigations = labInvestigations.filter(
+      (i) => i.status === 'COMPLETED',
+    );
+    const labCharges      = billableInvestigations.reduce((s, i) => s + Number(i.amount ?? 0), 0);
     const medicineCharges = prescriptions.filter(r => r.status === 'DISPENSED')
                                          .reduce((s, r) => s + Number(r.totalCharges ?? 0), 0);
 
@@ -821,7 +988,7 @@ export class IPDService {
       discountReason:   (admission as any).discountReason || null,
       totalAfterDiscount: Math.max(0, total - ((admission as any).discountAmount || 0)),
       advancePaid:      admission.advancePaid,
-      balance:          Math.max(0, total - ((admission as any).discountAmount || 0) - admission.advancePaid),
+      balance:          Math.max(0, total - ((admission as any).discountAmount || 0) - Number(admission.advancePaid)),
       status:           (admission as any).status,
       labItems:         labInvestigations,
       extraLabOrders,
@@ -833,9 +1000,11 @@ export class IPDService {
 
   // ── Discharge Summary data (for PDF generation) ─────────────────────────
 
-  async getDischargeSummary(admissionId: string, hospitalId: string) {
+  async getDischargeSummary(admissionId: string, hospitalId?: string) {
+    const where: any = { id: admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
     const admission = await (prisma.admission as any).findFirst({
-      where: { id: admissionId, hospitalId },
+      where,
       include: {
         patient: {
           select: {
@@ -978,9 +1147,11 @@ export class IPDService {
 
   // ── Ward overview for Ward Manager ───────────────────────────────────────
 
-  async getWardOverview(hospitalId: string) {
+  async getWardOverview(hospitalId?: string) {
+    const where: any = { isActive: true };
+    if (hospitalId) where.hospitalId = hospitalId;
     const wards = await prisma.ward.findMany({
-      where:   { hospitalId, isActive: true },
+      where,
       include: {
         beds: {
           include: {
@@ -999,6 +1170,7 @@ export class IPDService {
       const totalBeds     = ward.beds.length || ward.totalBeds;
       const occupiedBeds  = ward.beds.filter((b: any) => b.status === 'OCCUPIED').length;
       const availableBeds = ward.beds.filter((b: any) => b.status === 'AVAILABLE').length;
+      const maintenanceBeds = ward.beds.filter((b: any) => b.status === 'UNDER_MAINTENANCE').length;
       const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
 
       return {
@@ -1010,16 +1182,290 @@ export class IPDService {
         totalBeds,
         occupiedBeds,
         availableBeds,
+        maintenanceBeds,
         occupancyRate,
         beds: ward.beds.map((b: any) => ({
-          id:             b.id,
-          bedNumber:      b.bedNumber,
-          status:         b.status,
-          currentPatient: b.admissions[0]?.patient ?? null,
-          admittedAt:     b.admissions[0]?.admittedAt ?? null,
+          id:              b.id,
+          bedNumber:       b.bedNumber,
+          status:          b.status,
+          bedType:         b.bedType,
+          hasOxygen:       b.hasOxygen,
+          hasVentilator:   b.hasVentilator,
+          hasMonitor:      b.hasMonitor,
+          hasSuction:      b.hasSuction,
+          cleaningStatus:  b.cleaningStatus,
+          lastCleanedAt:   b.lastCleanedAt,
+          maintenanceNote: b.maintenanceNote,
+          maintenanceFrom: b.maintenanceFrom,
+          maintenanceTo:   b.maintenanceTo,
+          currentPatient:  b.admissions[0]?.patient ?? null,
+          admittedAt:      b.admissions[0]?.admittedAt ?? null,
         })),
       };
     });
+  }
+
+  // ── Bulk Bed Creation ───────────────────────────────────────────────────────
+
+  async bulkCreateBeds(wardId: string, hospitalId: string, data: {
+    prefix: string;
+    startNumber: number;
+    count: number;
+    bedType?: string;
+    hasOxygen?: boolean;
+    hasVentilator?: boolean;
+    hasMonitor?: boolean;
+    hasSuction?: boolean;
+  }) {
+    const ward = await prisma.ward.findFirst({ where: { id: wardId, hospitalId } });
+    if (!ward) throw new Error('Ward not found');
+    if (data.count <= 0 || data.count > 100) throw new Error('Count must be between 1 and 100');
+
+    const beds = [];
+    for (let i = 0; i < data.count; i++) {
+      const num = data.startNumber + i;
+      const bedNumber = `${data.prefix}${String(num).padStart(3, '0')}`;
+      beds.push({
+        bedNumber,
+        wardId,
+        status: 'AVAILABLE' as any,
+        bedType: (data.bedType as any) || 'STANDARD',
+        hasOxygen: data.hasOxygen || false,
+        hasVentilator: data.hasVentilator || false,
+        hasMonitor: data.hasMonitor || false,
+        hasSuction: data.hasSuction || false,
+      });
+    }
+
+    const result = await prisma.bed.createMany({ data: beds, skipDuplicates: true });
+    logger.info(`Bulk created ${result.count} beds in ward ${ward.name} (${hospitalId})`);
+    return { created: result.count, wardId, wardName: ward.name };
+  }
+
+  // ── Update Bed Details ──────────────────────────────────────────────────────
+
+  async updateBedDetails(bedId: string, hospitalId: string, data: {
+    bedType?: string;
+    hasOxygen?: boolean;
+    hasVentilator?: boolean;
+    hasMonitor?: boolean;
+    hasSuction?: boolean;
+    cleaningStatus?: string;
+    lastCleanedBy?: string;
+    maintenanceNote?: string;
+    maintenanceFrom?: string;
+    maintenanceTo?: string;
+  }) {
+    const bed = await prisma.bed.findFirst({
+      where: { id: bedId, ward: { hospitalId } },
+    });
+    if (!bed) throw new Error('Bed not found');
+
+    const update: any = {};
+    if (data.bedType !== undefined) update.bedType = data.bedType;
+    if (data.hasOxygen !== undefined) update.hasOxygen = data.hasOxygen;
+    if (data.hasVentilator !== undefined) update.hasVentilator = data.hasVentilator;
+    if (data.hasMonitor !== undefined) update.hasMonitor = data.hasMonitor;
+    if (data.hasSuction !== undefined) update.hasSuction = data.hasSuction;
+
+    if (data.cleaningStatus !== undefined) {
+      update.cleaningStatus = data.cleaningStatus;
+      if (data.cleaningStatus === 'CLEAN') {
+        update.lastCleanedAt = new Date();
+        update.lastCleanedBy = data.lastCleanedBy || null;
+      }
+    }
+
+    if (data.maintenanceNote !== undefined) update.maintenanceNote = data.maintenanceNote;
+    if (data.maintenanceFrom !== undefined) {
+      update.maintenanceFrom = new Date(data.maintenanceFrom);
+      update.status = 'UNDER_MAINTENANCE';
+    }
+    if (data.maintenanceTo !== undefined) update.maintenanceTo = new Date(data.maintenanceTo);
+
+    // Clear maintenance when dates are removed
+    if (data.maintenanceFrom === null) {
+      update.maintenanceFrom = null;
+      update.maintenanceTo = null;
+      update.maintenanceNote = null;
+      if (bed.status === 'UNDER_MAINTENANCE') update.status = 'AVAILABLE';
+    }
+
+    return prisma.bed.update({ where: { id: bedId }, data: update });
+  }
+
+  // ── Bed Transfer ────────────────────────────────────────────────────────────
+
+  async transferBed(hospitalId: string, data: {
+    admissionId: string;
+    toWardId: string;
+    toBedId?: string;
+    reason?: string;
+    transferredBy?: string;
+  }) {
+    const admission = await prisma.admission.findFirst({
+      where: { id: data.admissionId, hospitalId, status: 'ADMITTED' },
+      include: { ward: true, bed: true },
+    });
+    if (!admission) throw new Error('Active admission not found');
+
+    const toWard = await prisma.ward.findFirst({ where: { id: data.toWardId, hospitalId } });
+    if (!toWard) throw new Error('Destination ward not found');
+
+    // Validate destination bed
+    if (data.toBedId) {
+      const toBed = await prisma.bed.findFirst({
+        where: { id: data.toBedId, wardId: data.toWardId, status: 'AVAILABLE' },
+      });
+      if (!toBed) throw new Error('Destination bed not available');
+    }
+
+    // Create transfer record
+    const transfer = await (prisma as any).bedTransfer.create({
+      data: {
+        admissionId:    data.admissionId,
+        fromWardId:     admission.wardId,
+        fromBedId:      admission.bedId,
+        toWardId:       data.toWardId,
+        toBedId:        data.toBedId || null,
+        reason:         data.reason,
+        transferredBy:  data.transferredBy,
+        newDailyCharges: toWard.dailyCharges,
+        hospitalId,
+      },
+    });
+
+    // Release old bed: BedStatus is the runtime status (set to AVAILABLE after
+    // patient leaves) while cleaningStatus is a separate housekeeping signal.
+    // Setting status to a CleaningStatus value (NEEDS_CLEANING) breaks the
+    // Postgres enum and causes a hard 500.
+    if (admission.bedId) {
+      await prisma.bed.update({
+        where: { id: admission.bedId },
+        data: { status: 'AVAILABLE', cleaningStatus: 'NEEDS_CLEANING' },
+      });
+    }
+
+    // Occupy new bed
+    if (data.toBedId) {
+      await prisma.bed.update({
+        where: { id: data.toBedId },
+        data: { status: 'OCCUPIED' },
+      });
+    }
+
+    // Update admission record
+    await prisma.admission.update({
+      where: { id: data.admissionId },
+      data: {
+        wardId:       data.toWardId,
+        bedId:        data.toBedId || null,
+        dailyCharges: toWard.dailyCharges,
+      },
+    });
+
+    logger.info(`Bed transfer: admission ${admission.admissionNumber} from ward ${admission.wardId} to ${data.toWardId}`);
+    return transfer;
+  }
+
+  // ── Transfer History ────────────────────────────────────────────────────────
+
+  async getTransferHistory(admissionId: string, hospitalId?: string) {
+    const where: any = { admissionId };
+    if (hospitalId) where.hospitalId = hospitalId;
+    return (prisma as any).bedTransfer.findMany({
+      where,
+      include: {
+        fromWard: { select: { name: true, type: true } },
+        fromBed:  { select: { bedNumber: true } },
+        toWard:   { select: { name: true, type: true } },
+        toBed:    { select: { bedNumber: true } },
+      },
+      orderBy: { transferredAt: 'desc' },
+    });
+  }
+
+  // ── Bed Analytics ───────────────────────────────────────────────────────────
+
+  async getBedAnalytics(hospitalId?: string) {
+    const where: any = { isActive: true };
+    if (hospitalId) where.hospitalId = hospitalId;
+    const wards = await prisma.ward.findMany({
+      where,
+      include: {
+        beds: true,
+        admissions: { where: { status: 'ADMITTED' } },
+      },
+    });
+
+    // Overall stats
+    let totalBeds = 0;
+    let occupiedBeds = 0;
+    let availableBeds = 0;
+    let maintenanceBeds = 0;
+    let reservedBeds = 0;
+    let needsCleaning = 0;
+
+    const wardStats = wards.map((ward) => {
+      const wb = ward.beds.length;
+      const occ = ward.beds.filter((b: any) => b.status === 'OCCUPIED').length;
+      const avail = ward.beds.filter((b: any) => b.status === 'AVAILABLE').length;
+      const maint = ward.beds.filter((b: any) => b.status === 'UNDER_MAINTENANCE').length;
+      const res = ward.beds.filter((b: any) => b.status === 'RESERVED').length;
+      const cleaning = ward.beds.filter((b: any) => b.cleaningStatus === 'NEEDS_CLEANING' || b.cleaningStatus === 'IN_PROGRESS').length;
+
+      totalBeds += wb;
+      occupiedBeds += occ;
+      availableBeds += avail;
+      maintenanceBeds += maint;
+      reservedBeds += res;
+      needsCleaning += cleaning;
+
+      return {
+        wardId:    ward.id,
+        wardName:  ward.name,
+        wardType:  ward.type,
+        totalBeds: wb,
+        occupiedBeds: occ,
+        availableBeds: avail,
+        maintenanceBeds: maint,
+        reservedBeds: res,
+        needsCleaning: cleaning,
+        occupancyRate: wb > 0 ? Math.round((occ / wb) * 100) : 0,
+        dailyCharges: ward.dailyCharges,
+      };
+    });
+
+    // Recent transfers count (last 7 days)
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const recentTransfers = await (prisma as any).bedTransfer.count({
+      where: { hospitalId, transferredAt: { gte: weekAgo } },
+    });
+
+    // Discharges last 7 days (for bed turnover)
+    const recentDischarges = await prisma.admission.count({
+      where: { hospitalId, status: 'DISCHARGED', dischargedAt: { gte: weekAgo } },
+    });
+
+    const overallOccupancy = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
+    const turnoverRate = totalBeds > 0 ? Number((recentDischarges / totalBeds).toFixed(2)) : 0;
+
+    return {
+      summary: {
+        totalBeds,
+        occupiedBeds,
+        availableBeds,
+        maintenanceBeds,
+        reservedBeds,
+        needsCleaning,
+        overallOccupancy,
+        recentTransfers,
+        recentDischarges,
+        turnoverRate,
+      },
+      wardStats,
+    };
   }
 }
 

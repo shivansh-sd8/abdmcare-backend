@@ -3,10 +3,12 @@ import vitalsController from '../controllers/vitalsController';
 import { body, query } from 'express-validator';
 import { validate } from '../common/middleware/validation';
 import { authenticate, authorize } from '../common/middleware/auth';
+import { auditLog } from '../common/middleware/audit';
 
 const router = Router();
 
 router.use(authenticate);
+router.use(auditLog('VITALS'));
 
 router.post(
   '/',
@@ -31,7 +33,9 @@ router.get(
 
 router.get(
   '/patient/:patientId/latest',
-  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'BILLING_STAFF'),
+  // Pharmacist needs the latest vitals (allergies / age / weight) for
+  // safe dispensing decisions — read-only, hospital-scoped in service.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'PHARMACIST'),
   vitalsController.getLatestVitals
 );
 
@@ -43,13 +47,18 @@ router.get(
 
 router.put(
   '/:id',
-  authorize('DOCTOR', 'NURSE'),
+  // Admins must be able to correct mistakenly-recorded vitals (wrong
+  // patient, fat-fingered values) — clinical staff still own the
+  // primary write path.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR', 'NURSE'),
   vitalsController.updateVitals
 );
 
 router.delete(
   '/:id',
-  authorize('DOCTOR', 'SUPER_ADMIN'),
+  // ADMIN added so a hospital admin can purge a clearly bogus reading
+  // without escalating to the platform SUPER_ADMIN.
+  authorize('SUPER_ADMIN', 'ADMIN', 'DOCTOR'),
   vitalsController.deleteVitals
 );
 

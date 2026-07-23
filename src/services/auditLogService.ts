@@ -1,5 +1,6 @@
 import prisma from '../common/config/database';
 import { Request } from 'express';
+import { getEffectiveHospitalId } from '../common/utils/scope';
 
 interface AuditLogData {
   userId: string;
@@ -74,10 +75,18 @@ class AuditLogService {
     endDate?: Date;
     page?: number;
     limit?: number;
-  }) {
+  }, currentUser?: any) {
     const { userId, module, action, startDate, endDate, page = 1, limit = 50 } = filters;
 
     const where: any = {};
+
+    // Hospital isolation: non-SUPER_ADMIN only see logs from users in their
+    // hospital. SUPER_ADMIN with the global "viewing as" scope sees only
+    // that hospital's logs; unscoped, they see everything.
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.user = { hospitalId: effectiveHospitalId };
+    }
 
     if (userId) where.userId = userId;
     if (module) where.module = module;
@@ -120,20 +129,31 @@ class AuditLogService {
     };
   }
 
-  async getUserActivity(userId: string, limit = 20) {
+  async getUserActivity(userId: string, limit = 20, currentUser?: any) {
+    const where: any = { userId };
+
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.user = { hospitalId: effectiveHospitalId };
+    }
+
     return prisma.auditLog.findMany({
-      where: { userId },
+      where,
       orderBy: { timestamp: 'desc' },
       take: limit,
     });
   }
 
-  async getEntityHistory(resourceType: string, resourceId: string) {
+  async getEntityHistory(resourceType: string, resourceId: string, currentUser?: any) {
+    const where: any = { resourceType, resourceId };
+
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser);
+    if (effectiveHospitalId) {
+      where.user = { hospitalId: effectiveHospitalId };
+    }
+
     return prisma.auditLog.findMany({
-      where: {
-        resourceType,
-        resourceId,
-      },
+      where,
       include: {
         user: {
           select: {

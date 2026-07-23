@@ -6,17 +6,20 @@ import ResponseHandler from '../common/utils/response';
 class InvestigationController {
   createInvestigation = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const user = (req as any).user;
-    // doctorId must come from req.body (should be Doctor.id, not User.id)
-    const data = {
-      ...req.body,
-      hospitalId: user.hospitalId,
-    };
-    const investigation = await investigationService.createInvestigation(data);
+    // doctorId must come from req.body (should be Doctor.id, not User.id).
+    // SUPER_ADMIN must specify hospitalId in the body or via the global
+    // "viewing as" scope; everyone else is forced to their JWT hospital.
+    const hospitalId =
+      user?.role === 'SUPER_ADMIN'
+        ? (req.body?.hospitalId || user.scopedHospitalId || user.hospitalId)
+        : user.hospitalId;
+    const data = { ...req.body, hospitalId };
+    const investigation = await investigationService.createInvestigation(data, user);
     ResponseHandler.created(res, 'Investigation ordered successfully', investigation);
   });
 
   getAllInvestigations = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const user = (req as any).user;
+    const currentUser = (req as any).user;
     const { page, limit, ...rest } = req.query as any;
     const filters: any = {
       ...rest,
@@ -24,12 +27,7 @@ class InvestigationController {
       limit: limit ? parseInt(limit, 10) : 10,
     };
 
-    // All non-SUPER_ADMIN users see only their hospital's data
-    if (user.role !== 'SUPER_ADMIN' && user.hospitalId) {
-      filters.hospitalId = user.hospitalId;
-    }
-
-    const result = await investigationService.getAllInvestigations(filters);
+    const result = await investigationService.getAllInvestigations(filters, currentUser);
     ResponseHandler.success(res, 'Investigations retrieved successfully', result);
   });
 
@@ -70,7 +68,7 @@ class InvestigationController {
       doctorId = doctor?.id;
     }
 
-    const stats = await investigationService.getInvestigationStats(hospitalId, doctorId);
+    const stats = await investigationService.getInvestigationStats(hospitalId, doctorId, user);
     ResponseHandler.success(res, 'Investigation stats retrieved successfully', stats);
   });
 }

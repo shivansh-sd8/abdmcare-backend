@@ -61,6 +61,7 @@ export class DoctorController {
   getDoctorStats = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const currentUser = (req as any).user;
+      // Scope is resolved by the auth middleware → service.
       const result = await this.doctorService.getDoctorStats(currentUser);
       ResponseHandler.success(res, 'Doctor stats fetched successfully', result.data);
     }
@@ -79,7 +80,8 @@ export class DoctorController {
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
       const { date } = req.query as { date?: string };
-      const result = await this.doctorService.getDoctorAvailability(id, date);
+      const currentUser = (req as any).user;
+      const result = await this.doctorService.getDoctorAvailability(id, date, currentUser);
       ResponseHandler.success(res, 'Doctor availability fetched successfully', result);
     }
   );
@@ -87,7 +89,8 @@ export class DoctorController {
   updateSchedule = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.doctorService.updateSchedule(id, req.body);
+      const currentUser = (req as any).user;
+      const result = await this.doctorService.updateSchedule(id, req.body, currentUser);
       ResponseHandler.success(res, result.message, result.data);
     }
   );
@@ -95,7 +98,8 @@ export class DoctorController {
   getSchedule = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction) => {
       const { id } = req.params;
-      const result = await this.doctorService.getSchedule(id);
+      const currentUser = (req as any).user;
+      const result = await this.doctorService.getSchedule(id, currentUser);
       ResponseHandler.success(res, 'Doctor schedule fetched', result.data);
     }
   );

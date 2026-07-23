@@ -17,6 +17,13 @@ import hipRoutes from '../modules/hip/hip.routes';
 import hiuRoutes from '../modules/hiu/hiu.routes';
 import ehrRoutes from '../modules/ehr/ehr.routes';
 import ipdRoutes from '../modules/ipd/ipd.routes';
+import pharmacyRoutes from '../modules/pharmacy/pharmacy.routes';
+import abdmDiagnosticsRoutes from './abdmDiagnosticsRoutes';
+import documentRoutes from '../modules/document/document.routes';
+import immunizationRoutes from './immunizationRoutes';
+import enquiryRoutes from '../modules/enquiry/enquiry.routes';
+import dashboardRoutes from '../modules/dashboard/dashboard.routes';
+import reportRoutes from '../modules/reports/report.routes';
 
 const router = Router();
 
@@ -38,5 +45,12 @@ router.use('/hip', hipRoutes);
 router.use('/hiu', hiuRoutes);
 router.use('/ehr', ehrRoutes);
 router.use('/ipd', ipdRoutes);
+router.use('/pharmacy', pharmacyRoutes);
+router.use('/abdm/diagnostics', abdmDiagnosticsRoutes);
+router.use('/documents', documentRoutes);
+router.use('/immunizations', immunizationRoutes);
+router.use('/enquiry', enquiryRoutes);
+router.use('/dashboard', dashboardRoutes);
+router.use('/reports', reportRoutes);
 
 export default router;

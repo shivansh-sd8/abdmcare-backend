@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import { AuthService } from './auth.service';
 import ResponseHandler from '../../common/utils/response';
 import { asyncHandler } from '../../common/middleware/errorHandler';
@@ -13,6 +14,26 @@ export class AuthController {
   login = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const { email, password } = req.body;
     const result = await this.authService.login(email, password);
+
+    const isProduction = process.env.NODE_ENV === 'production';
+
+    res.cookie('token', result.token, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'strict',
+      maxAge: 60 * 60 * 1000,
+    });
+
+    res.cookie('refreshToken', result.refreshToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/api/v1/auth/refresh',
+    });
+
+    res.cookie('csrf-token', crypto.randomUUID(), { sameSite: 'strict' });
+
     ResponseHandler.success(res, 'Login successful', result);
   });
 
@@ -22,19 +43,29 @@ export class AuthController {
     ResponseHandler.created(res, 'User registered successfully', result);
   });
 
-  superAdminSignup = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const { secretKey, ...userData } = req.body;
-    const result = await this.authService.superAdminSignup(userData, secretKey);
-    ResponseHandler.created(res, 'Super Admin registered successfully', result);
-  });
-
   refreshToken = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
-    const { refreshToken } = req.body;
+    const refreshToken = req.body.refreshToken || req.cookies?.refreshToken;
+    if (!refreshToken) {
+      ResponseHandler.error(res, 'Refresh token is required', 400);
+      return;
+    }
     const result = await this.authService.refreshToken(refreshToken);
+
+    const isProduction = process.env.NODE_ENV === 'production';
+    res.cookie('token', result.token, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'strict',
+      maxAge: 60 * 60 * 1000,
+    });
+
     ResponseHandler.success(res, 'Token refreshed successfully', result);
   });
 
   logout = asyncHandler(async (_req: Request, res: Response, _next: NextFunction) => {
+    res.clearCookie('token');
+    res.clearCookie('refreshToken', { path: '/api/v1/auth/refresh' });
+    res.clearCookie('csrf-token');
     ResponseHandler.success(res, 'Logout successful');
   });
 

@@ -2,12 +2,15 @@ import { Request, Response, NextFunction } from 'express';
 import ehrService from './ehr.service';
 import { asyncHandler } from '../../common/middleware/errorHandler';
 import { ResponseHandler } from '../../common/utils/response';
+import { getEffectiveHospitalId } from '../../common/utils/scope';
 
 class EhrController {
   getPatientList = asyncHandler(async (req: Request, res: Response, _next: NextFunction) => {
     const currentUser = (req as any).user;
     const { search } = req.query;
-    const hospitalId = currentUser.role !== 'SUPER_ADMIN' ? currentUser.hospitalId : undefined;
+    // Effective hospital: non-SUPER_ADMIN → JWT; SUPER_ADMIN with global
+    // "viewing as" scope → that hospital; SUPER_ADMIN unscoped → all hospitals.
+    const hospitalId = getEffectiveHospitalId(currentUser);
     const result = await ehrService.getPatientList(hospitalId, search as string);
     ResponseHandler.success(res, 'Patient EHR list retrieved', result);
   });

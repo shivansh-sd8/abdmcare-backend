@@ -4,6 +4,9 @@ import logger from '../../common/config/logger';
 import { AppointmentType, AppointmentStatus } from '@prisma/client';
 import smsService from '../../common/utils/smsService';
 import { generateSlots, isValidSlotTime, HospitalScheduleConfig, DoctorScheduleConfig } from '../../common/utils/slotEngine';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { hospitalScope } from '../../common/utils/scope';
+import { istDayRange, istDayRangeOf } from '../../common/utils/dateRange';
 
 interface CreateAppointmentRequest {
   patientId: string;
@@ -23,7 +26,7 @@ interface UpdateAppointmentRequest {
 }
 
 export class AppointmentService {
-  async createAppointment(data: CreateAppointmentRequest) {
+  async createAppointment(data: CreateAppointmentRequest, currentUser?: any) {
     try {
       const patient = await prisma.patient.findUnique({
         where: { id: data.patientId },
@@ -31,6 +34,33 @@ export class AppointmentService {
 
       if (!patient) {
         throw new AppError('Patient not found', 404);
+      }
+
+      const doctor = await prisma.doctor.findUnique({
+        where: { id: data.doctorId },
+        select: { id: true, hospitalId: true },
+      });
+      if (!doctor) {
+        throw new AppError('Doctor not found', 404);
+      }
+
+      // Multi-tenant guard: non-SUPER_ADMIN users may only create
+      // appointments inside their own hospital. Block any cross-hospital
+      // booking — including bookings where patient and doctor straddle
+      // different hospitals (which would also be a data-integrity bug).
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
+        if (patient.hospitalId && patient.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Patient does not belong to your hospital', 403);
+        }
+        if (doctor.hospitalId && doctor.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Doctor does not belong to your hospital', 403);
+        }
+      }
+      if (patient.hospitalId && doctor.hospitalId && patient.hospitalId !== doctor.hospitalId) {
+        throw new AppError('Patient and doctor must belong to the same hospital', 400);
       }
 
       const { hospitalConfig, doctorConfig } = await this.loadScheduleConfigs(data.doctorId);
@@ -53,11 +83,10 @@ export class AppointmentService {
         throw new AppError('Doctor already has an appointment at this time', 400);
       }
 
-      // Prevent duplicate appointment for same patient + same doctor + same day
-      const dayStart = new Date(data.date);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(data.date);
-      dayEnd.setHours(23, 59, 59, 999);
+      // Prevent duplicate appointment for same patient + same doctor + same
+      // IST calendar day (NOT same UTC day — the receptionist means Jun 11
+      // IST when they pick "Jun 11" in the dialog).
+      const { start: dayStart, end: dayEnd } = istDayRangeOf(data.date);
       const existingPatientAppt = await prisma.appointment.findFirst({
         where: {
           patientId: data.patientId,
@@ -106,7 +135,7 @@ export class AppointmentService {
           doctorName:   `Dr. ${appointment.doctor.firstName} ${appointment.doctor.lastName}`,
           date:         apptDate,
           time:         apptTime,
-          hospitalName: 'MediSync Hospital',
+          hospitalName: 'AbhaAyushman Hospital',
         }).catch((e: any) => logger.warn('SMS send failed', { error: e.message }));
       }
 
@@ -117,10 +146,7 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to create appointment', error);
-      throw new AppError(
-        error.message || 'Failed to create appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -143,7 +169,10 @@ export class AppointmentService {
       }
 
       // Hospital isolation: Non-SUPER_ADMIN users can only access appointments from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (appointment.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Appointment not found', 404);
         }
@@ -155,10 +184,7 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch appointment', error);
-      throw new AppError(
-        error.message || 'Failed to fetch appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -173,7 +199,10 @@ export class AppointmentService {
       }
 
       // Hospital isolation: Non-SUPER_ADMIN users can only update appointments from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (appointment.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Cannot update appointment from another hospital', 403);
         }
@@ -188,7 +217,25 @@ export class AppointmentService {
       }
 
       if (data.status) {
-        updateData.status = data.status;
+        const VALID: Record<string, string[]> = {
+          SCHEDULED:    ['CONFIRMED', 'CANCELLED', 'NO_SHOW', 'IN_PROGRESS'],
+          CONFIRMED:    ['IN_PROGRESS', 'CANCELLED', 'NO_SHOW'],
+          IN_PROGRESS:  ['COMPLETED', 'CANCELLED'],
+          COMPLETED:    [],
+          CANCELLED:    [],
+          NO_SHOW:      [],
+        };
+        const next = String(data.status).toUpperCase();
+        const allowed = VALID[appointment.status] || [];
+        if (appointment.status === next) {
+          // no-op transition allowed
+        } else if (!allowed.includes(next)) {
+          throw new AppError(
+            `Cannot move appointment from ${appointment.status} to ${next}`,
+            400,
+          );
+        }
+        updateData.status = next;
       }
 
       const updatedAppointment = await prisma.appointment.update({
@@ -211,10 +258,7 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to update appointment', error);
-      throw new AppError(
-        error.message || 'Failed to update appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -228,22 +272,28 @@ export class AppointmentService {
   }, currentUser?: any) {
     try {
       const page = query.page || 1;
-      const limit = query.limit || 10;
+      const limit = Math.min(query.limit || 100, 500);
       const skip = (page - 1) * limit;
 
       const where: any = {};
 
-      // Filter by hospital for non-super-admin users
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
-        where.hospitalId = currentUser.hospitalId;
+      // Effective hospital scope (non-SUPER_ADMIN: their JWT; SUPER_ADMIN
+      // with the global "viewing as" scope: that hospital; SUPER_ADMIN
+      // unscoped: cross-hospital).
+      Object.assign(where, hospitalScope(currentUser));
+
+      // Doctors are scoped to their own worklist — even if no explicit
+      // doctorId is in the query string, they only see their own
+      // appointments. We use currentUser.doctorId (the Doctor.id from the
+      // JWT) — currentUser.id is the User.id and won't match Appointment.doctorId.
+      if (currentUser?.role === 'DOCTOR' && currentUser.doctorId) {
+        where.doctorId = currentUser.doctorId;
+      } else if (query.doctorId) {
+        where.doctorId = query.doctorId;
       }
 
       if (query.patientId) {
         where.patientId = query.patientId;
-      }
-
-      if (query.doctorId) {
-        where.doctorId = query.doctorId;
       }
 
       if (query.status) {
@@ -251,9 +301,10 @@ export class AppointmentService {
       }
 
       if (query.date) {
-        const startDate = new Date(query.date);
-        const endDate = new Date(query.date);
-        endDate.setHours(23, 59, 59, 999);
+        // Parse YYYY-MM-DD parts explicitly to avoid UTC vs local timezone shift
+        const [y, m, d] = query.date.split('-').map(Number);
+        const startDate = new Date(y, m - 1, d, 0, 0, 0, 0);
+        const endDate = new Date(y, m - 1, d, 23, 59, 59, 999);
 
         where.scheduledAt = {
           gte: startDate,
@@ -267,9 +318,19 @@ export class AppointmentService {
           include: {
             patient: true,
             doctor: true,
+            // Pull just the disposition fields the row badges need so the
+            // appointment list can show "Admission recommended" without a
+            // second roundtrip per row.
+            encounter: {
+              select: {
+                id: true, status: true,
+                admissionRequired: true, admissionReason: true,
+                finalDiagnosis: true, provisionalDiagnosis: true,
+              },
+            },
           },
           orderBy: {
-            scheduledAt: 'asc',
+            scheduledAt: 'desc',
           },
           skip,
           take: limit,
@@ -289,14 +350,11 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to search appointments', error);
-      throw new AppError(
-        error.message || 'Failed to search appointments',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
-  async cancelAppointment(id: string, reason?: string) {
+  async cancelAppointment(id: string, reason?: string, currentUser?: any) {
     try {
       const appointment = await prisma.appointment.findUnique({
         where: { id },
@@ -304,6 +362,15 @@ export class AppointmentService {
 
       if (!appointment) {
         throw new AppError('Appointment not found', 404);
+      }
+
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
+        if (appointment.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Appointment belongs to a different hospital', 403);
+        }
       }
 
       const updatedAppointment = await prisma.appointment.update({
@@ -329,14 +396,11 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to cancel appointment', error);
-      throw new AppError(
-        error.message || 'Failed to cancel appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
-  async checkInAppointment(id: string, _currentUser?: any) {
+  async checkInAppointment(id: string, currentUser?: any) {
     try {
       const appointment = await prisma.appointment.findUnique({
         where: { id },
@@ -354,6 +418,35 @@ export class AppointmentService {
         throw new AppError('Appointment not found', 404);
       }
 
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
+        if (appointment.hospitalId !== currentUser.hospitalId) {
+          throw new AppError('Access denied: Appointment belongs to a different hospital', 403);
+        }
+
+        // A doctor may only check in appointments where they are the
+        // assigned provider — they should never be able to claim another
+        // doctor's patient. The Doctor row is identified by either the
+        // canonical userId pointer or, as a defensive fallback, by email.
+        if (currentUser.role === 'DOCTOR') {
+          const doctorRow = await prisma.doctor.findFirst({
+            where: {
+              hospitalId: currentUser.hospitalId,
+              OR: [
+                { userId: currentUser.id },
+                ...(currentUser.email ? [{ email: currentUser.email as string }] : []),
+              ],
+            },
+            select: { id: true },
+          });
+          if (!doctorRow || appointment.doctorId !== doctorRow.id) {
+            throw new AppError('Access denied: you can only check in your own patients', 403);
+          }
+        }
+      }
+
       if (appointment.checkedInAt) {
         throw new AppError('Appointment already checked in', 400);
       }
@@ -368,7 +461,7 @@ export class AppointmentService {
           encounterId,
           patientId: appointment.patientId,
           doctorId: appointment.doctorId,
-          type: (['OPD', 'FOLLOW_UP', 'ROUTINE_CHECKUP', 'DIAGNOSTIC', 'SURGERY_CONSULTATION', 'SECOND_OPINION', 'VACCINATION'].includes(appointment.type)
+          type: (['OPD', 'FOLLOW_UP', 'ROUTINE_CHECKUP', 'DIAGNOSTIC', 'SURGERY_CONSULTATION', 'SECOND_OPINION', 'VACCINATION', 'WALK_IN'].includes(appointment.type)
             ? 'OPD'
             : appointment.type === 'IPD'
               ? 'IPD'
@@ -380,7 +473,7 @@ export class AppointmentService {
           chiefComplaint: appointment.notes?.split('\n---\n')[0] || 'OPD Visit',
           notes: appointment.notes?.includes('\n---\n') ? appointment.notes.split('\n---\n').slice(1).join('\n') : undefined,
           visitDate: new Date(),
-          status: 'IN_PROGRESS',
+          status: 'CONSULTING',
         },
       });
 
@@ -422,19 +515,13 @@ export class AppointmentService {
         },
       });
 
-      // Create Care Context for ABHA (if patient has ABHA)
-      if (appointment.patient.abhaRecord) {
-        await prisma.careContext.create({
-          data: {
-            careContextId: `CC-${Date.now()}`,
-            patientId: appointment.patientId,
-            encounterId: encounter.id,
-            display: `OPD Visit - ${encounter.type}`,
-            referenceNumber: encounter.encounterId,
-            hipId: process.env.ABDM_HIP_ID || 'default-hip-id',
-          },
-        });
-      }
+      // NOTE: ABDM care-context linking is intentionally NOT triggered here.
+      // Check-in no longer auto-creates a CareContext or fires generate-token —
+      // staff explicitly link a visit via the patient profile "Link Care
+      // Contexts" button (HipService.addCareContexts), which creates the
+      // CareContext and initiates ABDM linking on demand. This avoids visits
+      // showing a perpetual "PENDING" link the operator never asked for, and
+      // gives staff control over what gets shared to the patient's PHR.
 
       // Update appointment with check-in details
       const updatedAppointment = await prisma.appointment.update({
@@ -465,7 +552,7 @@ export class AppointmentService {
           patientName:  `${appointment.patient.firstName} ${appointment.patient.lastName}`,
           doctorName:   `Dr. ${appointment.doctor.firstName} ${appointment.doctor.lastName}`,
           tokenNumber:  opdCardNumber,
-          hospitalName: 'MediSync Hospital',
+          hospitalName: 'AbhaAyushman Hospital',
         }).catch((e: any) => logger.warn('SMS send failed', { error: e.message }));
       }
 
@@ -480,44 +567,55 @@ export class AppointmentService {
       };
     } catch (error: any) {
       logger.error('Failed to check in appointment', error);
-      throw new AppError(
-        error.message || 'Failed to check in appointment',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
   async getAppointmentStats(currentUser?: any) {
     try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      // IST-anchored "today" — server may be running in UTC, but the user
+      // expects the dashboard to switch days at IST midnight, not UTC.
+      const { start: today, end: dayEnd } = istDayRange(0);
 
-      const hospitalFilter = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
-        ? { hospitalId: currentUser.hospitalId }
-        : {};
+      // Hospital scope first; for DOCTOR role we further narrow to their own
+      // appointments so the doctor dashboard "Today's queue / Completed today /
+      // Scheduled" reflect only their own worklist instead of the whole hospital.
+      const hospitalFilter: any = { ...hospitalScope(currentUser) };
+      if (currentUser?.role === 'DOCTOR' && currentUser.doctorId) {
+        hospitalFilter.doctorId = currentUser.doctorId;
+      }
 
-      const [total, todayCount, scheduled, completed, cancelled] = await Promise.all([
+      const todayWindow = { gte: today, lte: dayEnd };
+      const [
+        total,
+        todayCount,
+        scheduled,
+        completed,
+        cancelled,
+        walkins,
+        checkedIn,
+        inProgress,
+      ] = await Promise.all([
         prisma.appointment.count({ where: hospitalFilter }),
+        prisma.appointment.count({ where: { ...hospitalFilter, scheduledAt: todayWindow } }),
+        prisma.appointment.count({ where: { ...hospitalFilter, status: 'SCHEDULED' } }),
+        prisma.appointment.count({ where: { ...hospitalFilter, status: 'COMPLETED' } }),
+        prisma.appointment.count({ where: { ...hospitalFilter, status: 'CANCELLED' } }),
         prisma.appointment.count({
           where: {
             ...hospitalFilter,
-            scheduledAt: {
-              gte: today,
-              lt: tomorrow,
-            },
+            type: 'WALK_IN' as any,
+            scheduledAt: todayWindow,
           },
-        }),
+        }).catch(() => 0),
         prisma.appointment.count({
-          where: { ...hospitalFilter, status: 'SCHEDULED' },
-        }),
-        prisma.appointment.count({
-          where: { ...hospitalFilter, status: 'COMPLETED' },
-        }),
-        prisma.appointment.count({
-          where: { ...hospitalFilter, status: 'CANCELLED' },
-        }),
+          where: {
+            ...hospitalFilter,
+            scheduledAt: todayWindow,
+            checkedInAt: { not: null },
+          } as any,
+        }).catch(() => 0),
+        prisma.appointment.count({ where: { ...hospitalFilter, status: 'IN_PROGRESS' } }).catch(() => 0),
       ]);
 
       return {
@@ -528,14 +626,14 @@ export class AppointmentService {
           scheduled,
           completed,
           cancelled,
+          walkins,
+          checkedIn,
+          inProgress,
         },
       };
     } catch (error: any) {
       logger.error('Failed to fetch appointment stats', error);
-      throw new AppError(
-        error.message || 'Failed to fetch appointment stats',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -577,8 +675,10 @@ export class AppointmentService {
   }
 
   private async getBookedTimesForDate(doctorId: string, date: Date): Promise<string[]> {
-    const dayStart = new Date(date); dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(date); dayEnd.setHours(23, 59, 59, 999);
+    // The booked-times window must be the full IST day for this date —
+    // otherwise on a UTC server we'd miss the early-morning IST slots that
+    // fall in "yesterday" UTC.
+    const { start: dayStart, end: dayEnd } = istDayRangeOf(date);
 
     const appointments = await prisma.appointment.findMany({
       where: {
@@ -595,8 +695,17 @@ export class AppointmentService {
     });
   }
 
-  async getAvailableSlots(doctorId: string, dateStr: string) {
+  async getAvailableSlots(doctorId: string, dateStr: string, currentUser?: any) {
     const { doctor, hospitalConfig, doctorConfig } = await this.loadScheduleConfigs(doctorId);
+
+    if (currentUser?.role !== 'SUPER_ADMIN') {
+      if (!currentUser?.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      if (doctor.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Access denied: Doctor belongs to a different hospital', 403);
+      }
+    }
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) throw new AppError('Invalid date', 400);
 

@@ -2,6 +2,9 @@ import prisma from '../../common/config/database';
 import { AppError } from '../../common/middleware/errorHandler';
 import logger from '../../common/config/logger';
 import bcrypt from 'bcryptjs';
+import { rethrowServiceError } from '../../common/utils/serviceErrors';
+import { hospitalScope } from '../../common/utils/scope';
+import { istDayRange, istDayRangeOf } from '../../common/utils/dateRange';
 
 interface CreateDoctorRequest {
   hprId?: string;
@@ -26,6 +29,12 @@ interface UpdateDoctorRequest {
   email?: string;
   consultationFee?: number;
   experience?: number;
+  // Scheduling fields editable from the Doctor profile UI.
+  workingHours?: any;       // { mon: { start, end }, tue: ... } — JSON blob
+  slotDuration?: number;    // minutes
+  maxPatientsPerDay?: number;
+  breakTimes?: any;         // [{ day, start, end, label }, …] — JSON blob
+  isActive?: boolean;
 }
 
 export class DoctorService {
@@ -52,10 +61,14 @@ export class DoctorService {
         throw new AppError('User with this email already exists', 400);
       }
 
-      // Set hospitalId from currentUser for non-SUPER_ADMIN users
-      const hospitalId = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
-        ? currentUser.hospitalId
-        : null;
+      // Set hospitalId from the effective scope:
+      //   • non-SUPER_ADMIN: their JWT hospital (multi-tenant isolation)
+      //   • SUPER_ADMIN with the global "viewing as" scope: that hospital
+      //   • SUPER_ADMIN unscoped: null (platform-wide doctor — rare)
+      const hospitalId =
+        currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
+          ? currentUser.hospitalId
+          : (currentUser?.scopedHospitalId || (data as any).hospitalId || null);
 
       let facility = await prisma.facility.findFirst();
       if (!facility) {
@@ -143,10 +156,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to create doctor', error);
-      throw new AppError(
-        error.message || 'Failed to create doctor',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -171,8 +181,12 @@ export class DoctorService {
         throw new AppError('Doctor not found', 404);
       }
 
-      // Hospital isolation: Non-SUPER_ADMIN users can only access doctors from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      // Hospital isolation: Non-SUPER_ADMIN users can only access doctors
+      // from their hospital. Fail closed when JWT has no hospitalId.
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (doctor.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Doctor not found', 404);
         }
@@ -184,10 +198,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch doctor', error);
-      throw new AppError(
-        error.message || 'Failed to fetch doctor',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -201,26 +212,37 @@ export class DoctorService {
         throw new AppError('Doctor not found', 404);
       }
 
-      // Hospital isolation: Non-SUPER_ADMIN users can only update doctors from their hospital
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
+      // Hospital isolation: Non-SUPER_ADMIN users can only update doctors
+      // from their hospital. Fail closed when JWT has no hospitalId.
+      if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+        if (!currentUser.hospitalId) {
+          throw new AppError('Your account is not linked to a hospital', 403);
+        }
         if (doctor.hospitalId !== currentUser.hospitalId) {
           throw new AppError('Access denied: Cannot update doctor from another hospital', 403);
         }
       }
 
+      // Build a partial update so callers can ship just the fields they care
+      // about (e.g. only consultationFee from the "set fee" dialog, or only
+      // workingHours from the schedule editor) without nulling everything else.
+      const updateData: any = {};
+      if (data.firstName !== undefined)         updateData.firstName = data.firstName;
+      if (data.lastName !== undefined)          updateData.lastName = data.lastName;
+      if (data.specialization !== undefined)    updateData.specialization = data.specialization;
+      if (data.qualification !== undefined)     updateData.qualification = data.qualification;
+      if (data.mobile !== undefined)            updateData.mobile = data.mobile;
+      if (data.email !== undefined)             updateData.email = data.email;
+      if (data.consultationFee !== undefined)   updateData.consultationFee = data.consultationFee;
+      if (data.workingHours !== undefined)      updateData.workingHours = data.workingHours as any;
+      if (data.slotDuration !== undefined)      updateData.slotDuration = data.slotDuration;
+      if (data.maxPatientsPerDay !== undefined) updateData.maxPatientsPerDay = data.maxPatientsPerDay;
+      if (data.breakTimes !== undefined)        updateData.breakTimes = data.breakTimes as any;
+      if (data.isActive !== undefined)          updateData.isActive = data.isActive;
+
       const updatedDoctor = await prisma.doctor.update({
         where: { id },
-        data: {
-          firstName: data.firstName,
-          lastName: data.lastName,
-          specialization: data.specialization,
-          qualification: data.qualification,
-          mobile: data.mobile,
-          email: data.email,
-          consultationFee: (data as any).consultationFee !== undefined
-            ? (data as any).consultationFee
-            : undefined,
-        },
+        data: updateData,
       });
 
       logger.info('Doctor updated successfully', {
@@ -234,10 +256,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to update doctor', error);
-      throw new AppError(
-        error.message || 'Failed to update doctor',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -249,10 +268,9 @@ export class DoctorService {
 
       const where: any = {};
 
-      // Filter by hospital for non-super-admin users
-      if (currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId) {
-        where.hospitalId = currentUser.hospitalId;
-      }
+      // Effective hospital scope (non-SUPER_ADMIN: their JWT; SUPER_ADMIN
+      // with ?hospitalId=: that hospital; SUPER_ADMIN unscoped: cross-hospital).
+      Object.assign(where, hospitalScope(currentUser));
 
       if (query.search) {
         where.OR = [
@@ -299,10 +317,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to search doctors', error);
-      throw new AppError(
-        error.message || 'Failed to search doctors',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -330,18 +345,16 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to delete doctor', error);
-      throw new AppError(
-        error.message || 'Failed to delete doctor',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
   async getDoctorStats(currentUser?: any) {
     try {
-      const hospitalFilter = currentUser && currentUser.role !== 'SUPER_ADMIN' && currentUser.hospitalId
-        ? { hospitalId: currentUser.hospitalId }
-        : {};
+      // Effective scope is resolved centrally: non-SUPER_ADMIN gets JWT
+      // hospital, SUPER_ADMIN with `?hospitalId=` gets that hospital,
+      // SUPER_ADMIN unscoped → platform-wide (no filter).
+      const hospitalFilter = hospitalScope(currentUser);
 
       const [total, hprLinked] = await Promise.all([
         prisma.doctor.count({ where: hospitalFilter }),
@@ -372,10 +385,7 @@ export class DoctorService {
       };
     } catch (error: any) {
       logger.error('Failed to fetch doctor stats', error);
-      throw new AppError(
-        error.message || 'Failed to fetch doctor stats',
-        error.statusCode || 500
-      );
+      rethrowServiceError(error);
     }
   }
 
@@ -425,15 +435,36 @@ export class DoctorService {
     });
     const patientsSeen = Array.from(patientMap.values()).sort((a, b) => new Date(b.lastVisit).getTime() - new Date(a.lastVisit).getTime());
 
-    // Earnings: sum of collected payments from encounters
+    // Earnings: a doctor only earns the **consultation fee** per encounter,
+    // capped by what the patient actually paid. The encounter's
+    // `paymentCollected` is the *total* money received (consult + lab +
+    // medicine + scan) so summing it whole inflated earnings with pharmacy
+    // and lab revenue that belongs to the hospital's other budgets.
+    //
+    // Standard accounting convention: when a patient makes a partial
+    // payment, the consultation fee is collected first — everything beyond
+    // the consult is operational income (pharmacy/lab/scan) that doesn't
+    // accrue to the doctor.
+    //
+    // Returned alongside totalEarnings so the UI can show the breakdown:
+    //   • totalEarnings  — what the doctor actually earned (capped consult)
+    //   • totalCollected — total cash collected against the doctor's encounters
+    //   • totalAncillary — pharmacy + lab + scan collected (= the gap)
     let totalEarnings = 0;
+    let totalCollected = 0;
     const monthlyEarnings: Record<string, number> = {};
     encounters.forEach((e: any) => {
-      const collected = parseFloat(e.paymentCollected || '0');
-      totalEarnings += collected;
+      const collected   = parseFloat(e.paymentCollected || '0');
+      const consultFee  = parseFloat(e.consultationFee  || '0');
+      // Doctor earns at most the consult fee; if patient paid less, only
+      // what they paid counts.
+      const doctorShare = Math.min(consultFee, collected);
+      totalEarnings  += doctorShare;
+      totalCollected += collected;
       const month = new Date(e.visitDate).toISOString().substring(0, 7);
-      monthlyEarnings[month] = (monthlyEarnings[month] || 0) + collected;
+      monthlyEarnings[month] = (monthlyEarnings[month] || 0) + doctorShare;
     });
+    const totalAncillary = Math.max(0, totalCollected - totalEarnings);
 
     const earningsSummary = Object.entries(monthlyEarnings)
       .map(([month, amount]) => ({ month, amount: Math.round(amount * 100) / 100 }))
@@ -447,7 +478,13 @@ export class DoctorService {
         totalEncounters: encounters.length,
         totalAppointments: appointments.length,
         totalPrescriptions: prescriptions.length,
+        // Doctor's actual earnings (capped consult fee per encounter).
         totalEarnings: Math.round(totalEarnings * 100) / 100,
+        // Total money the front desk collected against this doctor's
+        // encounters — useful as a sanity-check for the breakdown.
+        totalCollected: Math.round(totalCollected * 100) / 100,
+        // Pharmacy + labs + scans collected that DON'T accrue to the doctor.
+        totalAncillary: Math.round(totalAncillary * 100) / 100,
       },
       encounters,
       appointments,
@@ -456,11 +493,12 @@ export class DoctorService {
     };
   }
 
-  async getDoctorAvailability(doctorId: string, date?: string) {
+  async getDoctorAvailability(doctorId: string, date?: string, currentUser?: any) {
     const doctor = await prisma.doctor.findUnique({
       where: { id: doctorId },
       select: {
         id: true, firstName: true, lastName: true, specialization: true, isActive: true,
+        hospitalId: true,
         workingHours: true, slotDuration: true, maxPatientsPerDay: true, breakTimes: true,
         hospital: {
           select: {
@@ -472,9 +510,28 @@ export class DoctorService {
     });
     if (!doctor) throw new AppError('Doctor not found', 404);
 
-    const targetDate = date ? new Date(date) : new Date();
-    const dayStart = new Date(targetDate); dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(targetDate); dayEnd.setHours(23, 59, 59, 999);
+    // Multi-tenant guard: non-SUPER_ADMIN can only see availability for
+    // doctors in their own hospital. Without this, anyone with a UUID can
+    // probe schedules and read patient names from the same-day appointment
+    // list returned below.
+    if (
+      currentUser &&
+      currentUser.role !== 'SUPER_ADMIN' &&
+      currentUser.hospitalId &&
+      doctor.hospitalId !== currentUser.hospitalId
+    ) {
+      throw new AppError('Doctor not found', 404);
+    }
+
+    // Doctor availability for an IST calendar day. Caller may pass a
+    // specific date string ("2026-06-11") or omit it to mean "today".
+    // In both cases we want the IST-day window so a UTC server doesn't
+    // miss the early-morning IST appointments. `targetDate` is the canonical
+    // start-of-IST-day instant, used downstream by the slot generator.
+    const { start: dayStart, end: dayEnd } = date
+      ? istDayRangeOf(date)
+      : istDayRange(0);
+    const targetDate = dayStart;
 
     const appointments = await prisma.appointment.findMany({
       where: {
@@ -528,14 +585,30 @@ export class DoctorService {
     };
   }
 
-  async updateSchedule(doctorId: string, data: {
-    workingHours?: any;
-    slotDuration?: number | null;
-    maxPatientsPerDay?: number;
-    breakTimes?: any;
-  }) {
+  async updateSchedule(
+    doctorId: string,
+    data: {
+      workingHours?: any;
+      slotDuration?: number | null;
+      maxPatientsPerDay?: number;
+      breakTimes?: any;
+    },
+    currentUser?: any,
+  ) {
     const doctor = await prisma.doctor.findUnique({ where: { id: doctorId } });
     if (!doctor) throw new AppError('Doctor not found', 404);
+
+    // Multi-tenant guard: only SUPER_ADMIN, the doctor themselves, or an
+    // ADMIN of the same hospital may update a doctor's schedule.
+    if (currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      const sameHospital =
+        currentUser.hospitalId && doctor.hospitalId === currentUser.hospitalId;
+      const ownProfile =
+        currentUser.role === 'DOCTOR' && currentUser.doctorId === doctor.id;
+      if (!sameHospital && !ownProfile) {
+        throw new AppError('Access denied: Cannot modify another hospital\'s doctor', 403);
+      }
+    }
 
     if (data.slotDuration && ![10, 15, 20, 30, 45, 60].includes(data.slotDuration)) {
       throw new AppError('Slot duration must be 10, 15, 20, 30, 45, or 60 minutes', 400);
@@ -554,11 +627,12 @@ export class DoctorService {
     return { success: true, data: updated, message: 'Doctor schedule updated successfully' };
   }
 
-  async getSchedule(doctorId: string) {
+  async getSchedule(doctorId: string, currentUser?: any) {
     const doctor = await prisma.doctor.findUnique({
       where: { id: doctorId },
       select: {
         id: true, firstName: true, lastName: true,
+        hospitalId: true,
         workingHours: true, slotDuration: true, maxPatientsPerDay: true, breakTimes: true,
         hospital: {
           select: {
@@ -569,6 +643,17 @@ export class DoctorService {
       },
     });
     if (!doctor) throw new AppError('Doctor not found', 404);
+
+    // Multi-tenant guard: non-SUPER_ADMIN may only read schedules for
+    // doctors in their own hospital.
+    if (
+      currentUser &&
+      currentUser.role !== 'SUPER_ADMIN' &&
+      currentUser.hospitalId &&
+      doctor.hospitalId !== currentUser.hospitalId
+    ) {
+      throw new AppError('Doctor not found', 404);
+    }
     return { success: true, data: doctor };
   }
 }

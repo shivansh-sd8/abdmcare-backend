@@ -1,5 +1,6 @@
 import prisma from '../common/config/database';
 import { AppError } from '../common/middleware/errorHandler';
+import { getEffectiveHospitalId } from '../common/utils/scope';
 
 interface CreateVitalsDTO {
   patientId: string;
@@ -18,7 +19,24 @@ interface CreateVitalsDTO {
 }
 
 class VitalsService {
-  async createVitals(data: CreateVitalsDTO) {
+  async createVitals(data: CreateVitalsDTO, currentUser?: any) {
+    // Hospital isolation: verify patient belongs to the user's hospital.
+    // Always run when caller is non-SUPER_ADMIN — fail closed if their JWT
+    // has no hospitalId.
+    if (data.patientId && currentUser && currentUser.role !== 'SUPER_ADMIN') {
+      if (!currentUser.hospitalId) {
+        throw new AppError('Your account is not linked to a hospital', 403);
+      }
+      const patient = await prisma.patient.findUnique({
+        where: { id: data.patientId },
+        select: { hospitalId: true },
+      });
+      if (!patient) throw new AppError('Patient not found', 404);
+      if (patient.hospitalId !== currentUser.hospitalId) {
+        throw new AppError('Access denied: Patient belongs to a different hospital', 403);
+      }
+    }
+
     // Calculate BMI if height and weight are provided
     let bmi = data.bmi;
     if (data.height && data.weight && !bmi) {
@@ -27,13 +45,31 @@ class VitalsService {
       bmi = Math.round(bmi * 10) / 10;
     }
 
-    // Auto-link to the patient's active encounter if not provided
+    // Auto-link to the patient's active encounter if not provided.
+    // We include the most common in-flight states (the visit is "live" until
+    // it transitions to COMPLETED/CANCELLED), so vitals taken during a consult
+    // — even after labs/scans/pharmacy/billing have been triggered — still
+    // attach to the right encounter.
     let encounterId = data.encounterId;
     if (!encounterId && data.patientId) {
       const activeEnc = await prisma.encounter.findFirst({
         where: {
           patientId: data.patientId,
-          status: { in: ['IN_PROGRESS', 'SCHEDULED'] },
+          status: {
+            in: [
+              'SCHEDULED',
+              'CHECKED_IN',
+              'CONSULTING',
+              'LAB_PENDING',
+              'LAB_IN_PROGRESS',
+              'LAB_COMPLETED',
+              'SCAN_PENDING',
+              'SCAN_IN_PROGRESS',
+              'SCAN_COMPLETED',
+              'PHARMACY_PENDING',
+              'BILLING_PENDING',
+            ] as any,
+          },
         },
         orderBy: { visitDate: 'desc' },
         select: { id: true },
@@ -75,18 +111,24 @@ class VitalsService {
   async getAllVitals(filters: {
     patientId?: string;
     encounterId?: string;
+    hospitalId?: string;
     startDate?: Date;
     endDate?: Date;
     page?: number;
     limit?: number;
-  }) {
-    const { patientId, encounterId, startDate, endDate, page = 1, limit = 10 } = filters;
+  }, currentUser?: any) {
+    const { patientId, encounterId, hospitalId, startDate, endDate, page = 1, limit = 10 } = filters;
+
+    // Effective hospital: non-SUPER_ADMIN → JWT; SUPER_ADMIN → global
+    // "viewing as" scope, or explicit ?hospitalId=, otherwise platform-wide.
+    const effectiveHospitalId = getEffectiveHospitalId(currentUser) || hospitalId;
     const pageNum  = parseInt(String(page),  10) || 1;
     const limitNum = parseInt(String(limit), 10) || 10;
 
     const where: any = {};
     if (patientId) where.patientId = patientId;
     if (encounterId) where.encounterId = encounterId;
+    if (effectiveHospitalId) where.patient = { hospitalId: effectiveHospitalId };
 
     if (startDate || endDate) {
       where.recordedAt = {};
