@@ -451,11 +451,46 @@ export class AbhaService {
    */
   async loginVerifyUser(abhaNumber: string, txnId: string, transferToken?: string) {
     try {
+      // ABDM's "Invalid T-token" is opaque — it fires whether the transfer
+      // token is missing, truncated, or expired. The transfer token from
+      // /login/verify is a JWT (typ:"Transfer") that lives only ~300s. Decode
+      // it defensively so we can (a) log exactly what reached us and (b) fail
+      // with a clear, actionable message instead of the raw ABDM 400.
+      const rawToken = (transferToken || '').replace(/^Bearer\s+/i, '').trim();
+      const segments = rawToken ? rawToken.split('.') : [];
+      let tokenExp: number | null = null;
+      let tokenType: string | null = null;
+      if (segments.length === 3) {
+        try {
+          const claims = JSON.parse(Buffer.from(segments[1], 'base64').toString('utf8'));
+          tokenExp = typeof claims.exp === 'number' ? claims.exp : null;
+          tokenType = typeof claims.typ === 'string' ? claims.typ : null;
+        } catch { /* not decodable — leave nulls, logged below */ }
+      }
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expired = tokenExp != null && tokenExp <= nowSec;
+      logger.info('ABHA: [login] → verify/user', {
+        abhaNumberPresent: !!abhaNumber,
+        txnIdPresent: !!txnId,
+        transferTokenPresent: !!rawToken,
+        transferTokenLength: rawToken.length,
+        transferTokenSegments: segments.length,
+        transferTokenType: tokenType,
+        transferTokenExpiresInSec: tokenExp != null ? tokenExp - nowSec : null,
+      });
+
+      if (!rawToken) {
+        throw new AppError('Login session token missing — please re-verify the OTP and try again.', 400);
+      }
+      if (expired) {
+        throw new AppError('Login session expired — please request a new OTP and select the ABHA again.', 400);
+      }
+
       const res = await abdmClient.abhaPost(
         E.profile.loginVerifyUser,
         { ABHANumber: abhaNumber, txnId },
         undefined,
-        transferToken ? { 'T-token': `Bearer ${transferToken.replace(/^Bearer\s+/i, '')}` } : undefined,
+        { 'T-token': `Bearer ${rawToken}` },
       );
       return { token: res.token, refreshToken: res.refreshToken };
     } catch (e) { toAppError(e, 'Failed to select ABHA user'); }
